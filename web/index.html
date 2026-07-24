@@ -549,6 +549,7 @@
               </div>
               <div class="heading-actions">
                 <button class="compact-button" id="system-rescan-button">Rescan connected hardware</button>
+                <button class="compact-button danger" id="shutdown-lumen-button">Shut down Lumen</button>
               </div>
             </div>
             <div class="system-layout">
@@ -719,6 +720,13 @@
         </div>
       </div>
     </dialog>
+
+    <div id="shutdown-screen" class="shutdown-screen hidden">
+      <div class="brand-orbit" aria-hidden="true"><i></i><b></b></div>
+      <h1>Lumen is shut down</h1>
+      <p>Audio processing, DMX output, and the local operator service have stopped.</p>
+      <small>You may close this browser tab. Double-click the Lumen desktop icon to start it again.</small>
+    </div>
 
     <script src="/app.js" defer></script>
   </body>

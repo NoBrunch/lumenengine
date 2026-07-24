@@ -938,6 +938,21 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.start(str(payload.get("mode", "monitor")))
             elif path == "/api/engine/stop":
                 result = app.stop()
+            elif path == "/api/service/shutdown":
+                app.stop()
+                self._json(
+                    HTTPStatus.OK,
+                    {
+                        "shutting_down": True,
+                        "message": "Lumen is shutting down.",
+                    },
+                )
+                threading.Thread(
+                    target=self._shutdown_server,
+                    name="lumen-service-shutdown",
+                    daemon=True,
+                ).start()
+                return
             elif path == "/api/control":
                 result = app.patch_controls(payload)
             elif path == "/api/preset":
@@ -1026,6 +1041,10 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: object) -> None:
         return
+
+    def _shutdown_server(self) -> None:
+        time.sleep(0.15)
+        self.server.shutdown()
 
 
 class LumenHTTPServer(ThreadingHTTPServer):

@@ -902,6 +902,22 @@ async function stopEngine() {
   }
 }
 
+async function shutdownLumen() {
+  const confirmed = window.confirm(
+    "Shut down the Lumen engine and local operator service?"
+  );
+  if (!confirmed) return;
+  try {
+    const result = await api("/api/service/shutdown", { method: "POST", body: {} });
+    window.clearInterval(app.polling);
+    $("shutdown-screen")?.classList.remove("hidden");
+    document.title = "Lumen is shut down";
+    toast("Lumen is shutting down", result.message);
+  } catch (error) {
+    toast("Could not shut down Lumen", error.message, "error");
+  }
+}
+
 async function patchControl(control, value) {
   try {
     app.status = await api("/api/control", { method: "POST", body: { [control]: value } });
@@ -1044,6 +1060,7 @@ function installHandlers() {
 
   $("rescan-system-button")?.addEventListener("click", rescanSystem);
   $("system-rescan-button")?.addEventListener("click", rescanSystem);
+  $("shutdown-lumen-button")?.addEventListener("click", shutdownLumen);
   $("save-audio-device-button")?.addEventListener("click", saveAudioDevice);
   $("spotify-connect-button")?.addEventListener("click", connectSpotify);
   $("copy-remote-address")?.addEventListener("click", async () => {

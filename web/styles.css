@@ -883,6 +883,17 @@ kbd {
   background: linear-gradient(#337e78, #205550);
 }
 
+.compact-button.danger {
+  border-color: #72484c;
+  background: linear-gradient(#553438, #321e21);
+  color: #e3c1c3;
+}
+
+.compact-button.danger:hover {
+  border-color: #a35b61;
+  background: linear-gradient(#6b3b40, #432429);
+}
+
 .compact-button kbd {
   margin-left: 5px;
   min-height: 15px;
@@ -2383,6 +2394,30 @@ dialog::backdrop { background: rgba(0, 0, 0, .68); backdrop-filter: blur(2px); }
 .dialog-body { padding: 13px; }
 .dialog-body p { margin: 0 0 12px; color: #82928f; font-size: 9px; }
 .hotkey-grid.compact { height: auto; border: 1px solid #29373a; }
+
+.shutdown-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  padding: 30px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(48, 118, 114, .16), transparent 28%),
+    #080c0e;
+  text-align: center;
+}
+.shutdown-screen .brand-orbit {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 18px;
+  opacity: .62;
+}
+.shutdown-screen .brand-orbit i { inset: 27px; }
+.shutdown-screen h1 { margin: 0; font-size: 24px; font-weight: 400; }
+.shutdown-screen p { margin: 10px 0 0; color: #8b9e9b; }
+.shutdown-screen small { margin-top: 20px; color: #5e726e; }
 
 .remote-app {
   display: none;
