@@ -1,0 +1,70 @@
+{
+  "name": "Garage development rig",
+  "room": {
+    "width_m": 6.0,
+    "depth_m": 7.0,
+    "height_m": 2.7,
+    "origin_description": "floor center at the front of the room; +Y points toward the back"
+  },
+  "fixtures": [
+    {
+      "id": "moving-left",
+      "name": "Left moving head (example only)",
+      "universe": 0,
+      "address": 1,
+      "position_m": [-1.8, 4.8, 2.35],
+      "housing_rotation_deg": [0.0, 0.0, -90.0],
+      "calibration": {
+        "pan_min_deg": -270.0,
+        "pan_max_deg": 270.0,
+        "tilt_min_deg": -135.0,
+        "tilt_max_deg": 135.0,
+        "pan_offset_deg": 0.0,
+        "tilt_offset_deg": 0.0,
+        "pan_direction": 1,
+        "tilt_direction": 1,
+        "pan_invert_dmx": false,
+        "tilt_invert_dmx": false,
+        "max_pan_speed_deg_s": 180.0,
+        "max_tilt_speed_deg_s": 150.0
+      },
+      "channels": {
+        "pan_coarse": 1,
+        "pan_fine": 2,
+        "tilt_coarse": 3,
+        "tilt_fine": 4,
+        "dimmer": 5
+      }
+    },
+    {
+      "id": "moving-right",
+      "name": "Right moving head (example only)",
+      "universe": 0,
+      "address": 17,
+      "position_m": [1.8, 4.8, 2.35],
+      "housing_rotation_deg": [0.0, 0.0, -90.0],
+      "calibration": {
+        "pan_min_deg": -270.0,
+        "pan_max_deg": 270.0,
+        "tilt_min_deg": -135.0,
+        "tilt_max_deg": 135.0,
+        "pan_offset_deg": 0.0,
+        "tilt_offset_deg": 0.0,
+        "pan_direction": 1,
+        "tilt_direction": 1,
+        "pan_invert_dmx": false,
+        "tilt_invert_dmx": false,
+        "max_pan_speed_deg_s": 180.0,
+        "max_tilt_speed_deg_s": 150.0
+      },
+      "channels": {
+        "pan_coarse": 1,
+        "pan_fine": 2,
+        "tilt_coarse": 3,
+        "tilt_fine": 4,
+        "dimmer": 5
+      }
+    }
+  ]
+}
+

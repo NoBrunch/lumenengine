@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumenengine"
+version = "0.1.0"
+description = "A private, spatial and expressive music-lighting engine"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Private project - all rights reserved"}
+authors = [{name = "David Mack"}]
+dependencies = []
+
+[project.scripts]
+lumen = "lumen_engine.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
