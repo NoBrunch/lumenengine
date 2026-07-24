@@ -3,7 +3,7 @@
 Lumen uses one room coordinate system internally:
 
 * X: room left to room right
-* Y: front of room to back of room
+* Y: front of room to back of room, with the floor center at zero
 * Z: floor to ceiling
 
 Distances are meters, angles are degrees at fixture boundaries, timestamps are
@@ -84,6 +84,12 @@ class FixtureCalibration:
     tilt_direction: int = 1
     pan_invert_dmx: bool = False
     tilt_invert_dmx: bool = False
+    # The reachable mechanical window may cover only part of the fixture's
+    # full DMX travel. These endpoints preserve that calibrated subrange.
+    pan_dmx_min_u16: int = 0
+    pan_dmx_max_u16: int = 65535
+    tilt_dmx_min_u16: int = 0
+    tilt_dmx_max_u16: int = 65535
     max_pan_speed_deg_s: float = 180.0
     max_tilt_speed_deg_s: float = 180.0
 
@@ -98,6 +104,19 @@ class FixtureCalibration:
             raise ValueError("tilt_direction must be -1 or 1")
         if self.max_pan_speed_deg_s <= 0 or self.max_tilt_speed_deg_s <= 0:
             raise ValueError("fixture speeds must be positive")
+        for field_name in (
+            "pan_dmx_min_u16",
+            "pan_dmx_max_u16",
+            "tilt_dmx_min_u16",
+            "tilt_dmx_max_u16",
+        ):
+            value = getattr(self, field_name)
+            if not 0 <= value <= 65535:
+                raise ValueError(f"{field_name} must be in [0, 65535]")
+        if self.pan_dmx_min_u16 == self.pan_dmx_max_u16:
+            raise ValueError("pan DMX endpoints must differ")
+        if self.tilt_dmx_min_u16 == self.tilt_dmx_max_u16:
+            raise ValueError("tilt DMX endpoints must differ")
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,11 +128,40 @@ class FixturePatch:
     position_m: Vec3
     housing_rotation: EulerXYZ
     calibration: FixtureCalibration
+    profile_key: str = "generic_moving_head"
+    source_metadata: dict[str, Any] = field(
+        default_factory=dict, compare=False, repr=False
+    )
     pan_coarse_channel: int = 1
     pan_fine_channel: int | None = 2
     tilt_coarse_channel: int = 3
     tilt_fine_channel: int | None = 4
     dimmer_channel: int | None = 5
+
+    def __post_init__(self) -> None:
+        if not self.fixture_id.strip():
+            raise ValueError("fixture_id must not be empty")
+        if self.universe < 0:
+            raise ValueError("universe must be non-negative")
+        if not 1 <= self.address <= 512:
+            raise ValueError("address must be in [1, 512]")
+
+
+@dataclass(frozen=True, slots=True)
+class ProfileFixturePatch:
+    """A patched non-conventional fixture driven by a declarative profile."""
+
+    fixture_id: str
+    name: str
+    profile_key: str
+    universe: int
+    address: int
+    position_m: Vec3
+    housing_rotation: EulerXYZ
+    options: dict[str, Any] = field(default_factory=dict, compare=False)
+    source_metadata: dict[str, Any] = field(
+        default_factory=dict, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         if not self.fixture_id.strip():
@@ -218,4 +266,3 @@ class Feedback:
     label: str
     value: float
     note: str | None = None
-

@@ -13,8 +13,12 @@ This repository is not connected to a public remote.
 - Alternate mechanical solutions and continuity-aware path choice
 - Fixture movement speed limiting
 - Virtual DMX frame generation
-- Explicitly armed output safety gate
-- Optional Art-Net packet output behind that gate
+- Direct FT232R/Open-DMX output migrated from Party Parrot
+- Optional direct Art-Net packet output
+- Read-only import of Party Parrot's active show database
+- Exact active-garage profiles for the 11-channel RGBW movers and 19-channel
+  rotating multi-effect
+- Party Parrot's stable tempo tracker ported into the dependency-free core
 - Dependency-free ALSA PCM16 capture and first-pass audio features
 - Interpretable energy, tension, motion, and intimacy state
 - Explainable gesture selection
@@ -23,8 +27,8 @@ This repository is not connected to a public remote.
 - Optional Spotify PKCE login and now-playing metadata
 - A complete simulation from musical observations to virtual DMX
 
-No physical DMX command is exposed yet. That is deliberate: fixture profiles and
-calibration must be measured before hardware output is enabled.
+The `live-demo` and `dmx-blackout` commands write directly to the FT232R cable.
+The plain `demo` command remains virtual.
 
 ## Run it without installing anything
 
@@ -33,10 +37,49 @@ cd /home/the-system/Desktop/lumenengine
 ./scripts/lumen demo
 ```
 
+Import the latest active Party Parrot show and run it virtually:
+
+```bash
+./scripts/lumen import-party-parrot
+./scripts/lumen demo --rig config/party-parrot-active.json
+```
+
+Inspect the Open-DMX connection discovered on this computer:
+
+```bash
+./scripts/lumen dmx-devices
+```
+
+Party Parrot currently identifies it as the FT232R/Open-DMX adapter at USB
+`0403:6001`. Lumen uses the installed `libftdi1.so.2` directly and repeats a
+full 512-channel frame at 40 Hz.
+
+Write directly to that interface:
+
+```bash
+# Stop Party Parrot first; the USB device has one owner.
+./scripts/lumen dmx-blackout
+./scripts/lumen live-demo --rig config/party-parrot-active.json --duration 30
+```
+
+Run the current audio-reactive engine continuously from line-in:
+
+```bash
+./scripts/lumen run --rig config/party-parrot-active.json --device default
+```
+
+The optional tty diagnostic fallback is:
+
+```bash
+./scripts/lumen live-demo --driver tty --port /dev/ttyUSB0
+```
+
+It requires `pyserial`; the normal native path does not.
+
 Solve a single room target:
 
 ```bash
-./scripts/lumen target 0 2.5 1.2
+./scripts/lumen target 0 0 1.2 --rig config/party-parrot-active.json
 ```
 
 Run all tests:
@@ -103,19 +146,20 @@ learning a stable category.
 Lumen's internal room coordinates are right-handed and measured in meters:
 
 - X: room left to room right
-- Y: front of room to back of room
+- Y: front of room to back of room, with the floor center at zero
 - Z: floor to ceiling
 
 Fixture housing rotations use intrinsic XYZ Euler order and are stored in
 degrees in the initial JSON configuration. Adapters for other systems are
 responsible for converting their coordinate and rotation conventions.
 
-The example fixture geometry and DMX channels are placeholders. Do not use them
-to drive real equipment.
+`example-rig.json` remains a synthetic development room.
+`party-parrot-active.json` is generated from the real active Party Parrot show.
 
-## Safety boundary
+## Output boundary
 
-The engine is divided so these concerns cannot silently arm one another:
+The engine keeps perception, choreography, fixture realization, and transport
+as separate layers:
 
 ```text
 audio and media identity
@@ -128,14 +172,15 @@ spatial fixture realization
         ↓
 DMX frame
         ↓
-explicit safety gate
+USB Open-DMX or Art-Net transport
         ↓
 physical output
 ```
 
-Future physical output must include an operator-visible armed state, blackout,
-watchdog heartbeat, bounded pan/tilt speed, validated DMX patches, and safe
-startup/shutdown behavior.
+The Open-DMX adapter repeats the latest full 512-channel universe on a dedicated
+40 Hz thread, matching Party Parrot's proven behavior. Only one program can own
+the FT232R device at a time, so stop Party Parrot before running Lumen's direct
+output commands.
 
 See [Architecture](docs/architecture.md) and
 [Roadmap](docs/roadmap.md) for the decisions and next milestones.

@@ -15,6 +15,7 @@ import time
 from lumen_engine.audio import AudioCaptureConfig, AlsaLineIn, RealtimeAudioAnalyzer
 from lumen_engine.config import RigConfig, load_rig
 from lumen_engine.dmx import VirtualDMXOutput
+from lumen_engine.expression import ExpressionEngine, ExpressionPolicy
 from lumen_engine.media import (
     SpotifyNowPlayingProvider,
     SpotifyOAuthPKCE,
@@ -22,11 +23,20 @@ from lumen_engine.media import (
 )
 from lumen_engine.memory import SongMemoryStore
 from lumen_engine.models import Feedback, MediaIdentity, MusicalObservation, Vec3
+from lumen_engine.party_parrot import import_party_parrot_show
 from lumen_engine.runtime import PerformanceRuntime
 from lumen_engine.spatial import SpatialTargetingEngine, UnreachableTargetError
+from lumen_engine.usb_dmx import (
+    OpenDmxUsbOutput,
+    describe_open_dmx_environment,
+)
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_RIG = PROJECT_DIR / "config" / "example-rig.json"
+DEFAULT_PARTY_PARROT_DATABASE = (
+    PROJECT_DIR.parent / "the partied out parrot" / "parrot_cloud.db"
+)
+DEFAULT_IMPORTED_RIG = PROJECT_DIR / "config" / "party-parrot-active.json"
 DEFAULT_MEMORY = PROJECT_DIR / "state" / "lumen.sqlite3"
 DEFAULT_SPOTIFY_TOKEN = (
     Path.home() / ".local" / "state" / "lumenengine" / "spotify-token.json"
@@ -41,13 +51,39 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     demo = subparsers.add_parser(
-        "demo", help="run the safe simulated expression-to-virtual-DMX pipeline"
+        "demo", help="run the simulated expression-to-virtual-DMX pipeline"
     )
     demo.add_argument("--rig", type=Path, default=DEFAULT_RIG)
     demo.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     demo.add_argument("--steps", type=int, default=18)
     demo.add_argument("--realtime", action="store_true")
     demo.set_defaults(handler=_demo)
+
+    live_demo = subparsers.add_parser(
+        "live-demo", help="run the expression demo through the FT232R/Open-DMX cable"
+    )
+    live_demo.add_argument("--rig", type=Path, default=DEFAULT_IMPORTED_RIG)
+    live_demo.add_argument("--duration", type=float, default=15.0)
+    live_demo.add_argument("--driver", choices=("native", "tty"), default="native")
+    live_demo.add_argument("--port")
+    live_demo.set_defaults(handler=_live_demo)
+
+    run = subparsers.add_parser(
+        "run", help="drive the imported rig continuously from ALSA line-in"
+    )
+    run.add_argument("--rig", type=Path, default=DEFAULT_IMPORTED_RIG)
+    run.add_argument("--device", default="default")
+    run.add_argument("--sample-rate", type=int, default=48_000)
+    run.add_argument("--channels", type=int, default=2)
+    run.add_argument(
+        "--duration",
+        type=float,
+        default=0.0,
+        help="seconds to run; zero continues until Ctrl+C",
+    )
+    run.add_argument("--driver", choices=("native", "tty"), default="native")
+    run.add_argument("--port")
+    run.set_defaults(handler=_run_live_audio)
 
     target = subparsers.add_parser(
         "target", help="solve one 3D target for every configured moving head"
@@ -71,6 +107,29 @@ def build_parser() -> argparse.ArgumentParser:
         "audio-devices", help="show ALSA capture hardware and device names"
     )
     devices.set_defaults(handler=_audio_devices)
+
+    dmx_devices = subparsers.add_parser(
+        "dmx-devices", help="show the FT232R/Open-DMX environment"
+    )
+    dmx_devices.set_defaults(handler=_dmx_devices)
+
+    blackout = subparsers.add_parser(
+        "dmx-blackout", help="write a zeroed universe through the FT232R cable"
+    )
+    blackout.add_argument("--driver", choices=("native", "tty"), default="native")
+    blackout.add_argument("--port")
+    blackout.set_defaults(handler=_dmx_blackout)
+
+    import_party = subparsers.add_parser(
+        "import-party-parrot",
+        help="import a Party Parrot show database into a Lumen rig",
+    )
+    import_party.add_argument(
+        "--database", type=Path, default=DEFAULT_PARTY_PARROT_DATABASE
+    )
+    import_party.add_argument("--show", help="show slug; defaults to active show")
+    import_party.add_argument("--output", type=Path, default=DEFAULT_IMPORTED_RIG)
+    import_party.set_defaults(handler=_import_party_parrot)
 
     doctor = subparsers.add_parser(
         "doctor", help="check the local runtime, configuration, and audio visibility"
@@ -145,7 +204,7 @@ def _demo(args: argparse.Namespace) -> int:
         raise ValueError("--steps must be at least 1")
     rig = load_rig(args.rig)
     output = VirtualDMXOutput()
-    runtime = PerformanceRuntime(rig.fixtures, output)
+    runtime = _runtime_for_rig(rig, output)
     memory = SongMemoryStore(args.memory)
     song_id = memory.remember_media(
         MediaIdentity(
@@ -195,6 +254,96 @@ def _demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _live_demo(args: argparse.Namespace) -> int:
+    if args.duration <= 0:
+        raise ValueError("--duration must be positive")
+    rig = load_rig(args.rig)
+    output = OpenDmxUsbOutput.open(driver=args.driver, port=args.port)
+    runtime = _runtime_for_rig(rig, output)
+    steps = max(1, round(args.duration / 0.75))
+    print(
+        f"Open-DMX: {output.status.backend}\n"
+        f"Rig: {rig.name}; {len(rig.fixtures)} moving heads; "
+        f"{len(rig.auxiliary_fixtures)} auxiliary fixtures"
+    )
+    started = time.monotonic()
+    try:
+        for index in range(steps):
+            observation = _synthetic_observation(index, steps)
+            # Use wall-relative time so motion runs at its intended speed.
+            observation = MusicalObservation(
+                timestamp_s=time.monotonic() - started,
+                loudness=observation.loudness,
+                onset_strength=observation.onset_strength,
+                low_energy=observation.low_energy,
+                mid_energy=observation.mid_energy,
+                high_energy=observation.high_energy,
+                beat_phase=observation.beat_phase,
+                beat_confidence=observation.beat_confidence,
+                bpm=observation.bpm,
+                section=observation.section,
+                section_confidence=observation.section_confidence,
+                novelty=observation.novelty,
+            )
+            result = runtime.step(observation)
+            print(
+                f"\r{result.decision.gesture.value:9} "
+                f"energy={result.decision.expression.energy:.2f} "
+                f"frames={output.status.frames_sent}",
+                end="",
+                flush=True,
+            )
+            time.sleep(0.75)
+    finally:
+        runtime.close()
+    print("\nOpen-DMX output closed.")
+    return 0
+
+
+def _run_live_audio(args: argparse.Namespace) -> int:
+    if args.duration < 0:
+        raise ValueError("--duration must be non-negative")
+    rig = load_rig(args.rig)
+    capture_config = AudioCaptureConfig(
+        device=args.device,
+        sample_rate=args.sample_rate,
+        channels=args.channels,
+    )
+    analyzer = RealtimeAudioAnalyzer(
+        capture_config.sample_rate, capture_config.channels
+    )
+    output = OpenDmxUsbOutput.open(driver=args.driver, port=args.port)
+    runtime = _runtime_for_rig(rig, output)
+    started = time.monotonic()
+    print(
+        f"Listening on {capture_config.device!r}; output through "
+        f"{output.status.backend}\n"
+        f"Rig: {rig.name}. Press Ctrl+C to stop."
+    )
+    try:
+        with AlsaLineIn(capture_config) as capture:
+            for pcm in capture.chunks():
+                observation = analyzer.analyze_pcm16(pcm)
+                result = runtime.step(observation)
+                bpm = "—" if observation.bpm is None else f"{observation.bpm:5.1f}"
+                print(
+                    f"\r{result.decision.gesture.value:9} "
+                    f"loud={observation.loudness:.2f} "
+                    f"onset={observation.onset_strength:.2f} "
+                    f"bpm={bpm} "
+                    f"confidence={observation.beat_confidence:.2f} "
+                    f"dmx_frames={output.status.frames_sent}",
+                    end="",
+                    flush=True,
+                )
+                if args.duration and time.monotonic() - started >= args.duration:
+                    break
+    finally:
+        runtime.close()
+    print("\nLine-in performance stopped.")
+    return 0
+
+
 def _synthetic_observation(index: int, total: int) -> MusicalObservation:
     progress = index / max(total - 1, 1)
     timestamp = index * 0.75
@@ -227,6 +376,28 @@ def _synthetic_observation(index: int, total: int) -> MusicalObservation:
         section=section,
         section_confidence=section_confidence,
         novelty=0.82 if section == "drop" else 0.25 + 0.30 * progress,
+    )
+
+
+def _runtime_for_rig(
+    rig: RigConfig, output: VirtualDMXOutput | OpenDmxUsbOutput
+) -> PerformanceRuntime:
+    width_target = max(0.25, rig.room.width_m * 0.35)
+    center_height = min(1.2, rig.room.height_m * 0.45)
+    policy = ExpressionPolicy(
+        room_center=Vec3(0.0, 0.0, center_height),
+        room_high=Vec3(0.0, 0.0, min(rig.room.height_m * 0.82, 2.4)),
+        room_wide=Vec3(
+            width_target,
+            0.0,
+            min(rig.room.height_m * 0.52, 1.4),
+        ),
+    )
+    return PerformanceRuntime(
+        rig.fixtures,
+        output,
+        auxiliary_fixtures=rig.auxiliary_fixtures,
+        expression=ExpressionEngine(policy),
     )
 
 
@@ -294,6 +465,45 @@ def _audio_devices(_: argparse.Namespace) -> int:
     return 0
 
 
+def _dmx_devices(_: argparse.Namespace) -> int:
+    report = describe_open_dmx_environment()
+    print(json.dumps(report, indent=2))
+    if report["native_driver_ready"]:
+        print("Native libftdi transport is installed.")
+    else:
+        print("libftdi1 was not found.")
+    return 0
+
+
+def _dmx_blackout(args: argparse.Namespace) -> int:
+    output = OpenDmxUsbOutput.open(driver=args.driver, port=args.port)
+    try:
+        output.blackout()
+        time.sleep(0.15)
+        status = output.status
+        print(
+            f"Zeroed universe {status.universe} through {status.backend}; "
+            f"{status.frames_sent} frames sent."
+        )
+    finally:
+        output.close()
+    return 0
+
+
+def _import_party_parrot(args: argparse.Namespace) -> int:
+    imported = import_party_parrot_show(args.database, args.show)
+    imported.write_lumen_rig(args.output)
+    print(
+        f"Imported {imported.name!r} revision {imported.revision}: "
+        f"{len(imported.fixtures)} fixtures, "
+        f"{len(imported.moving_heads)} spatial moving heads."
+    )
+    print(f"Wrote {args.output}")
+    for warning in imported.warnings:
+        print(f"warning: {warning}")
+    return 0
+
+
 def _doctor(args: argparse.Namespace) -> int:
     checks: list[tuple[str, bool, str]] = []
     checks.append(
@@ -335,12 +545,32 @@ def _doctor(args: argparse.Namespace) -> int:
                 else "none reported",
             )
         )
+    dmx_environment = describe_open_dmx_environment()
+    ftdi_devices = dmx_environment["ft232r_devices"]
+    checks.append(
+        (
+            "Open-DMX library",
+            bool(dmx_environment["native_driver_ready"]),
+            str(dmx_environment["libftdi1"] or "libftdi1 not found"),
+        )
+    )
+    checks.append(
+        (
+            "FT232R adapter",
+            bool(ftdi_devices),
+            (
+                str(ftdi_devices[0].get("usb_path", "detected"))
+                if isinstance(ftdi_devices, list) and ftdi_devices
+                else "not visible"
+            ),
+        )
+    )
     failed = False
     for name, ok, detail in checks:
         failed |= not ok
         print(f"{'OK' if ok else 'NOT READY':9} {name:18} {detail}")
     print()
-    print("Physical DMX remains disabled; the current runnable path is virtual output.")
+    print("Virtual `demo` and direct `run`/`live-demo` output paths are available.")
     return 1 if failed else 0
 
 

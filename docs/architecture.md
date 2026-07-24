@@ -9,11 +9,15 @@ required to leave the PC.
 The current modules are:
 
 - `audio`: line-in capture and musical observations
+- `beat`: dependency-free port of Party Parrot's stable tempo tracker
 - `media`: optional recording identity providers
 - `memory`: private song and performance knowledge
 - `expression`: interpretable expressive state and gesture policy
 - `spatial`: calibrated 3D inverse kinematics
 - `dmx`: frame realization and isolated outputs
+- `usb_dmx`: native libftdi and tty Open-DMX transports
+- `profiles`: fixture capabilities and channel layouts
+- `party_parrot`: read-only show database importer
 - `runtime`: one-way coordination of the above
 - `config`: validated room, fixture, calibration, and patch data
 
@@ -25,7 +29,7 @@ line-in establish beat and onset timing.
 
 Runtime work will eventually be separated into bounded loops:
 
-1. DMX output and watchdog
+1. DMX output
 2. Audio capture and time stamping
 3. Live feature extraction
 4. Gesture planning and spatial realization
@@ -46,7 +50,12 @@ z = sin(tilt)
 
 Fixture calibration supplies mechanical offsets, axis directions, limits, DMX
 inversion, and speed limits. Housing rotation maps that fixture-local direction
-into the room. Model-specific calibration is required before physical use.
+into the room.
+
+Party Parrot imports anchor each fixture's saved home DMX values to room center,
+then preserve its saved room endpoints as the reachable mechanical/DMX window.
+Further measurements can refine that bootstrap calibration without changing the
+solver.
 
 ## Learning boundary
 
@@ -61,5 +70,4 @@ Learning should initially adjust understandable preferences:
 - repetition tolerance
 
 It should learn semantic decisions, not raw DMX bytes. Geometry, constraints,
-output encoding, and safety remain deterministic.
-
+output encoding, and hardware transport remain deterministic.

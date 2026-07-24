@@ -9,15 +9,17 @@
 - Private song memory
 - Virtual DMX
 - Audio and Spotify adapters
+- FT232R/Open-DMX transport from Party Parrot
+- Party Parrot active-show importer and fixture registry
+- Stable Party Parrot tempo tracker
 - Tests and diagnostics
 
 ## Milestone 1 — measure the real system
 
 - Identify the ALSA line-in device and stable device name
-- Identify the FT232R/DMX interface precisely
-- Inventory every fixture model and mode
-- Enter actual DMX channel maps
-- Measure mounting positions and housing rotations
+- Confirm the imported active-show fixture inventory against the room
+- Fill exact channel semantics for archived-show fixture profiles as needed
+- Confirm imported mounting positions and housing rotations
 - Calibrate pan/tilt zero, direction, range, and latency
 - Add a calibration UI that never requires hand-editing JSON
 
@@ -39,14 +41,12 @@
 - Semantic routine editor
 - Explanation and confidence history
 
-## Milestone 4 — guarded physical operation
+## Milestone 4 — dependable direct operation
 
-- Validated USB DMX adapter
-- Dedicated fixed-rate output process
-- Hardware blackout path
-- Watchdog and stale-frame fallback
-- Output arming with an obvious persistent indicator
-- Soft movement limits and restricted target zones
+- Reconnect behavior after unplug/replug
+- Dedicated fixed-rate output process if thread isolation proves insufficient
+- Operator blackout and channel inspection
+- Fixture-specific motion timing
 - Long-duration soak testing
 
 ## Milestone 5 — personal learning
@@ -56,4 +56,3 @@
 - Related-recording handling
 - Learned gesture ranking
 - Small CPU-optimized temporal model if it outperforms the authored baseline
-

@@ -11,11 +11,16 @@ from lumen_engine.dmx import (
     apply_moving_head_solution,
 )
 from lumen_engine.expression import ExpressionEngine
+from lumen_engine.fixture_output import (
+    apply_auxiliary_fixture,
+    apply_moving_head_profile,
+)
 from lumen_engine.models import (
     FixturePatch,
     Gesture,
     MusicalObservation,
     PerformanceDecision,
+    ProfileFixturePatch,
     Vec3,
     clamp,
 )
@@ -39,11 +44,13 @@ class PerformanceRuntime:
         self,
         fixtures: tuple[FixturePatch, ...],
         output: DMXOutput,
+        auxiliary_fixtures: tuple[ProfileFixturePatch, ...] = (),
         expression: ExpressionEngine | None = None,
         targeting: SpatialTargetingEngine | None = None,
     ) -> None:
         self.fixtures = fixtures
         self.output = output
+        self.auxiliary_fixtures = auxiliary_fixtures
         self.expression = expression or ExpressionEngine()
         self.targeting = targeting or SpatialTargetingEngine()
         self._previous: dict[str, tuple[float, float]] = {}
@@ -80,8 +87,12 @@ class PerformanceRuntime:
                 apply_moving_head_solution(
                     frame, fixture, solution, decision.brightness
                 )
+                apply_moving_head_profile(frame, fixture, decision)
             except UnreachableTargetError as error:
                 warnings.append(str(error))
+
+        for fixture in self.auxiliary_fixtures:
+            apply_auxiliary_fixture(frame, fixture, decision)
 
         self.output.send(frame)
         self._last_timestamp_s = observation.timestamp_s
@@ -103,13 +114,13 @@ class PerformanceRuntime:
         phase = decision.timestamp_s
         if decision.gesture == Gesture.SWEEP:
             return Vec3(
-                2.2 * math.sin(phase * 0.9),
+                abs(target.x) * math.sin(phase * 0.9),
                 target.y,
-                target.z + 0.35 * math.sin(phase * 0.45),
+                target.z + 0.175 * (1.0 + math.sin(phase * 0.45)),
             )
         if decision.gesture == Gesture.EXPAND:
             side = -1.0 if index % 2 == 0 else 1.0
-            return Vec3(side * 1.8, target.y, target.z)
+            return Vec3(side * abs(target.x), target.y, target.z)
         if decision.gesture == Gesture.BREATHE:
             return Vec3(
                 target.x,
@@ -152,4 +163,3 @@ class PerformanceRuntime:
             aim_error_deg=error,
             branch=solution.branch + "/rate-limited",
         )
-

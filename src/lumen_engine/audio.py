@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 from array import array
-from collections import deque
 from dataclasses import dataclass
 import math
-import statistics
 import subprocess
 import sys
 import time
 from typing import Iterator
 
 from lumen_engine.models import MusicalObservation, clamp
+from lumen_engine.beat import BeatTracker
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,8 +33,7 @@ class RealtimeAudioAnalyzer:
         self.sample_rate = sample_rate
         self.channels = channels
         self._previous_loudness = 0.0
-        self._last_beat_at: float | None = None
-        self._beat_intervals: deque[float] = deque(maxlen=12)
+        self._beat_tracker = BeatTracker()
         self._noise_floor = 0.005
 
     def analyze_pcm16(
@@ -61,7 +59,10 @@ class RealtimeAudioAnalyzer:
         self._previous_loudness = loudness
 
         low, mid, high = self._spectral_proportions(mono)
-        beat_confidence, bpm, beat_phase = self._update_beat(timestamp, onset, loudness)
+        beat_state = self._beat_tracker.update(low * loudness, now=timestamp)
+        bpm = beat_state.bpm or None
+        beat_confidence = beat_state.confidence
+        beat_phase = (beat_state.bar_progress * 4.0) % 1.0
         novelty = clamp(0.65 * onset + 0.35 * abs(high - low), 0.0, 1.0)
         return MusicalObservation(
             timestamp_s=timestamp,
@@ -115,38 +116,6 @@ class RealtimeAudioAnalyzer:
             + previous * previous
             - coefficient * previous * previous_two,
         )
-
-    def _update_beat(
-        self, timestamp: float, onset: float, loudness: float
-    ) -> tuple[float, float | None, float]:
-        is_candidate = onset >= 0.42 and loudness >= 0.08
-        if is_candidate and (
-            self._last_beat_at is None or timestamp - self._last_beat_at >= 0.28
-        ):
-            if self._last_beat_at is not None:
-                interval = timestamp - self._last_beat_at
-                if 0.28 <= interval <= 1.2:
-                    self._beat_intervals.append(interval)
-            self._last_beat_at = timestamp
-
-        bpm: float | None = None
-        confidence = 0.0
-        phase = 0.0
-        if self._beat_intervals:
-            interval = statistics.median(self._beat_intervals)
-            bpm = 60.0 / interval
-            spread = (
-                statistics.pstdev(self._beat_intervals)
-                if len(self._beat_intervals) > 1
-                else interval
-            )
-            consistency = 1.0 - clamp(spread / max(interval, 1e-6), 0.0, 1.0)
-            confidence = clamp(
-                len(self._beat_intervals) / 6.0 * 0.7 + consistency * 0.3, 0, 1
-            )
-            if self._last_beat_at is not None:
-                phase = ((timestamp - self._last_beat_at) / interval) % 1.0
-        return confidence, bpm, phase
 
     @staticmethod
     def _silence_observation(timestamp: float) -> MusicalObservation:
@@ -217,4 +186,3 @@ class AlsaLineIn:
 
     def __exit__(self, *_: object) -> None:
         self.close()
-

@@ -4,7 +4,7 @@
     "width_m": 6.0,
     "depth_m": 7.0,
     "height_m": 2.7,
-    "origin_description": "floor center at the front of the room; +Y points toward the back"
+    "origin_description": "floor center; +Y points toward the back"
   },
   "fixtures": [
     {
@@ -12,7 +12,7 @@
       "name": "Left moving head (example only)",
       "universe": 0,
       "address": 1,
-      "position_m": [-1.8, 4.8, 2.35],
+      "position_m": [-1.8, 2.8, 2.35],
       "housing_rotation_deg": [0.0, 0.0, -90.0],
       "calibration": {
         "pan_min_deg": -270.0,
@@ -41,7 +41,7 @@
       "name": "Right moving head (example only)",
       "universe": 0,
       "address": 17,
-      "position_m": [1.8, 4.8, 2.35],
+      "position_m": [1.8, 2.8, 2.35],
       "housing_rotation_deg": [0.0, 0.0, -90.0],
       "calibration": {
         "pan_min_deg": -270.0,
@@ -67,4 +67,3 @@
     }
   ]
 }
-

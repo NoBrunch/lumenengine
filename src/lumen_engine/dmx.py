@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import socket
 import struct
-import threading
 import time
 from typing import Protocol
 
@@ -50,11 +49,18 @@ class DMXFrame:
         return copied
 
 
-def _angle_to_u16(value: float, minimum: float, maximum: float, invert: bool) -> int:
+def _angle_to_u16(
+    value: float,
+    minimum: float,
+    maximum: float,
+    dmx_min: int,
+    dmx_max: int,
+    invert: bool,
+) -> int:
     normalized = clamp((value - minimum) / (maximum - minimum), 0.0, 1.0)
     if invert:
         normalized = 1.0 - normalized
-    return round(normalized * 65535.0)
+    return round(dmx_min + normalized * (dmx_max - dmx_min))
 
 
 def _set_u16(
@@ -81,12 +87,16 @@ def apply_moving_head_solution(
         solution.pan_deg,
         calibration.pan_min_deg,
         calibration.pan_max_deg,
+        calibration.pan_dmx_min_u16,
+        calibration.pan_dmx_max_u16,
         calibration.pan_invert_dmx,
     )
     tilt = _angle_to_u16(
         solution.tilt_deg,
         calibration.tilt_min_deg,
         calibration.tilt_max_deg,
+        calibration.tilt_dmx_min_u16,
+        calibration.tilt_dmx_max_u16,
         calibration.tilt_invert_dmx,
     )
     _set_u16(
@@ -136,60 +146,11 @@ class VirtualDMXOutput:
         return
 
 
-class OutputSafetyGate:
-    """Physical output requires explicit arming and a live heartbeat."""
-
-    def __init__(self, output: DMXOutput, watchdog_timeout_s: float = 1.0) -> None:
-        if watchdog_timeout_s <= 0:
-            raise ValueError("watchdog_timeout_s must be positive")
-        self.output = output
-        self.watchdog_timeout_s = watchdog_timeout_s
-        self._armed = False
-        self._last_heartbeat = 0.0
-        self._lock = threading.Lock()
-
-    @property
-    def armed(self) -> bool:
-        with self._lock:
-            return self._armed
-
-    def arm(self) -> None:
-        with self._lock:
-            self._armed = True
-            self._last_heartbeat = time.monotonic()
-
-    def disarm(self, blackout: bool = True) -> None:
-        with self._lock:
-            self._armed = False
-            if blackout:
-                self.output.send(DMXFrame())
-
-    def heartbeat(self) -> None:
-        with self._lock:
-            self._last_heartbeat = time.monotonic()
-
-    def send(self, frame: DMXFrame) -> bool:
-        with self._lock:
-            alive = (
-                self._armed
-                and time.monotonic() - self._last_heartbeat
-                <= self.watchdog_timeout_s
-            )
-            if not alive:
-                return False
-            self.output.send(frame)
-            return True
-
-    def close(self) -> None:
-        self.disarm(blackout=True)
-        self.output.close()
-
-
 class ArtNetOutput:
     """Minimal ArtDMX sender.
 
-    Constructing this class does not send anything. Place it behind
-    OutputSafetyGate and arm it explicitly before use.
+    Constructing this class does not send anything; each `send` publishes the
+    supplied universes immediately.
     """
 
     def __init__(self, host: str, port: int = 6454) -> None:
@@ -214,4 +175,3 @@ class ArtNetOutput:
 
     def close(self) -> None:
         self._socket.close()
-

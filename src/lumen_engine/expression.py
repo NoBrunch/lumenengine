@@ -25,9 +25,9 @@ def _smooth(previous: float, current: float, attack: float, release: float) -> f
 
 @dataclass(frozen=True, slots=True)
 class ExpressionPolicy:
-    room_center: Vec3 = Vec3(0.0, 2.5, 1.2)
-    room_high: Vec3 = Vec3(0.0, 3.5, 2.4)
-    room_wide: Vec3 = Vec3(2.0, 3.0, 1.4)
+    room_center: Vec3 = Vec3(0.0, 0.0, 1.2)
+    room_high: Vec3 = Vec3(0.0, 0.0, 2.4)
+    room_wide: Vec3 = Vec3(2.0, 0.0, 1.4)
     minimum_gesture_hold_s: float = 1.5
     release_onset_threshold: float = 0.82
     high_energy_threshold: float = 0.68

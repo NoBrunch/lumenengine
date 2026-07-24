@@ -12,6 +12,9 @@ license = {text = "Private project - all rights reserved"}
 authors = [{name = "David Mack"}]
 dependencies = []
 
+[project.optional-dependencies]
+tty = ["pyserial>=3.5"]
+
 [project.scripts]
 lumen = "lumen_engine.cli:main"
 
@@ -20,4 +23,3 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

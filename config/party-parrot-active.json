@@ -1,0 +1,357 @@
+{
+  "name": "party time (imported from Party Parrot)",
+  "source": {
+    "kind": "party_parrot_sqlite",
+    "database": "/home/the-system/Desktop/the partied out parrot/parrot_cloud.db",
+    "show_id": "bad06e5b-1dc4-4372-9b88-620b4eace33d",
+    "slug": "party-time",
+    "revision": 1759
+  },
+  "room": {
+    "width_m": 2.743200000010973,
+    "depth_m": 10.972800000043891,
+    "height_m": 10.0,
+    "origin_description": "Party Parrot floor center; +Y points from the audience/front toward the back/upstage"
+  },
+  "fixtures": [
+    {
+      "id": "92691689-2c32-4136-8daa-a3ca27fab9af",
+      "name": "Generic RGBW Moving Head (11ch)",
+      "profile_key": "generic_rgbw_moving_head_11ch",
+      "universe": 0,
+      "address": 43,
+      "position_m": [
+        -0.8875317729890493,
+        -4.72359728440726,
+        2.982192963808136
+      ],
+      "housing_rotation_deg": [
+        180.0,
+        0.0,
+        90.0
+      ],
+      "calibration": {
+        "pan_min_deg": 182.11764705882354,
+        "pan_max_deg": 262.5882352941176,
+        "tilt_min_deg": 105.88235294117646,
+        "tilt_max_deg": 243.52941176470588,
+        "pan_offset_deg": 389.5938772427982,
+        "tilt_offset_deg": 223.1842778394265,
+        "pan_direction": 1,
+        "tilt_direction": 1,
+        "pan_invert_dmx": false,
+        "tilt_invert_dmx": false,
+        "pan_dmx_min_u16": 22102,
+        "pan_dmx_max_u16": 31868,
+        "tilt_dmx_min_u16": 25700,
+        "tilt_dmx_max_u16": 59110,
+        "max_pan_speed_deg_s": 180.0,
+        "max_tilt_speed_deg_s": 180.0
+      },
+      "channels": {
+        "pan_coarse": 1,
+        "pan_fine": 2,
+        "tilt_coarse": 3,
+        "tilt_fine": 4,
+        "dimmer": 6
+      },
+      "source_metadata": {
+        "source": "party_parrot",
+        "fixture_type": "generic_rgbw_moving_head_11ch",
+        "group_name": "Movers",
+        "universe_name": "default",
+        "options": {
+          "home_pan_dmx": 104,
+          "home_tilt_dmx": 230,
+          "pan_lower": 186.35294117647058,
+          "pan_upper": 326.11764705882354,
+          "room_pan_left_dmx": 86,
+          "room_pan_right_dmx": 124,
+          "room_tilt_high_dmx": 230,
+          "room_tilt_low_dmx": 100,
+          "tilt_lower": 96.3529411764706,
+          "tilt_upper": 216
+        }
+      }
+    },
+    {
+      "id": "333c548d-9a99-42d3-b395-53e9f1c493ea",
+      "name": "Generic RGBW Moving Head (11ch)",
+      "profile_key": "generic_rgbw_moving_head_11ch",
+      "universe": 0,
+      "address": 31,
+      "position_m": [
+        0.8836019441960685,
+        4.267853915745304,
+        3.217764607421238
+      ],
+      "housing_rotation_deg": [
+        180.0,
+        0.0,
+        -180.0
+      ],
+      "calibration": {
+        "pan_min_deg": 171.52941176470588,
+        "pan_max_deg": 271.05882352941177,
+        "tilt_min_deg": 18.0,
+        "tilt_max_deg": 164.1176470588235,
+        "pan_offset_deg": 116.52059290877683,
+        "tilt_offset_deg": 101.07772527925059,
+        "pan_direction": -1,
+        "tilt_direction": -1,
+        "pan_invert_dmx": false,
+        "tilt_invert_dmx": false,
+        "pan_dmx_min_u16": 20817,
+        "pan_dmx_max_u16": 32896,
+        "tilt_dmx_min_u16": 4369,
+        "tilt_dmx_max_u16": 39835,
+        "max_pan_speed_deg_s": 180.0,
+        "max_tilt_speed_deg_s": 180.0
+      },
+      "channels": {
+        "pan_coarse": 1,
+        "pan_fine": 2,
+        "tilt_coarse": 3,
+        "tilt_fine": 4,
+        "dimmer": 6
+      },
+      "source_metadata": {
+        "source": "party_parrot",
+        "fixture_type": "generic_rgbw_moving_head_11ch",
+        "group_name": "Movers",
+        "universe_name": "default",
+        "options": {
+          "home_pan_dmx": 92,
+          "home_tilt_dmx": 72,
+          "pan_lower": 0,
+          "pan_upper": 139.76470588235296,
+          "room_pan_left_dmx": 128,
+          "room_pan_right_dmx": 81,
+          "room_tilt_high_dmx": 17,
+          "room_tilt_low_dmx": 155,
+          "tilt_lower": 76.23529411764706,
+          "tilt_upper": 213.88235294117646
+        }
+      }
+    }
+  ],
+  "auxiliary_fixtures": [
+    {
+      "id": "67fe6358-8b04-4862-834e-79b88ddcc027",
+      "name": "Triple-Emitter Rotating Multi Effect (19ch)",
+      "profile_key": "generic_multi_effect_19ch",
+      "universe": 0,
+      "address": 1,
+      "position_m": [
+        0.13106472908254263,
+        -0.40822019287153843,
+        3.465474977788668
+      ],
+      "housing_rotation_deg": [
+        180.0,
+        0.0,
+        90.0
+      ],
+      "options": {
+        "pan_lower": 0.0,
+        "pan_upper": 540.0,
+        "tilt_lower": 0.0,
+        "tilt_upper": 270.0
+      },
+      "source_metadata": {
+        "source": "party_parrot",
+        "fixture_type": "generic_multi_effect_19ch",
+        "group_name": null,
+        "universe_name": "default"
+      }
+    }
+  ],
+  "party_parrot_fixtures": [
+    {
+      "id": "67fe6358-8b04-4862-834e-79b88ddcc027",
+      "fixture_type": "generic_multi_effect_19ch",
+      "name": "Triple-Emitter Rotating Multi Effect (19ch)",
+      "group_name": null,
+      "is_manual": false,
+      "universe_name": "default",
+      "universe": 0,
+      "address": 1,
+      "position_m": [
+        0.13106472908254263,
+        -0.40822019287153843,
+        3.465474977788668
+      ],
+      "housing_rotation_deg": [
+        180.0,
+        0.0,
+        90.0
+      ],
+      "options": {
+        "pan_lower": 0.0,
+        "pan_upper": 540.0,
+        "tilt_lower": 0.0,
+        "tilt_upper": 270.0
+      },
+      "profile": {
+        "key": "generic_multi_effect_19ch",
+        "label": "Triple-Emitter Rotating Multi Effect (19ch)",
+        "dmx_footprint": 19,
+        "channels": {
+          "body_rotation": 1,
+          "body_rotation_speed": 2,
+          "arm_1_motor": 3,
+          "arm_2_motor": 4,
+          "master_dimmer": 5,
+          "strobe": 6,
+          "magic_ball_red": 7,
+          "magic_ball_green": 8,
+          "magic_ball_blue": 9,
+          "magic_ball_white": 10,
+          "arm_beams_red": 11,
+          "arm_beams_green": 12,
+          "arm_beams_blue": 13,
+          "arm_beams_white": 14,
+          "red_laser": 15,
+          "green_laser": 16,
+          "strip_program": 17,
+          "strip_speed": 18,
+          "macro": 19
+        },
+        "motion_kind": "rotating_multi_effect",
+        "pan_degrees": 300.0,
+        "tilt_degrees": 180.0,
+        "capabilities": [
+          "body_rotation",
+          "dual_arm",
+          "dimmer",
+          "strobe",
+          "rgbw",
+          "laser",
+          "strip",
+          "macro"
+        ]
+      }
+    },
+    {
+      "id": "92691689-2c32-4136-8daa-a3ca27fab9af",
+      "fixture_type": "generic_rgbw_moving_head_11ch",
+      "name": "Generic RGBW Moving Head (11ch)",
+      "group_name": "Movers",
+      "is_manual": false,
+      "universe_name": "default",
+      "universe": 0,
+      "address": 43,
+      "position_m": [
+        -0.8875317729890493,
+        -4.72359728440726,
+        2.982192963808136
+      ],
+      "housing_rotation_deg": [
+        180.0,
+        0.0,
+        90.0
+      ],
+      "options": {
+        "home_pan_dmx": 104,
+        "home_tilt_dmx": 230,
+        "pan_lower": 186.35294117647058,
+        "pan_upper": 326.11764705882354,
+        "room_pan_left_dmx": 86,
+        "room_pan_right_dmx": 124,
+        "room_tilt_high_dmx": 230,
+        "room_tilt_low_dmx": 100,
+        "tilt_lower": 96.3529411764706,
+        "tilt_upper": 216
+      },
+      "profile": {
+        "key": "generic_rgbw_moving_head_11ch",
+        "label": "Generic RGBW Moving Head (11ch)",
+        "dmx_footprint": 11,
+        "channels": {
+          "pan_coarse": 1,
+          "pan_fine": 2,
+          "tilt_coarse": 3,
+          "tilt_fine": 4,
+          "movement_speed": 5,
+          "dimmer": 6,
+          "strobe": 7,
+          "red": 8,
+          "green": 9,
+          "blue": 10,
+          "white": 11
+        },
+        "motion_kind": "moving_head",
+        "pan_degrees": 540.0,
+        "tilt_degrees": 270.0,
+        "capabilities": [
+          "pan",
+          "tilt",
+          "dimmer",
+          "strobe",
+          "rgbw"
+        ]
+      }
+    },
+    {
+      "id": "333c548d-9a99-42d3-b395-53e9f1c493ea",
+      "fixture_type": "generic_rgbw_moving_head_11ch",
+      "name": "Generic RGBW Moving Head (11ch)",
+      "group_name": "Movers",
+      "is_manual": false,
+      "universe_name": "default",
+      "universe": 0,
+      "address": 31,
+      "position_m": [
+        0.8836019441960685,
+        4.267853915745304,
+        3.217764607421238
+      ],
+      "housing_rotation_deg": [
+        180.0,
+        0.0,
+        -180.0
+      ],
+      "options": {
+        "home_pan_dmx": 92,
+        "home_tilt_dmx": 72,
+        "pan_lower": 0,
+        "pan_upper": 139.76470588235296,
+        "room_pan_left_dmx": 128,
+        "room_pan_right_dmx": 81,
+        "room_tilt_high_dmx": 17,
+        "room_tilt_low_dmx": 155,
+        "tilt_lower": 76.23529411764706,
+        "tilt_upper": 213.88235294117646
+      },
+      "profile": {
+        "key": "generic_rgbw_moving_head_11ch",
+        "label": "Generic RGBW Moving Head (11ch)",
+        "dmx_footprint": 11,
+        "channels": {
+          "pan_coarse": 1,
+          "pan_fine": 2,
+          "tilt_coarse": 3,
+          "tilt_fine": 4,
+          "movement_speed": 5,
+          "dimmer": 6,
+          "strobe": 7,
+          "red": 8,
+          "green": 9,
+          "blue": 10,
+          "white": 11
+        },
+        "motion_kind": "moving_head",
+        "pan_degrees": 540.0,
+        "tilt_degrees": 270.0,
+        "capabilities": [
+          "pan",
+          "tilt",
+          "dimmer",
+          "strobe",
+          "rgbw"
+        ]
+      }
+    }
+  ],
+  "import_warnings": []
+}
