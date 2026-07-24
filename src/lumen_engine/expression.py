@@ -155,3 +155,8 @@ class ExpressionEngine:
             reason=reason,
             confidence=confidence,
         )
+
+    def request_fresh_gesture(self) -> None:
+        """Allow the next observation to reconsider the current visual idea."""
+
+        self._last_gesture_at = float("-inf")

@@ -6,7 +6,32 @@ Ubuntu PC in a garage audio system. It is a separate project from Party Parrot.
 
 This repository is not connected to a public remote.
 
-## What works in the first foundation
+## Start Lumen
+
+Normal operation does not use the command line. Double-click **Lumen Engine**
+on the Ubuntu desktop. It starts the local operator service and opens the
+desktop console in the default browser.
+
+The application has two purpose-built surfaces:
+
+- **Desktop console** at `http://127.0.0.1:4042/`: live performance state,
+  room and fixture editing, beam solving, DMX patching, calibration, audio
+  analysis, song memory, hardware status, logs, and keyboard controls.
+- **Phone/tablet remote** at `http://<this-computer-ip>:4042/remote`: current
+  song and gesture, performance influence, quick character presets, feedback,
+  notes, and blackout. The System page displays the exact address for this PC.
+
+The desktop console has three start modes:
+
+- **Monitor** listens to line-in and runs the entire engine through virtual
+  output.
+- **Perform** listens to line-in and drives the FT232R/Open-DMX interface.
+- **Demo** runs a built-in musical demonstration so the interface and resolver
+  can be exercised without playing audio or opening the DMX adapter.
+
+The command-line tools below remain available for development and diagnostics.
+
+## What works
 
 - Meter-based, Z-up room and fixture configuration
 - Calibrated 3D target-to-pan/tilt solving
@@ -26,6 +51,11 @@ This repository is not connected to a public remote.
 - Provider-neutral media identity
 - Optional Spotify PKCE login and now-playing metadata
 - A complete simulation from musical observations to virtual DMX
+- A dark, KDE-inspired technical desktop console with hotkeys
+- A responsive phone/tablet influence and feedback remote
+- Live room/beam visualization, target solving, patch and calibration editing
+- Audio scope, rhythm lock, expression meters, event log, and DMX heatmap
+- One-click desktop launcher
 
 The `live-demo` and `dmx-blackout` commands write directly to the FT232R cable.
 The plain `demo` command remains virtual.

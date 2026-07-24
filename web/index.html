@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#11191c">
+    <title>Lumen Engine</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div id="loading-screen">
+      <div class="loading-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div>
+        <strong>Lumen Engine</strong>
+        <small>Opening operator console…</small>
+      </div>
+    </div>
+
+    <div id="toast-stack" aria-live="polite"></div>
+
+    <div id="desktop-app" class="desktop-app">
+      <header class="desktop-titlebar">
+        <div class="brand-lockup">
+          <div class="brand-orbit" aria-hidden="true">
+            <i></i><b></b>
+          </div>
+          <div>
+            <h1>Lumen Engine</h1>
+            <p>Spatial performance console</p>
+          </div>
+        </div>
+        <div class="titlebar-session">
+          <span id="clock">--:--:--</span>
+          <span class="titlebar-separator"></span>
+          <span id="rig-name">Loading active rig…</span>
+        </div>
+        <div class="window-lights" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+      </header>
+
+      <div class="desktop-menubar">
+        <button data-nav="performance">Session</button>
+        <button data-nav="rig">Rig</button>
+        <button data-nav="audio">Analysis</button>
+        <button data-nav="memory">Memory</button>
+        <button data-nav="system">System</button>
+        <span class="menubar-spacer"></span>
+        <button id="hotkey-help-button"><u>H</u>otkeys</button>
+        <a href="/remote" class="menubar-link">Phone remote ↗</a>
+      </div>
+
+      <div class="desktop-toolbar">
+        <div class="engine-transport">
+          <button id="monitor-button" class="tool-button">
+            <span class="tool-icon monitor-icon"></span>
+            <span><b>Monitor</b><small>Audio, virtual output</small></span>
+          </button>
+          <button id="live-button" class="tool-button primary">
+            <span class="tool-icon live-icon"></span>
+            <span><b>Perform</b><small>Line-in to DMX</small></span>
+          </button>
+          <button id="demo-button" class="tool-button">
+            <span class="tool-icon demo-icon"></span>
+            <span><b>Demo</b><small>Exercise the interface</small></span>
+          </button>
+          <button id="stop-button" class="tool-button">
+            <span class="tool-icon stop-icon"></span>
+            <span><b>Stop</b><small>Return to standby</small></span>
+          </button>
+        </div>
+        <div class="toolbar-divider"></div>
+        <div class="component-statuses">
+          <button class="component-status" id="audio-status" data-nav="audio">
+            <i></i><span>LINE INPUT</span><b>Checking</b>
+          </button>
+          <button class="component-status" id="dmx-status" data-nav="system">
+            <i></i><span>OPEN DMX</span><b>Checking</b>
+          </button>
+          <button class="component-status" id="spotify-status" data-nav="system">
+            <i></i><span>SPOTIFY</span><b>Checking</b>
+          </button>
+          <div class="component-status" id="engine-status">
+            <i></i><span>ENGINE</span><b>Standby</b>
+          </div>
+        </div>
+        <button id="blackout-button" class="blackout-button" aria-pressed="false">
+          <span>B</span>
+          <b>BLACKOUT</b>
+        </button>
+      </div>
+
+      <div class="desktop-workspace">
+        <aside class="navigation-rail">
+          <div class="nav-section-label">Workspace</div>
+          <button class="nav-item active" data-nav="performance">
+            <span class="nav-glyph performance-glyph"></span>
+            <span><b>Performance</b><small>Live operation</small></span>
+            <kbd>1</kbd>
+          </button>
+          <button class="nav-item" data-nav="rig">
+            <span class="nav-glyph rig-glyph"></span>
+            <span><b>Room &amp; rig</b><small>Geometry and patch</small></span>
+            <kbd>2</kbd>
+          </button>
+          <button class="nav-item" data-nav="audio">
+            <span class="nav-glyph audio-glyph"></span>
+            <span><b>Audio laboratory</b><small>Signal analysis</small></span>
+            <kbd>3</kbd>
+          </button>
+          <button class="nav-item" data-nav="memory">
+            <span class="nav-glyph memory-glyph"></span>
+            <span><b>Song memory</b><small>Feedback and routines</small></span>
+            <kbd>4</kbd>
+          </button>
+          <button class="nav-item" data-nav="system">
+            <span class="nav-glyph system-glyph"></span>
+            <span><b>System</b><small>Hardware and service</small></span>
+            <kbd>5</kbd>
+          </button>
+
+          <div class="nav-section-label lower">Active session</div>
+          <div class="session-mini">
+            <div class="mini-disc"><span></span></div>
+            <div>
+              <strong id="nav-song-title">Line input</strong>
+              <small id="nav-song-artist">Waiting for identity</small>
+            </div>
+          </div>
+          <div class="session-progress"><i id="nav-progress"></i></div>
+          <div class="session-readout">
+            <span id="nav-position">--:--</span>
+            <span id="nav-duration">--:--</span>
+          </div>
+
+          <div class="rail-footer">
+            <span class="status-lamp ready"></span>
+            <div><b id="rail-state">Ready</b><small id="rail-detail">Engine is standing by</small></div>
+          </div>
+        </aside>
+
+        <main class="page-stack">
+          <section class="workspace-page active" data-page="performance">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Live workspace</span>
+                <h2>Performance</h2>
+              </div>
+              <div class="heading-actions">
+                <button class="compact-button" id="fresh-gesture-button">Fresh gesture <kbd>Space</kbd></button>
+                <button class="compact-button" data-nav="rig">Open room editor</button>
+              </div>
+            </div>
+
+            <div class="performance-grid">
+              <section class="panel now-playing-panel">
+                <div class="panel-titlebar">
+                  <h3>Now playing</h3>
+                  <span id="media-source-badge" class="panel-badge">LINE-IN</span>
+                </div>
+                <div class="now-playing-body">
+                  <div class="album-visual" id="album-visual">
+                    <span class="album-ring ring-one"></span>
+                    <span class="album-ring ring-two"></span>
+                    <i></i>
+                  </div>
+                  <div class="track-info">
+                    <span class="track-kicker" id="track-context">Audio identity</span>
+                    <h3 id="song-title">Unidentified line input</h3>
+                    <p id="song-artist">Spotify metadata is optional</p>
+                    <div class="track-progress"><i id="track-progress"></i></div>
+                    <div class="track-time">
+                      <span id="track-position">--:--</span>
+                      <span id="track-duration">--:--</span>
+                    </div>
+                  </div>
+                  <div class="music-facts">
+                    <div><span>BPM</span><b id="fact-bpm">—</b></div>
+                    <div><span>BEAT</span><b id="fact-beat">0%</b></div>
+                    <div><span>SECTION</span><b id="fact-section">Waiting</b></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="panel room-panel">
+                <div class="panel-titlebar">
+                  <h3>Room composition</h3>
+                  <div class="panel-tools">
+                    <button class="mini-tool active" data-room-view="plan">Plan</button>
+                    <button class="mini-tool" data-room-view="front">Front</button>
+                    <button class="mini-tool" data-nav="rig">Edit</button>
+                  </div>
+                </div>
+                <div class="room-canvas-wrap">
+                  <canvas id="performance-room-canvas"></canvas>
+                  <div class="room-overlay top-left">
+                    <span>LIVE RESOLVER</span>
+                    <b id="room-fixture-count">0 fixtures</b>
+                  </div>
+                  <div class="room-overlay bottom-left">
+                    <i class="legend-fixture"></i> Fixture
+                    <i class="legend-beam"></i> Resolved beam
+                    <i class="legend-target"></i> Target
+                  </div>
+                  <div class="axis-widget"><b>Z</b><span>X</span><i>Y</i></div>
+                </div>
+              </section>
+
+              <section class="panel expression-panel">
+                <div class="panel-titlebar">
+                  <h3>Expressive state</h3>
+                  <span id="expression-confidence" class="panel-badge">0% CONFIDENCE</span>
+                </div>
+                <div class="expression-body">
+                  <div class="gesture-readout">
+                    <span>CURRENT GESTURE</span>
+                    <strong id="current-gesture">Standing by</strong>
+                    <p id="decision-reason">Start Monitor, Perform, or Demo to begin interpretation.</p>
+                  </div>
+                  <div class="meter-list">
+                    <div class="meter-row">
+                      <span>Energy</span><div><i id="meter-energy"></i></div><b id="value-energy">0.00</b>
+                    </div>
+                    <div class="meter-row">
+                      <span>Tension</span><div><i id="meter-tension"></i></div><b id="value-tension">0.00</b>
+                    </div>
+                    <div class="meter-row">
+                      <span>Motion</span><div><i id="meter-motion"></i></div><b id="value-motion">0.00</b>
+                    </div>
+                    <div class="meter-row">
+                      <span>Intimacy</span><div><i id="meter-intimacy"></i></div><b id="value-intimacy">0.50</b>
+                    </div>
+                  </div>
+                  <div class="signal-strip" id="signal-strip" aria-hidden="true"></div>
+                </div>
+              </section>
+
+              <section class="panel influence-panel">
+                <div class="panel-titlebar">
+                  <h3>Operator influence</h3>
+                  <span class="panel-note">Changes are immediate</span>
+                </div>
+                <div class="preset-row">
+                  <button data-preset="restrained">Restrained</button>
+                  <button data-preset="balanced" class="active">Balanced</button>
+                  <button data-preset="open">Open room</button>
+                  <button data-preset="drive">Drive</button>
+                </div>
+                <div class="control-slider-grid">
+                  <label>
+                    <span><b>Master</b><output data-output="master">78%</output></span>
+                    <input type="range" min="0" max="100" value="78" data-control="master">
+                  </label>
+                  <label>
+                    <span><b>Intensity bias</b><output data-output="intensity">50%</output></span>
+                    <input type="range" min="0" max="100" value="50" data-control="intensity">
+                  </label>
+                  <label>
+                    <span><b>Movement bias</b><output data-output="motion">46%</output></span>
+                    <input type="range" min="0" max="100" value="46" data-control="motion">
+                  </label>
+                  <label>
+                    <span><b>Spatial focus</b><output data-output="focus">58%</output></span>
+                    <input type="range" min="0" max="100" value="58" data-control="focus">
+                  </label>
+                  <label>
+                    <span><b>Color warmth</b><output data-output="warmth">42%</output></span>
+                    <input type="range" min="0" max="100" value="42" data-control="warmth">
+                  </label>
+                  <label>
+                    <span><b>Your influence</b><output data-output="influence">62%</output></span>
+                    <input type="range" min="0" max="100" value="62" data-control="influence">
+                  </label>
+                </div>
+              </section>
+
+              <section class="panel feedback-panel">
+                <div class="panel-titlebar">
+                  <h3>Teach this performance</h3>
+                  <span class="panel-note">Attached to the current musical moment</span>
+                </div>
+                <div class="feedback-buttons">
+                  <button data-feedback="liked_this" data-value="1"><span>✓</span>I liked that</button>
+                  <button data-feedback="too_busy" data-value="-1"><span>≋</span>Too busy</button>
+                  <button data-feedback="too_bright" data-value="-1"><span>☀</span>Too bright</button>
+                  <button data-feedback="bad_timing" data-value="-1"><span>◷</span>Bad timing</button>
+                  <button data-feedback="hold_this" data-value="1"><span>◇</span>Hold this idea</button>
+                </div>
+                <div class="feedback-note">
+                  <input id="feedback-note" type="text" placeholder="Optional note in your own words…">
+                  <button id="feedback-note-button">Save note</button>
+                </div>
+              </section>
+
+              <section class="panel event-panel">
+                <div class="panel-titlebar">
+                  <h3>Interpretation log</h3>
+                  <button class="mini-tool" data-nav="system">Full diagnostics</button>
+                </div>
+                <div id="event-log" class="event-log"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-page" data-page="rig">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Technical workspace</span>
+                <h2>Room &amp; rig</h2>
+              </div>
+              <div class="heading-actions">
+                <span class="save-state" id="rig-save-state">Configuration loaded</span>
+                <button class="compact-button primary" id="save-fixture-button">Save selected fixture</button>
+              </div>
+            </div>
+            <div class="rig-layout">
+              <section class="panel fixture-browser">
+                <div class="panel-titlebar"><h3>Fixture inventory</h3><span id="patch-count" class="panel-badge">0 PATCHED</span></div>
+                <div class="fixture-filter"><input id="fixture-filter" type="search" placeholder="Filter fixtures…"></div>
+                <div id="fixture-list" class="fixture-list"></div>
+                <div class="patch-summary">
+                  <span><b id="patch-universe-count">1</b> universe</span>
+                  <span><b id="patch-channel-count">0</b> channels occupied</span>
+                </div>
+              </section>
+
+              <section class="panel rig-viewport">
+                <div class="panel-titlebar">
+                  <h3>Spatial resolver</h3>
+                  <div class="panel-tools">
+                    <button class="mini-tool active" data-rig-view="plan">Top</button>
+                    <button class="mini-tool" data-rig-view="front">Front</button>
+                    <button class="mini-tool" data-rig-view="side">Side</button>
+                    <button class="mini-tool" id="center-room-button">Center</button>
+                  </div>
+                </div>
+                <div class="rig-canvas-wrap">
+                  <canvas id="rig-canvas"></canvas>
+                  <div class="viewport-help">
+                    <b>Targeting mode</b>
+                    <span>Click the room to place the test target. Drag fixtures to update X/Y.</span>
+                  </div>
+                  <div class="viewport-coordinates">
+                    <span>X <b id="cursor-x">0.00</b>m</span>
+                    <span>Y <b id="cursor-y">0.00</b>m</span>
+                    <span>Z <b id="cursor-z">1.20</b>m</span>
+                  </div>
+                </div>
+                <div class="target-bar">
+                  <span>Target</span>
+                  <label>X <input id="target-x" type="number" step="0.05" value="0"></label>
+                  <label>Y <input id="target-y" type="number" step="0.05" value="0"></label>
+                  <label>Z <input id="target-z" type="number" step="0.05" value="1.2"></label>
+                  <button id="solve-target-button">Solve beams</button>
+                </div>
+                <div id="solution-strip" class="solution-strip"></div>
+              </section>
+
+              <section class="panel fixture-inspector">
+                <div class="panel-titlebar">
+                  <h3>Selection properties</h3>
+                  <span id="selection-kind" class="panel-badge">NONE</span>
+                </div>
+                <div id="empty-selection" class="empty-selection">
+                  <span class="empty-crosshair"></span>
+                  <b>Select a fixture</b>
+                  <p>Choose one from the inventory or room view to inspect its patch and calibration.</p>
+                </div>
+                <form id="fixture-form" class="fixture-form hidden">
+                  <div class="inspector-identity">
+                    <span id="fixture-profile-label">Fixture profile</span>
+                    <input id="fixture-name" name="name" aria-label="Fixture name">
+                    <code id="fixture-id"></code>
+                  </div>
+                  <fieldset>
+                    <legend>DMX patch</legend>
+                    <div class="form-grid two">
+                      <label>Universe<input id="fixture-universe" type="number" min="0"></label>
+                      <label>Start address<input id="fixture-address" type="number" min="1" max="512"></label>
+                    </div>
+                    <div id="fixture-channel-map" class="channel-map"></div>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Room transform <small>meters / degrees</small></legend>
+                    <div class="axis-form">
+                      <label><span class="axis x">X</span><input id="fixture-x" type="number" step="0.001"></label>
+                      <label><span class="axis y">Y</span><input id="fixture-y" type="number" step="0.001"></label>
+                      <label><span class="axis z">Z</span><input id="fixture-z" type="number" step="0.001"></label>
+                    </div>
+                    <div class="axis-form rotations">
+                      <label><span>RX</span><input id="fixture-rx" type="number" step="0.1"></label>
+                      <label><span>RY</span><input id="fixture-ry" type="number" step="0.1"></label>
+                      <label><span>RZ</span><input id="fixture-rz" type="number" step="0.1"></label>
+                    </div>
+                  </fieldset>
+                  <fieldset id="calibration-fieldset">
+                    <legend>Mechanical calibration</legend>
+                    <div class="form-grid two">
+                      <label>Pan minimum<input data-calibration="pan_min_deg" type="number" step="0.01"></label>
+                      <label>Pan maximum<input data-calibration="pan_max_deg" type="number" step="0.01"></label>
+                      <label>Tilt minimum<input data-calibration="tilt_min_deg" type="number" step="0.01"></label>
+                      <label>Tilt maximum<input data-calibration="tilt_max_deg" type="number" step="0.01"></label>
+                      <label>Pan offset<input data-calibration="pan_offset_deg" type="number" step="0.01"></label>
+                      <label>Tilt offset<input data-calibration="tilt_offset_deg" type="number" step="0.01"></label>
+                      <label>Pan direction<select data-calibration="pan_direction"><option value="1">Normal (+1)</option><option value="-1">Reverse (-1)</option></select></label>
+                      <label>Tilt direction<select data-calibration="tilt_direction"><option value="1">Normal (+1)</option><option value="-1">Reverse (-1)</option></select></label>
+                      <label>Pan speed °/s<input data-calibration="max_pan_speed_deg_s" type="number" step="1"></label>
+                      <label>Tilt speed °/s<input data-calibration="max_tilt_speed_deg_s" type="number" step="1"></label>
+                    </div>
+                    <details>
+                      <summary>DMX endpoint calibration</summary>
+                      <div class="form-grid two details-grid">
+                        <label>Pan DMX minimum<input data-calibration="pan_dmx_min_u16" type="number" min="0" max="65535"></label>
+                        <label>Pan DMX maximum<input data-calibration="pan_dmx_max_u16" type="number" min="0" max="65535"></label>
+                        <label>Tilt DMX minimum<input data-calibration="tilt_dmx_min_u16" type="number" min="0" max="65535"></label>
+                        <label>Tilt DMX maximum<input data-calibration="tilt_dmx_max_u16" type="number" min="0" max="65535"></label>
+                      </div>
+                    </details>
+                  </fieldset>
+                </form>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-page" data-page="audio">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Signal workshop</span>
+                <h2>Audio laboratory</h2>
+              </div>
+              <div class="heading-actions">
+                <span class="save-state">Timing follows line-in, not metadata</span>
+                <button class="compact-button" id="rescan-system-button">Rescan hardware</button>
+              </div>
+            </div>
+            <div class="audio-layout">
+              <section class="panel spectrum-panel">
+                <div class="panel-titlebar"><h3>Realtime analysis</h3><span class="panel-badge" id="analysis-rate">PCM16 · 48 kHz</span></div>
+                <div class="scope-wrap">
+                  <canvas id="scope-canvas"></canvas>
+                  <div class="scope-scale">
+                    <span>0 dB</span><span>−12</span><span>−24</span><span>−48</span>
+                  </div>
+                </div>
+                <div class="frequency-bands">
+                  <div><span>LOW</span><b id="band-low">0.00</b><i><em id="bar-low"></em></i><small>63–250 Hz</small></div>
+                  <div><span>MID</span><b id="band-mid">0.00</b><i><em id="bar-mid"></em></i><small>400–2500 Hz</small></div>
+                  <div><span>HIGH</span><b id="band-high">0.00</b><i><em id="bar-high"></em></i><small>4–10 kHz</small></div>
+                  <div><span>ONSET</span><b id="band-onset">0.00</b><i><em id="bar-onset"></em></i><small>Transient strength</small></div>
+                </div>
+              </section>
+              <section class="panel beat-panel">
+                <div class="panel-titlebar"><h3>Rhythm lock</h3><span class="panel-badge" id="beat-lock-badge">SEARCHING</span></div>
+                <div class="beat-dial">
+                  <svg viewBox="0 0 160 160" aria-hidden="true">
+                    <circle cx="80" cy="80" r="66"></circle>
+                    <circle id="beat-dial-progress" cx="80" cy="80" r="66"></circle>
+                    <line id="beat-hand" x1="80" y1="80" x2="80" y2="25"></line>
+                  </svg>
+                  <div><b id="beat-bpm-large">—</b><span>BPM</span></div>
+                </div>
+                <div class="beat-stats">
+                  <div><span>Confidence</span><b id="beat-confidence-detail">0%</b></div>
+                  <div><span>Phase</span><b id="beat-phase-detail">0.00</b></div>
+                  <div><span>Novelty</span><b id="novelty-detail">0.00</b></div>
+                </div>
+              </section>
+              <section class="panel input-panel">
+                <div class="panel-titlebar"><h3>Capture path</h3></div>
+                <div class="device-card">
+                  <span class="device-icon"></span>
+                  <div><b id="audio-device-name">default</b><small>ALSA stereo capture</small></div>
+                  <span id="audio-device-state" class="state-chip">Not running</span>
+                </div>
+                <dl class="technical-list">
+                  <div><dt>Sample format</dt><dd>Signed PCM, 16-bit</dd></div>
+                  <div><dt>Sample rate</dt><dd>48,000 Hz</dd></div>
+                  <div><dt>Channels</dt><dd>2, downmixed for analysis</dd></div>
+                  <div><dt>Chunk size</dt><dd>2,048 frames</dd></div>
+                  <div><dt>Timing source</dt><dd>Monotonic audio capture</dd></div>
+                </dl>
+                <div class="inline-setting">
+                  <label for="audio-device-input">ALSA capture device</label>
+                  <div><input id="audio-device-input" type="text" value="default" placeholder="default or hw:0,2"><button id="save-audio-device-button">Save input</button></div>
+                </div>
+                <div class="hardware-report" id="audio-hardware-report">Hardware scan pending.</div>
+              </section>
+              <section class="panel interpretation-panel">
+                <div class="panel-titlebar"><h3>Interpretation path</h3></div>
+                <div class="pipeline">
+                  <div><span>01</span><b>Line input</b><small>Authoritative PCM timing</small></div>
+                  <i></i>
+                  <div><span>02</span><b>Features</b><small>Loudness, bands, onsets</small></div>
+                  <i></i>
+                  <div><span>03</span><b>Expression</b><small>Energy, tension, motion</small></div>
+                  <i></i>
+                  <div><span>04</span><b>Gesture</b><small>Explainable decision</small></div>
+                  <i></i>
+                  <div><span>05</span><b>Resolver</b><small>Geometry to fixture state</small></div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-page" data-page="memory">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Private local history</span>
+                <h2>Song memory</h2>
+              </div>
+              <div class="memory-totals">
+                <span><b id="memory-song-count">0</b> songs</span>
+                <span><b id="memory-feedback-count">0</b> feedback moments</span>
+                <span><b id="memory-decision-count">0</b> decisions</span>
+              </div>
+            </div>
+            <div class="memory-layout">
+              <section class="panel song-library-panel">
+                <div class="panel-titlebar"><h3>Recognized recordings &amp; sessions</h3><span class="panel-note">Newest first</span></div>
+                <div class="memory-filter">
+                  <input id="memory-filter" type="search" placeholder="Search title, artist, or provider…">
+                </div>
+                <div class="memory-table-head">
+                  <span>Recording</span><span>Provider</span><span>Plays</span><span>Feedback</span><span>Last seen</span>
+                </div>
+                <div id="song-library" class="song-library"></div>
+              </section>
+              <section class="panel feedback-history-panel">
+                <div class="panel-titlebar"><h3>Recent teaching moments</h3></div>
+                <div id="feedback-history" class="feedback-history"></div>
+              </section>
+              <section class="panel memory-explanation-panel">
+                <div class="panel-titlebar"><h3>How Lumen remembers</h3></div>
+                <div class="memory-levels">
+                  <div><b>Recording</b><span>Positions, sections, transitions, and approved gestures.</span></div>
+                  <div><b>Song</b><span>A semantic routine that can be adapted to the current rig.</span></div>
+                  <div><b>Artist</b><span>Recurring palette, pacing, and motion preferences.</span></div>
+                  <div><b>Your taste</b><span>Patterns learned from feedback across listening sessions.</span></div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-page" data-page="system">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Dedicated controller</span>
+                <h2>System</h2>
+              </div>
+              <div class="heading-actions">
+                <button class="compact-button" id="system-rescan-button">Rescan connected hardware</button>
+              </div>
+            </div>
+            <div class="system-layout">
+              <section class="panel service-panel">
+                <div class="panel-titlebar"><h3>Service state</h3></div>
+                <div class="service-hero">
+                  <span class="service-orbit"><i></i></span>
+                  <div><b>Lumen operator service</b><small id="service-address">127.0.0.1:4042</small></div>
+                  <span class="state-chip online">ONLINE</span>
+                </div>
+                <dl class="technical-list" id="service-details"></dl>
+              </section>
+              <section class="panel hardware-panel">
+                <div class="panel-titlebar"><h3>Hardware inventory</h3></div>
+                <div id="hardware-cards" class="hardware-cards"></div>
+              </section>
+              <section class="panel phone-panel">
+                <div class="panel-titlebar"><h3>Phone &amp; tablet remote</h3></div>
+                <div class="phone-connect">
+                  <div class="qr-placeholder" aria-hidden="true">
+                    <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+                  </div>
+                  <div>
+                    <span>Open this address on the same Wi-Fi network</span>
+                    <strong id="remote-address">Finding network address…</strong>
+                    <button id="copy-remote-address">Copy address</button>
+                  </div>
+                </div>
+              </section>
+              <section class="panel hotkeys-panel" id="hotkeys-panel">
+                <div class="panel-titlebar"><h3>Desktop hotkeys</h3></div>
+                <div class="hotkey-grid">
+                  <div><kbd>1</kbd><span>Performance</span></div>
+                  <div><kbd>2</kbd><span>Room &amp; rig</span></div>
+                  <div><kbd>3</kbd><span>Audio lab</span></div>
+                  <div><kbd>4</kbd><span>Song memory</span></div>
+                  <div><kbd>5</kbd><span>System</span></div>
+                  <div><kbd>B</kbd><span>Toggle blackout</span></div>
+                  <div><kbd>M</kbd><span>Start monitor</span></div>
+                  <div><kbd>L</kbd><span>Start performance</span></div>
+                  <div><kbd>Esc</kbd><span>Stop engine / close dialog</span></div>
+                  <div><kbd>Space</kbd><span>Fresh gesture</span></div>
+                  <div><kbd>[</kbd><span>Reduce intensity</span></div>
+                  <div><kbd>]</kbd><span>Increase intensity</span></div>
+                </div>
+              </section>
+              <section class="panel dmx-panel">
+                <div class="panel-titlebar"><h3>Live DMX universe</h3><span class="panel-badge" id="dmx-frame-count">0 FRAMES</span></div>
+                <div id="dmx-heatmap" class="dmx-heatmap"></div>
+                <div class="dmx-legend"><span>1</span><i></i><span>128</span><i></i><span>256</span><i></i><span>384</span><i></i><span>512</span></div>
+              </section>
+              <section class="panel integration-panel">
+                <div class="panel-titlebar"><h3>Spotify playback identity</h3><span id="spotify-connect-state" class="panel-badge">OPTIONAL</span></div>
+                <div class="integration-body">
+                  <p>Spotify supplies the recording identity and approximate song position. Line-in remains the timing source for lighting.</p>
+                  <label for="spotify-client-id">Spotify developer client ID</label>
+                  <input id="spotify-client-id" type="text" placeholder="Paste the client ID from your private Spotify app">
+                  <div class="integration-actions">
+                    <button id="spotify-connect-button">Connect Spotify</button>
+                    <span id="spotify-client-summary">Not configured</span>
+                  </div>
+                  <div class="integration-status" id="spotify-integration-status">No Spotify token is stored on this computer.</div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <footer class="desktop-statusbar">
+        <div><span class="status-lamp ready" id="footer-lamp"></span><b id="footer-state">Ready</b></div>
+        <div id="footer-message">Lumen operator console connected</div>
+        <div class="statusbar-spacer"></div>
+        <div><span>CPU target</span><b>i5-8400</b></div>
+        <div><span>Poll</span><b>4 Hz</b></div>
+        <div><span id="footer-time">--:--</span></div>
+      </footer>
+    </div>
+
+    <div id="remote-app" class="remote-app">
+      <header class="remote-header">
+        <div class="remote-brand"><span class="remote-brand-mark"><i></i></span><div><b>LUMEN</b><small>LIVE INFLUENCE</small></div></div>
+        <div id="remote-connection" class="remote-connection"><i></i><span>Connecting</span></div>
+      </header>
+      <main class="remote-main">
+        <section class="remote-track">
+          <div class="remote-disc"><span></span></div>
+          <div>
+            <span id="remote-track-source">LINE INPUT</span>
+            <h1 id="remote-song-title">Unidentified audio</h1>
+            <p id="remote-song-artist">Waiting for song identity</p>
+          </div>
+          <div class="remote-track-progress"><i id="remote-track-progress"></i></div>
+          <div class="remote-track-facts">
+            <span><b id="remote-bpm">—</b> BPM</span>
+            <span><b id="remote-section">WAITING</b> section</span>
+            <span><b id="remote-confidence">0%</b> confidence</span>
+          </div>
+        </section>
+
+        <section class="remote-gesture">
+          <div>
+            <span>LUMEN IS EXPRESSING</span>
+            <h2 id="remote-gesture">Standing by</h2>
+          </div>
+          <div class="remote-energy-orb" id="remote-energy-orb"><i></i><span id="remote-energy">0%</span></div>
+          <p id="remote-reason">Start the engine from the technical console.</p>
+        </section>
+
+        <section class="remote-section">
+          <div class="remote-section-heading"><h2>Shape the response</h2><span>Tap a character</span></div>
+          <div class="remote-presets">
+            <button data-preset="restrained"><i></i><b>Restrained</b><small>Slow and narrow</small></button>
+            <button data-preset="balanced" class="active"><i></i><b>Balanced</b><small>Let Lumen lead</small></button>
+            <button data-preset="open"><i></i><b>Open room</b><small>Wide and spacious</small></button>
+            <button data-preset="drive"><i></i><b>Drive</b><small>More attack</small></button>
+          </div>
+          <div class="remote-sliders">
+            <label><span>Intensity <output data-output="intensity">50%</output></span><input type="range" min="0" max="100" value="50" data-control="intensity"></label>
+            <label><span>Movement <output data-output="motion">46%</output></span><input type="range" min="0" max="100" value="46" data-control="motion"></label>
+            <label><span>Your influence <output data-output="influence">62%</output></span><input type="range" min="0" max="100" value="62" data-control="influence"></label>
+          </div>
+        </section>
+
+        <section class="remote-section">
+          <div class="remote-section-heading"><h2>Teach this moment</h2><span id="remote-feedback-time">Now</span></div>
+          <div class="remote-feedback">
+            <button data-feedback="liked_this" data-value="1"><span>✓</span><b>I liked that</b></button>
+            <button data-feedback="too_busy" data-value="-1"><span>≋</span><b>Too busy</b></button>
+            <button data-feedback="too_bright" data-value="-1"><span>☀</span><b>Too bright</b></button>
+            <button data-feedback="bad_timing" data-value="-1"><span>◷</span><b>Bad timing</b></button>
+            <button data-feedback="hold_this" data-value="1"><span>◇</span><b>Hold this idea</b></button>
+            <button id="remote-note-open"><span>+</span><b>Add a note</b></button>
+          </div>
+          <div id="remote-note-box" class="remote-note-box hidden">
+            <textarea id="remote-feedback-note" rows="3" placeholder="Say what you noticed in your own words…"></textarea>
+            <button id="remote-feedback-note-button">Save this note</button>
+          </div>
+        </section>
+
+        <section class="remote-section remote-engine-card">
+          <div>
+            <span>ENGINE</span>
+            <b id="remote-engine-state">Standby</b>
+            <small id="remote-output-state">No output active</small>
+          </div>
+          <button id="remote-blackout-button" aria-pressed="false"><span>B</span>BLACKOUT</button>
+        </section>
+      </main>
+      <nav class="remote-nav">
+        <button class="active" data-remote-tab="influence"><span>◉</span>Influence</button>
+        <button data-remote-tab="feedback"><span>◇</span>Feedback</button>
+        <a href="/"><span>▦</span>Console</a>
+      </nav>
+    </div>
+
+    <dialog id="hotkey-dialog">
+      <div class="dialog-titlebar"><b>Lumen desktop hotkeys</b><button id="close-hotkey-dialog">×</button></div>
+      <div class="dialog-body">
+        <p>Hotkeys work anywhere in the console unless you are typing into a field.</p>
+        <div class="hotkey-grid compact">
+          <div><kbd>1—5</kbd><span>Switch workspaces</span></div>
+          <div><kbd>B</kbd><span>Toggle blackout</span></div>
+          <div><kbd>M</kbd><span>Monitor line-in</span></div>
+          <div><kbd>L</kbd><span>Perform through DMX</span></div>
+          <div><kbd>Esc</kbd><span>Stop engine</span></div>
+          <div><kbd>[ / ]</kbd><span>Adjust intensity</span></div>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

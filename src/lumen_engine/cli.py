@@ -14,6 +14,7 @@ import time
 
 from lumen_engine.audio import AudioCaptureConfig, AlsaLineIn, RealtimeAudioAnalyzer
 from lumen_engine.config import RigConfig, load_rig
+from lumen_engine.control import serve
 from lumen_engine.dmx import VirtualDMXOutput
 from lumen_engine.expression import ExpressionEngine, ExpressionPolicy
 from lumen_engine.media import (
@@ -183,6 +184,21 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--note", help="your own words; no lighting jargon required")
     feedback.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     feedback.set_defaults(handler=_feedback)
+
+    ui = subparsers.add_parser(
+        "ui", help="start the desktop console and phone/tablet remote"
+    )
+    ui.add_argument("--rig", type=Path, default=DEFAULT_IMPORTED_RIG)
+    ui.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
+    ui.add_argument("--device", default="default")
+    ui.add_argument("--host", default="0.0.0.0")
+    ui.add_argument("--port", type=int, default=4042)
+    ui.add_argument(
+        "--open",
+        action="store_true",
+        help="open the desktop console in the default browser",
+    )
+    ui.set_defaults(handler=_ui)
     return parser
 
 
@@ -649,4 +665,18 @@ def _feedback(args: argparse.Namespace) -> int:
     )
     if args.note:
         print(f"Your note: {args.note}")
+    return 0
+
+
+def _ui(args: argparse.Namespace) -> int:
+    if not 1 <= args.port <= 65535:
+        raise ValueError("--port must be in [1, 65535]")
+    serve(
+        host=args.host,
+        port=args.port,
+        rig_path=args.rig,
+        memory_path=args.memory,
+        audio_device=args.device,
+        open_browser=args.open,
+    )
     return 0

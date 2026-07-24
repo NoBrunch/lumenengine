@@ -222,6 +222,74 @@ class SongMemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def summary(self, limit: int = 30) -> dict[str, Any]:
+        """Return compact operator-facing song and feedback history."""
+
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
+        with closing(self._connect()) as connection:
+            songs = connection.execute(
+                """
+                SELECT
+                    songs.id,
+                    songs.provider,
+                    songs.provider_item_id,
+                    songs.title,
+                    songs.artists_json,
+                    songs.album,
+                    songs.duration_ms,
+                    songs.first_seen_unix_ms,
+                    songs.last_seen_unix_ms,
+                    songs.play_count,
+                    COUNT(DISTINCT feedback.id) AS feedback_count,
+                    COUNT(DISTINCT decisions.id) AS decision_count
+                FROM songs
+                LEFT JOIN feedback ON feedback.song_id = songs.id
+                LEFT JOIN decisions ON decisions.song_id = songs.id
+                GROUP BY songs.id
+                ORDER BY songs.last_seen_unix_ms DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            feedback = connection.execute(
+                """
+                SELECT
+                    feedback.id,
+                    feedback.song_id,
+                    songs.title AS song_title,
+                    feedback.position_ms,
+                    feedback.label,
+                    feedback.value,
+                    feedback.note,
+                    feedback.created_unix_ms
+                FROM feedback
+                JOIN songs ON songs.id = feedback.song_id
+                ORDER BY feedback.created_unix_ms DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            totals = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM songs) AS songs,
+                    (SELECT COUNT(*) FROM feedback) AS feedback,
+                    (SELECT COUNT(*) FROM decisions) AS decisions,
+                    (SELECT COUNT(*) FROM routines) AS routines
+                """
+            ).fetchone()
+        song_items: list[dict[str, Any]] = []
+        for row in songs:
+            item = dict(row)
+            item["artists"] = list(json.loads(item.pop("artists_json")))
+            song_items.append(item)
+        return {
+            "totals": dict(totals) if totals is not None else {},
+            "songs": song_items,
+            "recent_feedback": [dict(row) for row in feedback],
+        }
+
     def save_routine(
         self, song_id: int, routine_version: int, payload: dict[str, Any]
     ) -> None:
@@ -301,4 +369,3 @@ class SongMemoryStore:
             )
         )
         return "derived:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
-
