@@ -275,7 +275,10 @@ class SongMemoryStore:
                 SELECT
                     (SELECT COUNT(*) FROM songs) AS songs,
                     (SELECT COUNT(*) FROM feedback) AS feedback,
-                    (SELECT COUNT(*) FROM decisions) AS decisions,
+                    (
+                        SELECT COUNT(*) FROM decisions
+                        WHERE song_id IS NOT NULL
+                    ) AS decisions,
                     (SELECT COUNT(*) FROM routines) AS routines
                 """
             ).fetchone()

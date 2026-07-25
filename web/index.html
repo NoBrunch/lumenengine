@@ -44,6 +44,7 @@
         <button data-nav="rig">Rig</button>
         <button data-nav="audio">Analysis</button>
         <button data-nav="memory">Memory</button>
+        <button data-nav="music">Music</button>
         <button data-nav="system">System</button>
         <span class="menubar-spacer"></span>
         <button id="hotkey-help-button"><u>H</u>otkeys</button>
@@ -77,7 +78,7 @@
           <button class="component-status" id="dmx-status" data-nav="system">
             <i></i><span>OPEN DMX</span><b>Checking</b>
           </button>
-          <button class="component-status" id="spotify-status" data-nav="system">
+          <button class="component-status" id="spotify-status" data-nav="music">
             <i></i><span>SPOTIFY</span><b>Checking</b>
           </button>
           <div class="component-status" id="engine-status">
@@ -113,10 +114,15 @@
             <span><b>Song memory</b><small>Feedback and routines</small></span>
             <kbd>4</kbd>
           </button>
+          <button class="nav-item" data-nav="music">
+            <span class="nav-glyph spotify-glyph"></span>
+            <span><b>Spotify console</b><small>Chromecast control</small></span>
+            <kbd>5</kbd>
+          </button>
           <button class="nav-item" data-nav="system">
             <span class="nav-glyph system-glyph"></span>
             <span><b>System</b><small>Hardware and service</small></span>
-            <kbd>5</kbd>
+            <kbd>6</kbd>
           </button>
 
           <div class="nav-section-label lower">Active session</div>
@@ -466,27 +472,46 @@
                 </div>
               </section>
               <section class="panel input-panel">
-                <div class="panel-titlebar"><h3>Capture path</h3></div>
+                <div class="panel-titlebar">
+                  <h3>Physical input proof</h3>
+                  <button class="mini-tool" id="audio-input-test-button">Start input test</button>
+                </div>
+                <div class="audio-proof" id="audio-proof" data-state="inactive">
+                  <span class="pcm-heartbeat" id="pcm-heartbeat"></span>
+                  <div>
+                    <small>ALSA PACKET HEARTBEAT</small>
+                    <b id="audio-proof-label">INPUT TEST NOT RUNNING</b>
+                    <p id="audio-proof-detail">Start Monitor to test the physical line input without DMX output.</p>
+                  </div>
+                  <strong id="audio-dbfs">−120.0 <small>dBFS</small></strong>
+                </div>
+                <div class="raw-level">
+                  <span>−60</span><i><em id="raw-level-bar"></em></i><span>0 dBFS</span>
+                </div>
+                <div class="audio-packet-facts">
+                  <div><span>PCM packets</span><b id="pcm-packets">0</b></div>
+                  <div><span>Latest packet</span><b id="pcm-age">—</b></div>
+                  <div><span>Packet rate</span><b id="pcm-rate">0.0 /s</b></div>
+                  <div><span>Left RMS</span><b id="pcm-left">−120 dB</b></div>
+                  <div><span>Right RMS</span><b id="pcm-right">−120 dB</b></div>
+                  <div><span>Peak / clips</span><b id="pcm-peak">0% / 0</b></div>
+                </div>
                 <div class="device-card">
                   <span class="device-icon"></span>
                   <div><b id="audio-device-name">default</b><small>ALSA stereo capture</small></div>
                   <span id="audio-device-state" class="state-chip">Not running</span>
                 </div>
-                <dl class="technical-list">
-                  <div><dt>Sample format</dt><dd>Signed PCM, 16-bit</dd></div>
-                  <div><dt>Sample rate</dt><dd>48,000 Hz</dd></div>
-                  <div><dt>Channels</dt><dd>2, downmixed for analysis</dd></div>
-                  <div><dt>Chunk size</dt><dd>2,048 frames</dd></div>
-                  <div><dt>Timing source</dt><dd>Monotonic audio capture</dd></div>
-                </dl>
                 <div class="inline-setting">
                   <label for="audio-device-input">ALSA capture device</label>
                   <div><input id="audio-device-input" type="text" value="default" placeholder="default or hw:0,2"><button id="save-audio-device-button">Save input</button></div>
                 </div>
-                <div class="hardware-report" id="audio-hardware-report">Hardware scan pending.</div>
+                <details class="audio-hardware-details">
+                  <summary>ALSA hardware report</summary>
+                  <div class="hardware-report" id="audio-hardware-report">Hardware scan pending.</div>
+                </details>
               </section>
               <section class="panel interpretation-panel">
-                <div class="panel-titlebar"><h3>Interpretation path</h3></div>
+                <div class="panel-titlebar"><h3>Interpretation path</h3><span class="beat-receive-lamp" id="beat-receive-lamp">BEAT</span></div>
                 <div class="pipeline">
                   <div><span>01</span><b>Line input</b><small>Authoritative PCM timing</small></div>
                   <i></i>
@@ -541,6 +566,83 @@
             </div>
           </section>
 
+          <section class="workspace-page" data-page="music">
+            <div class="page-heading">
+              <div>
+                <span class="eyebrow">Spotify Connect remote</span>
+                <h2>Music console</h2>
+              </div>
+              <div class="heading-actions">
+                <span class="save-state">Playback remains on Chromecast Audio</span>
+                <button class="compact-button" id="spotify-refresh-button">Refresh player</button>
+              </div>
+            </div>
+            <div class="spotify-setup panel" id="spotify-console-setup">
+              <div class="spotify-setup-mark"><i></i></div>
+              <div>
+                <span class="eyebrow">One-time setup</span>
+                <h3>Connect your private Spotify developer app</h3>
+                <p>Lumen will become a control surface for Spotify Connect. It will not move playback away from the Chromecast Audio.</p>
+                <button class="compact-button" data-nav="system">Open Spotify setup</button>
+              </div>
+            </div>
+            <div class="spotify-console-layout hidden" id="spotify-console-connected">
+              <section class="panel spotify-player-panel">
+                <div class="panel-titlebar">
+                  <h3>Now playing</h3>
+                  <span class="panel-badge" id="spotify-player-state">IDLE</span>
+                </div>
+                <div class="spotify-player-hero">
+                  <div class="spotify-cover">
+                    <img id="spotify-cover-image" alt="">
+                    <span id="spotify-cover-placeholder">SP</span>
+                  </div>
+                  <div class="spotify-track-copy">
+                    <span id="spotify-album">No active playback</span>
+                    <h3 id="spotify-track-title">Choose music from Spotify</h3>
+                    <p id="spotify-track-artists">Search below or use your usual Spotify app.</p>
+                    <div class="spotify-progress-line">
+                      <input id="spotify-seek" type="range" min="0" max="1000" value="0">
+                      <div><span id="spotify-position">--:--</span><span id="spotify-duration">--:--</span></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="spotify-transport">
+                  <button id="spotify-previous-button" title="Previous track">◀◀</button>
+                  <button id="spotify-play-button" class="spotify-play" title="Play or pause">▶</button>
+                  <button id="spotify-next-button" title="Next track">▶▶</button>
+                </div>
+                <div class="spotify-routing">
+                  <label>
+                    <span>Spotify Connect device</span>
+                    <select id="spotify-device-select"></select>
+                  </label>
+                  <button id="spotify-transfer-button">Use selected device</button>
+                  <label class="spotify-volume">
+                    <span>Device volume</span>
+                    <input id="spotify-volume" type="range" min="0" max="100" value="50">
+                  </label>
+                </div>
+                <div class="spotify-route-proof">
+                  <i></i>
+                  <div><b id="spotify-device-name">No active device</b><span>Spotify → Chromecast Audio → splitter → amplifier + Lumen line-in</span></div>
+                </div>
+              </section>
+              <section class="panel spotify-search-panel">
+                <div class="panel-titlebar">
+                  <h3>Spotify search</h3>
+                  <span class="panel-badge" id="spotify-control-scope">CONTROL</span>
+                </div>
+                <form class="spotify-search-form" id="spotify-search-form">
+                  <input id="spotify-search-input" type="search" placeholder="Track, artist, or album…" autocomplete="off">
+                  <button type="submit">Search</button>
+                </form>
+                <div class="spotify-search-message" id="spotify-search-message">Search the Spotify catalog, then play on the selected Connect device or add a track to the queue.</div>
+                <div class="spotify-results" id="spotify-results"></div>
+              </section>
+            </div>
+          </section>
+
           <section class="workspace-page" data-page="system">
             <div class="page-heading">
               <div>
@@ -586,7 +688,8 @@
                   <div><kbd>2</kbd><span>Room &amp; rig</span></div>
                   <div><kbd>3</kbd><span>Audio lab</span></div>
                   <div><kbd>4</kbd><span>Song memory</span></div>
-                  <div><kbd>5</kbd><span>System</span></div>
+                  <div><kbd>5</kbd><span>Spotify console</span></div>
+                  <div><kbd>6</kbd><span>System</span></div>
                   <div><kbd>B</kbd><span>Toggle blackout</span></div>
                   <div><kbd>M</kbd><span>Start monitor</span></div>
                   <div><kbd>L</kbd><span>Start performance</span></div>
@@ -604,7 +707,13 @@
               <section class="panel integration-panel">
                 <div class="panel-titlebar"><h3>Spotify playback identity</h3><span id="spotify-connect-state" class="panel-badge">OPTIONAL</span></div>
                 <div class="integration-body">
-                  <p>Spotify supplies the recording identity and approximate song position. Line-in remains the timing source for lighting.</p>
+                  <p>Spotify supplies the music console and recording identity. Line-in remains the timing source for lighting.</p>
+                  <div class="spotify-app-recipe">
+                    <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Open Spotify developer dashboard ↗</a>
+                    <span>Create one private app with the Web API, then add this exact redirect URI:</span>
+                    <code>http://127.0.0.1:8765/callback</code>
+                    <button id="copy-spotify-redirect-button">Copy redirect URI</button>
+                  </div>
                   <label for="spotify-client-id">Spotify developer client ID</label>
                   <input id="spotify-client-id" type="text" placeholder="Paste the client ID from your private Spotify app">
                   <div class="integration-actions">
@@ -695,6 +804,11 @@
             <span>ENGINE</span>
             <b id="remote-engine-state">Standby</b>
             <small id="remote-output-state">No output active</small>
+          </div>
+          <div class="remote-audio-readout">
+            <span>LINE INPUT</span>
+            <b id="remote-audio-state">Not tested</b>
+            <small id="remote-audio-level">Start Monitor on the console</small>
           </div>
           <button id="remote-blackout-button" aria-pressed="false"><span>B</span>BLACKOUT</button>
         </section>

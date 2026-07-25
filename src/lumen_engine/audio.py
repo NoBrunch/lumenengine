@@ -22,6 +22,39 @@ class AudioCaptureConfig:
     chunk_frames: int = 2_048
 
 
+@dataclass(frozen=True, slots=True)
+class AudioInputMetrics:
+    """Measurements taken directly from one captured PCM packet."""
+
+    timestamp_s: float
+    frame_count: int
+    rms: float
+    dbfs: float
+    peak: float
+    channel_rms: tuple[float, ...]
+    channel_peak: tuple[float, ...]
+    clipped_samples: int
+    waveform: tuple[float, ...]
+
+    @classmethod
+    def silence(
+        cls,
+        timestamp_s: float = 0.0,
+        channels: int = 2,
+    ) -> "AudioInputMetrics":
+        return cls(
+            timestamp_s=timestamp_s,
+            frame_count=0,
+            rms=0.0,
+            dbfs=-120.0,
+            peak=0.0,
+            channel_rms=tuple(0.0 for _ in range(channels)),
+            channel_peak=tuple(0.0 for _ in range(channels)),
+            clipped_samples=0,
+            waveform=tuple(0.0 for _ in range(128)),
+        )
+
+
 class RealtimeAudioAnalyzer:
     """Create useful first-pass musical observations from signed PCM16 audio."""
 
@@ -35,6 +68,7 @@ class RealtimeAudioAnalyzer:
         self._previous_loudness = 0.0
         self._beat_tracker = BeatTracker()
         self._noise_floor = 0.005
+        self.last_metrics = AudioInputMetrics.silence(channels=channels)
 
     def analyze_pcm16(
         self, pcm: bytes, timestamp_s: float | None = None
@@ -47,10 +81,12 @@ class RealtimeAudioAnalyzer:
         if sys.byteorder != "little":
             samples.byteswap()
         if not samples:
+            self.last_metrics = AudioInputMetrics.silence(timestamp, self.channels)
             return self._silence_observation(timestamp)
 
         mono = self._downmix(samples)
         rms = math.sqrt(sum(sample * sample for sample in mono) / len(mono)) / 32768.0
+        self.last_metrics = self._input_metrics(samples, mono, timestamp, rms)
         # A gentle logarithmic mapping makes normal line levels readable.
         loudness = clamp(math.log10(1.0 + 24.0 * rms), 0.0, 1.0)
         self._noise_floor = 0.995 * self._noise_floor + 0.005 * min(rms, 0.08)
@@ -75,6 +111,57 @@ class RealtimeAudioAnalyzer:
             beat_confidence=beat_confidence,
             bpm=bpm,
             novelty=novelty,
+        )
+
+    def _input_metrics(
+        self,
+        samples: array[int],
+        mono: list[float],
+        timestamp: float,
+        rms: float,
+    ) -> AudioInputMetrics:
+        channel_rms: list[float] = []
+        channel_peak: list[float] = []
+        for channel in range(self.channels):
+            values = samples[channel::self.channels]
+            if not values:
+                channel_rms.append(0.0)
+                channel_peak.append(0.0)
+                continue
+            channel_rms.append(
+                math.sqrt(sum(sample * sample for sample in values) / len(values))
+                / 32768.0
+            )
+            channel_peak.append(max(abs(sample) for sample in values) / 32768.0)
+
+        point_count = min(128, len(mono))
+        if point_count:
+            waveform = tuple(
+                clamp(
+                    mono[
+                        min(
+                            len(mono) - 1,
+                            round(index * (len(mono) - 1) / max(1, point_count - 1)),
+                        )
+                    ]
+                    / 32768.0,
+                    -1.0,
+                    1.0,
+                )
+                for index in range(point_count)
+            )
+        else:
+            waveform = ()
+        return AudioInputMetrics(
+            timestamp_s=timestamp,
+            frame_count=len(mono),
+            rms=rms,
+            dbfs=max(-120.0, 20.0 * math.log10(max(rms, 1e-6))),
+            peak=max(abs(sample) for sample in samples) / 32768.0,
+            channel_rms=tuple(channel_rms),
+            channel_peak=tuple(channel_peak),
+            clipped_samples=sum(1 for sample in samples if abs(sample) >= 32760),
+            waveform=waveform,
         )
 
     def _downmix(self, samples: array[int]) -> list[float]:

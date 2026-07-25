@@ -49,12 +49,14 @@ The command-line tools below remain available for development and diagnostics.
 - Explainable gesture selection
 - Private SQLite song, analysis, routine, decision, and feedback memory
 - Provider-neutral media identity
-- Optional Spotify PKCE login and now-playing metadata
+- Built-in Spotify Connect console with search, transport, queue, seeking,
+  volume, device selection, album art, and now-playing metadata
 - A complete simulation from musical observations to virtual DMX
 - A dark, KDE-inspired technical desktop console with hotkeys
 - A responsive phone/tablet influence and feedback remote
 - Live room/beam visualization, target solving, patch and calibration editing
-- Audio scope, rhythm lock, expression meters, event log, and DMX heatmap
+- Real PCM waveform, packet heartbeat, dBFS/RMS/peak/clipping proof, rhythm
+  lock, expression meters, event log, and DMX heatmap
 - One-click desktop launcher
 
 The `live-demo` and `dmx-blackout` commands write directly to the FT232R cable.
@@ -131,23 +133,29 @@ Listen to line-in for ten seconds without generating DMX:
 ./scripts/lumen listen --device default --duration 10
 ```
 
-The current sandbox used to build the project cannot see the host ALSA sound
-card. `doctor` and `audio-devices` therefore report it as unavailable here. Run
-the same commands from the PC's normal terminal to identify the real line-in
-device.
+## Spotify music console
 
-## Spotify identity
+Spotify is an optional music browser, Connect remote, and identity source. The
+line-in remains authoritative for musical timing and Lumen's own analysis, so
+the engine also works for instruments and other non-Spotify sources.
 
-Spotify is an optional identity source. The line-in remains authoritative for
-musical timing and Lumen's own analysis.
-
-1. Create a private app in the Spotify developer dashboard.
-2. Add this exact redirect URI:
+1. Open **System → Spotify playback identity** in the desktop console.
+2. Use its link to create a private app in the Spotify developer dashboard and
+   select the Web API.
+3. Add this exact redirect URI:
 
    `http://127.0.0.1:8765/callback`
 
-3. Copy its client ID. A client secret is not required because Lumen uses PKCE.
-4. Connect locally:
+4. Paste the client ID into Lumen and press **Connect Spotify**. A client secret
+   is not required because Lumen uses PKCE.
+5. Approve the private app once in the desktop browser, then open
+   **Spotify console** in Lumen.
+
+The console controls the existing Chromecast Audio through Spotify Connect; it
+does not move playback to the Ubuntu PC.
+
+The equivalent command-line login and inspection commands remain available for
+diagnostics:
 
 ```bash
 export LUMEN_SPOTIFY_CLIENT_ID='your-client-id'

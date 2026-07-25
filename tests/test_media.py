@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from lumen_engine.media import media_identity_from_spotify
+from lumen_engine.media import (
+    media_identity_from_spotify,
+    spotify_playback_summary,
+    spotify_track_summary,
+)
 
 
 class SpotifyMappingTests(unittest.TestCase):
@@ -33,7 +37,38 @@ class SpotifyMappingTests(unittest.TestCase):
     def test_missing_item_means_no_playback(self) -> None:
         self.assertIsNone(media_identity_from_spotify({"item": None}))
 
+    def test_console_summary_keeps_art_and_device_without_raw_payload(self) -> None:
+        track = {
+            "uri": "spotify:track:abc",
+            "id": "abc",
+            "name": "Signal",
+            "artists": [{"name": "The Inputs"}],
+            "duration_ms": 180_000,
+            "album": {
+                "name": "Line Level",
+                "images": [{"url": "https://i.scdn.co/image/test"}],
+            },
+        }
+        summary = spotify_track_summary(track)
+        self.assertEqual(summary["artists"], ["The Inputs"])
+        self.assertEqual(summary["image_url"], "https://i.scdn.co/image/test")
+        playback = spotify_playback_summary(
+            {
+                "item": track,
+                "device": {
+                    "id": "speaker",
+                    "name": "Garage Chromecast",
+                    "type": "speaker",
+                    "is_active": True,
+                },
+                "is_playing": True,
+                "progress_ms": 42_000,
+            }
+        )
+        assert playback is not None
+        self.assertEqual(playback["device"]["name"], "Garage Chromecast")
+        self.assertTrue(playback["is_playing"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -25,6 +25,9 @@ class AudioAnalyzerTests(unittest.TestCase):
         self.assertEqual(observation.loudness, 0.0)
         self.assertEqual(observation.onset_strength, 0.0)
         self.assertEqual(observation.low_energy, 0.0)
+        self.assertEqual(analyzer.last_metrics.dbfs, -120.0)
+        self.assertEqual(analyzer.last_metrics.frame_count, 2048)
+        self.assertEqual(analyzer.last_metrics.clipped_samples, 0)
 
     def test_low_sine_has_more_low_than_high_energy(self) -> None:
         analyzer = RealtimeAudioAnalyzer(sample_rate=8_000, channels=1)
@@ -39,8 +42,19 @@ class AudioAnalyzerTests(unittest.TestCase):
             1.0,
             places=6,
         )
+        self.assertGreater(analyzer.last_metrics.dbfs, -20.0)
+        self.assertGreater(analyzer.last_metrics.peak, 0.3)
+        self.assertEqual(len(analyzer.last_metrics.waveform), 128)
+
+    def test_stereo_metrics_report_each_channel_and_clipping(self) -> None:
+        analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=2)
+        samples = array("h", [32767, 1000, -32768, -1000] * 512)
+        analyzer.analyze_pcm16(samples.tobytes(), timestamp_s=2.0)
+        metrics = analyzer.last_metrics
+        self.assertEqual(metrics.frame_count, 1024)
+        self.assertGreater(metrics.channel_rms[0], metrics.channel_rms[1])
+        self.assertGreaterEqual(metrics.clipped_samples, 1024)
 
 
 if __name__ == "__main__":
     unittest.main()
-

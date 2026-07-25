@@ -24,10 +24,15 @@ import subprocess
 import threading
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 import webbrowser
 
-from lumen_engine.audio import AudioCaptureConfig, AlsaLineIn, RealtimeAudioAnalyzer
+from lumen_engine.audio import (
+    AudioCaptureConfig,
+    AudioInputMetrics,
+    AlsaLineIn,
+    RealtimeAudioAnalyzer,
+)
 from lumen_engine.config import RigConfig, load_rig, rig_from_dict
 from lumen_engine.dmx import DMXFrame, DMXOutput, VirtualDMXOutput
 from lumen_engine.expression import ExpressionEngine, ExpressionPolicy
@@ -35,6 +40,8 @@ from lumen_engine.media import (
     SpotifyNowPlayingProvider,
     SpotifyOAuthPKCE,
     SpotifyTokenCache,
+    SpotifyWebAPI,
+    media_identity_from_spotify,
 )
 from lumen_engine.memory import SongMemoryStore
 from lumen_engine.models import (
@@ -239,6 +246,13 @@ class LumenApplication:
         self._status_sequence = 0
         self._last_media_poll = 0.0
         self._spotify_error: str | None = None
+        self._audio_metrics = AudioInputMetrics.silence()
+        self._audio_packets = 0
+        self._audio_frames = 0
+        self._audio_bytes = 0
+        self._audio_capture_started_at: float | None = None
+        self._audio_last_packet_at: float | None = None
+        self._audio_packet_times: deque[float] = deque(maxlen=96)
         self._add_event("system", f"Loaded {self.rig.name}")
         self.solve_target(self.selected_target)
 
@@ -291,6 +305,7 @@ class LumenApplication:
             self.engine_phase = "starting"
             self.last_error = None
             self.started_at = time.monotonic()
+            self._reset_audio_diagnostics()
             self._thread = threading.Thread(
                 target=self._run,
                 args=(normalized,),
@@ -376,6 +391,7 @@ class LumenApplication:
                 self._status_sequence += 1
 
     def _run_audio(self, runtime: PerformanceRuntime) -> None:
+        self._prepare_dedicated_line_input()
         capture_config = AudioCaptureConfig(device=self.audio_device)
         analyzer = RealtimeAudioAnalyzer(
             capture_config.sample_rate, capture_config.channels
@@ -385,7 +401,44 @@ class LumenApplication:
                 if self._stop.is_set():
                     break
                 observation = analyzer.analyze_pcm16(pcm)
-                self._accept_runtime_frame(observation, runtime.step(observation))
+                self._accept_runtime_frame(
+                    observation,
+                    runtime.step(observation),
+                    audio_metrics=analyzer.last_metrics,
+                    audio_bytes=len(pcm),
+                )
+
+    def _prepare_dedicated_line_input(self) -> None:
+        """Apply this controller PC's known-good Realtek line-input baseline."""
+
+        if self.audio_device != "default" or shutil.which("amixer") is None:
+            return
+        commands = (
+            ["amixer", "-q", "-c", "0", "sset", "Input Source", "Line"],
+            ["amixer", "-q", "-c", "0", "sset", "Capture", "0dB"],
+        )
+        for command in commands:
+            result = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode:
+                detail = (result.stderr or result.stdout).strip()
+                with self._lock:
+                    self._add_event(
+                        "audio",
+                        "Mixer baseline could not be applied"
+                        + (f": {detail}" if detail else ""),
+                    )
+                return
+        with self._lock:
+            self._add_event(
+                "audio",
+                "Prepared Realtek Line input at 0 dB capture gain",
+            )
 
     def _run_demo(self, runtime: PerformanceRuntime) -> None:
         index = 0
@@ -398,8 +451,21 @@ class LumenApplication:
         self,
         observation: MusicalObservation,
         frame: RuntimeFrame,
+        *,
+        audio_metrics: AudioInputMetrics | None = None,
+        audio_bytes: int = 0,
     ) -> None:
         with self._lock:
+            if audio_metrics is not None:
+                packet_time = time.monotonic()
+                if self._audio_capture_started_at is None:
+                    self._audio_capture_started_at = packet_time
+                self._audio_last_packet_at = packet_time
+                self._audio_packet_times.append(packet_time)
+                self._audio_packets += 1
+                self._audio_frames += audio_metrics.frame_count
+                self._audio_bytes += audio_bytes
+                self._audio_metrics = audio_metrics
             self.observation = observation
             self.frame = frame
             gesture = frame.decision.gesture.value
@@ -409,13 +475,94 @@ class LumenApplication:
                     "gesture",
                     f"{gesture.title()}: {frame.decision.reason.split('.')[0]}.",
                 )
-                self.memory.log_decision(
-                    frame.decision,
-                    song_id=self.song_id,
-                    position_ms=self._media_position_ms(),
-                )
+                if self.song_id is not None:
+                    self.memory.log_decision(
+                        frame.decision,
+                        song_id=self.song_id,
+                        position_ms=self._media_position_ms(),
+                    )
             self._status_sequence += 1
         self._poll_spotify_if_due()
+
+    def _reset_audio_diagnostics(self) -> None:
+        self._audio_metrics = AudioInputMetrics.silence()
+        self._audio_packets = 0
+        self._audio_frames = 0
+        self._audio_bytes = 0
+        self._audio_capture_started_at = None
+        self._audio_last_packet_at = None
+        self._audio_packet_times.clear()
+
+    def _audio_snapshot_unlocked(self, running: bool) -> dict[str, Any]:
+        now = time.monotonic()
+        last_age_ms = (
+            None
+            if self._audio_last_packet_at is None
+            else max(0.0, (now - self._audio_last_packet_at) * 1000.0)
+        )
+        packet_rate_hz = 0.0
+        if len(self._audio_packet_times) >= 2:
+            elapsed = self._audio_packet_times[-1] - self._audio_packet_times[0]
+            if elapsed > 0:
+                packet_rate_hz = (
+                    len(self._audio_packet_times) - 1
+                ) / elapsed
+
+        if running and self.engine_mode == "demo":
+            state = "simulated"
+            label = "DEMO — NO PHYSICAL INPUT"
+            detail = "The interface is being driven by generated observations."
+        elif not running:
+            state = "inactive"
+            label = "INPUT TEST NOT RUNNING"
+            detail = "Start Monitor to test the physical line input without DMX output."
+        elif self._audio_packets == 0:
+            state = "waiting"
+            label = "WAITING FOR PCM"
+            detail = f"ALSA is opening {self.audio_device}; no packet has arrived yet."
+        elif last_age_ms is not None and last_age_ms > 750:
+            state = "stale"
+            label = "PCM STREAM STALLED"
+            detail = f"The last audio packet arrived {last_age_ms / 1000.0:.1f}s ago."
+        elif self._audio_metrics.clipped_samples:
+            state = "clipping"
+            label = "SIGNAL CLIPPING"
+            detail = (
+                f"{self._audio_metrics.clipped_samples} samples hit full scale "
+                "in the latest packet."
+            )
+        elif self._audio_metrics.dbfs > -55.0:
+            state = "signal"
+            label = "PHYSICAL SIGNAL DETECTED"
+            detail = (
+                "Fresh PCM is arriving from the selected ALSA line input and "
+                "is being analyzed."
+            )
+        else:
+            state = "quiet"
+            label = "PCM LIVE — INPUT QUIET"
+            detail = (
+                "Fresh PCM is arriving, but its current level is below "
+                "−55 dBFS."
+            )
+        return {
+            "state": state,
+            "label": label,
+            "detail": detail,
+            "source": "demo" if self.engine_mode == "demo" else "line-in",
+            "packets_received": self._audio_packets,
+            "frames_received": self._audio_frames,
+            "bytes_received": self._audio_bytes,
+            "packet_rate_hz": packet_rate_hz,
+            "expected_packet_rate_hz": 48_000 / 2_048,
+            "last_packet_age_ms": last_age_ms,
+            "capture_uptime_s": (
+                None
+                if self._audio_capture_started_at is None
+                else max(0.0, now - self._audio_capture_started_at)
+            ),
+            "metrics": asdict(self._audio_metrics),
+        }
 
     def _runtime_for_rig(self, output: GatedOutput) -> PerformanceRuntime:
         width_target = max(0.25, self.rig.room.width_m * 0.35)
@@ -590,6 +737,78 @@ class LumenApplication:
                 self._spotify_error = str(error)
                 self._add_event("fault", f"Spotify connection: {error}")
                 self._status_sequence += 1
+
+    def spotify_console(self, query: str = "") -> dict[str, Any]:
+        if not self.spotify_client_id or not DEFAULT_SPOTIFY_TOKEN.exists():
+            return {
+                "connected": False,
+                "control_authorized": False,
+                "granted_scopes": [],
+                "playback": None,
+                "devices": [],
+                "results": [],
+                "query": query,
+                "message": (
+                    "Connect a private Spotify developer app in System to "
+                    "activate this console."
+                ),
+            }
+        try:
+            oauth = SpotifyOAuthPKCE(
+                client_id=self.spotify_client_id,
+                cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
+            )
+            client = SpotifyWebAPI(oauth.valid_token)
+            console = client.console(query=query[:200])
+            with self._lock:
+                self._spotify_error = None
+                self._remember_spotify_payload(client.last_playback_payload)
+                self._status_sequence += 1
+            return console
+        except Exception as error:
+            with self._lock:
+                self._spotify_error = str(error)
+                self._status_sequence += 1
+            raise RuntimeError(str(error)) from error
+
+    def spotify_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.spotify_client_id or not DEFAULT_SPOTIFY_TOKEN.exists():
+            raise RuntimeError("connect Spotify in System first")
+        action = str(payload.get("action", "")).strip().lower()
+        if not action:
+            raise ValueError("Spotify action is required")
+        oauth = SpotifyOAuthPKCE(
+            client_id=self.spotify_client_id,
+            cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
+        )
+        try:
+            SpotifyWebAPI(oauth.valid_token).command(action, payload)
+        except Exception as error:
+            with self._lock:
+                self._spotify_error = str(error)
+                self._status_sequence += 1
+            raise RuntimeError(str(error)) from error
+        with self._lock:
+            self._spotify_error = None
+            self._last_media_poll = 0.0
+            self._add_event("media", f"Spotify control: {action}")
+            self._status_sequence += 1
+        return {"accepted": True, "action": action}
+
+    def _remember_spotify_payload(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        media = media_identity_from_spotify(payload or {})
+        self.media = media
+        if media is None:
+            return
+        key = f"{media.provider}:{media.provider_item_id}"
+        count_play = key != self._last_media_key
+        self.song_id = self.memory.remember_media(media, count_play=count_play)
+        if count_play:
+            self._last_media_key = key
+            self._add_event("media", f"Now playing {media.display_name}")
 
     def solve_target(self, target: Vec3) -> list[dict[str, Any]]:
         solver = SpatialTargetingEngine()
@@ -805,7 +1024,7 @@ class LumenApplication:
             return {
                 "project": {
                     "name": "Lumen Engine",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                     "role": "Spatial music-lighting control",
                 },
                 "rig": self._rig_payload,
@@ -825,6 +1044,7 @@ class LumenApplication:
 
     def _snapshot_unlocked(self) -> dict[str, Any]:
         observation = asdict(self.observation)
+        running = self._thread is not None and self._thread.is_alive()
         decision: dict[str, Any] | None = None
         solutions: list[dict[str, Any]] = []
         dmx: dict[str, Any] = {"universes": [], "active_channels": []}
@@ -884,7 +1104,7 @@ class LumenApplication:
             "engine": {
                 "mode": self.engine_mode,
                 "phase": self.engine_phase,
-                "running": self._thread is not None and self._thread.is_alive(),
+                "running": running,
                 "uptime_s": (
                     None
                     if self.started_at is None
@@ -894,6 +1114,7 @@ class LumenApplication:
                 "error": self.last_error,
             },
             "controls": asdict(self.controls),
+            "audio": self._audio_snapshot_unlocked(running),
             "observation": observation,
             "decision": decision,
             "solutions": solutions,
@@ -911,7 +1132,8 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
     server: "LumenHTTPServer"
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/bootstrap":
             self._json(HTTPStatus.OK, self.server.application.bootstrap())
             return
@@ -926,6 +1148,16 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 self.server.application.memory.summary(limit=100),
             )
+            return
+        if path == "/api/spotify":
+            query = parse_qs(parsed.query).get("q", [""])[0]
+            try:
+                self._json(
+                    HTTPStatus.OK,
+                    self.server.application.spotify_console(query),
+                )
+            except RuntimeError as error:
+                self._json(HTTPStatus.CONFLICT, {"error": str(error)})
             return
         self._serve_static(path)
 
@@ -965,6 +1197,8 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.patch_settings(payload)
             elif path == "/api/spotify/connect":
                 result = app.connect_spotify(payload)
+            elif path == "/api/spotify/control":
+                result = app.spotify_command(payload)
             elif path == "/api/target":
                 target = Vec3(
                     float(payload["x"]),

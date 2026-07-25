@@ -6,16 +6,20 @@ const app = {
   status: null,
   system: null,
   memory: null,
+  spotify: null,
   page: "performance",
   selectedFixtureId: null,
   roomView: "plan",
   rigView: "plan",
-  scope: Array.from({ length: 150 }, () => 0),
+  lastAudioPacketCount: 0,
+  lastBeatPhase: null,
   pointer: { dragging: false, moved: false, fixtureId: null },
   polling: null,
   controlTimer: null,
   disconnected: false,
   pollCount: 0,
+  spotifyRefreshing: false,
+  spotifyFetchedAt: 0,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -119,13 +123,14 @@ function selectedFixture() {
 }
 
 function setPage(name) {
-  if (!["performance", "rig", "audio", "memory", "system"].includes(name)) return;
+  if (!["performance", "rig", "audio", "memory", "music", "system"].includes(name)) return;
   app.page = name;
   $$(".workspace-page").forEach((page) => page.classList.toggle("active", page.dataset.page === name));
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.nav === name));
   if (name === "rig") window.setTimeout(drawRig, 30);
   if (name === "performance") window.setTimeout(drawPerformanceRoom, 30);
   if (name === "audio") window.setTimeout(drawScope, 30);
+  if (name === "music") refreshSpotifyConsole(false);
 }
 
 async function initialize() {
@@ -140,6 +145,7 @@ async function initialize() {
     app.memory = app.bootstrap.memory;
     renderBootstrap();
     renderStatus();
+    refreshSpotifyConsole(false);
     app.disconnected = false;
     $("loading-screen").classList.add("loaded");
   } catch (error) {
@@ -168,6 +174,9 @@ async function pollStatus() {
       app.system = await api("/api/system");
       renderSystem(app.system);
       updateComponentStatuses();
+    }
+    if (app.pollCount % 30 === 0 && app.system?.spotify?.token_present) {
+      refreshSpotifyConsole(false);
     }
   } catch {
     if (!app.disconnected) toast("Connection interrupted", "Trying to reconnect to the local Lumen service.", "error");
@@ -219,8 +228,7 @@ function renderStatus() {
   setText("remote-engine-state", label(engine.phase));
   setText("remote-output-state", status.output ? `${status.output.backend} · ${status.output.frames_sent || 0} frames` : "No output active");
   setText("audio-device-name", engine.audio_device);
-  setText("audio-device-state", running && engine.mode !== "demo" ? "Capturing" : running ? "Demo source" : "Not running");
-  $("audio-device-state")?.classList.toggle("online", running);
+  renderAudioDiagnostics(status.audio, engine);
 
   for (const id of ["rail-state", "footer-state"]) {
     const element = $(id);
@@ -241,11 +249,68 @@ function renderStatus() {
   renderConnection(true);
   updateComponentStatuses();
 
-  app.scope.push(clamp(observation.loudness) * (0.55 + 0.45 * Math.sin(Date.now() / 70)));
-  if (app.scope.length > 150) app.scope.shift();
   if (app.page === "performance") drawPerformanceRoom();
   if (app.page === "rig") drawRig();
   if (app.page === "audio") drawScope();
+}
+
+function dbfs(value) {
+  const numeric = Math.max(0, Number(value) || 0);
+  return Math.max(-120, 20 * Math.log10(Math.max(numeric, 0.000001)));
+}
+
+function renderAudioDiagnostics(audio = {}, engine = {}) {
+  const metrics = audio.metrics || {};
+  const state = audio.state || "inactive";
+  const proof = $("audio-proof");
+  if (proof) proof.dataset.state = state;
+  setText("audio-proof-label", audio.label || "INPUT TEST NOT RUNNING");
+  setText("audio-proof-detail", audio.detail || "No capture information is available.");
+  setText("audio-dbfs", `${Number(metrics.dbfs ?? -120).toFixed(1)} dBFS`);
+  setWidth("raw-level-bar", (Number(metrics.dbfs ?? -120) + 60) / 60);
+  setText("pcm-packets", Number(audio.packets_received || 0).toLocaleString());
+  setText("pcm-age", audio.last_packet_age_ms === null || audio.last_packet_age_ms === undefined
+    ? "—"
+    : audio.last_packet_age_ms < 1000
+      ? `${Math.round(audio.last_packet_age_ms)} ms`
+      : `${(audio.last_packet_age_ms / 1000).toFixed(1)} s`);
+  setText("pcm-rate", `${Number(audio.packet_rate_hz || 0).toFixed(1)} /s`);
+  setText("pcm-left", `${dbfs(metrics.channel_rms?.[0]).toFixed(1)} dB`);
+  setText("pcm-right", `${dbfs(metrics.channel_rms?.[1]).toFixed(1)} dB`);
+  setText("pcm-peak", `${Math.round(clamp(metrics.peak) * 100)}% / ${metrics.clipped_samples || 0}`);
+
+  const stateLabel = {
+    signal: "Signal",
+    quiet: "PCM live",
+    clipping: "Clipping",
+    waiting: "Opening input",
+    stale: "Stalled",
+    simulated: "Demo source",
+    inactive: "Not running",
+  }[state] || label(state);
+  setText("audio-device-state", stateLabel);
+  setText("remote-audio-state", stateLabel);
+  setText(
+    "remote-audio-level",
+    ["signal", "quiet", "clipping"].includes(state)
+      ? `${Number(metrics.dbfs ?? -120).toFixed(1)} dBFS · ${Number(audio.packets_received || 0).toLocaleString()} packets`
+      : audio.detail || "Start Monitor on the console",
+  );
+  $("audio-device-state")?.classList.toggle("online", ["signal", "quiet"].includes(state));
+  const testButton = $("audio-input-test-button");
+  if (testButton) {
+    testButton.textContent = engine.running && engine.mode === "monitor" ? "Stop input test" : "Start input test";
+    testButton.disabled = Boolean(engine.running && engine.mode !== "monitor");
+  }
+
+  const packetCount = Number(audio.packets_received || 0);
+  if (packetCount !== app.lastAudioPacketCount) {
+    const heartbeat = $("pcm-heartbeat");
+    heartbeat?.classList.remove("tick");
+    void heartbeat?.offsetWidth;
+    heartbeat?.classList.add("tick");
+    app.lastAudioPacketCount = packetCount;
+  }
 }
 
 function formatUptime(seconds) {
@@ -302,6 +367,13 @@ function renderMedia(media, observation) {
   setWidth("nav-progress", progress);
   setWidth("remote-track-progress", progress);
   setText("remote-feedback-time", position !== null && position !== undefined ? `At ${formatTime(position)}` : "This moment");
+  if (media?.provider === "spotify") {
+    setText("spotify-position", formatTime(position));
+    setText("spotify-duration", formatTime(duration));
+    if ($("spotify-seek") && document.activeElement !== $("spotify-seek")) {
+      $("spotify-seek").value = duration ? Math.round(clamp(position / duration) * 1000) : 0;
+    }
+  }
 
   const bpm = observation.bpm ? Number(observation.bpm).toFixed(1) : "—";
   const section = label(observation.section || "waiting");
@@ -310,6 +382,131 @@ function renderMedia(media, observation) {
   setText("fact-section", section);
   setText("remote-bpm", bpm);
   setText("remote-section", section.toUpperCase());
+}
+
+async function refreshSpotifyConsole(showErrors = false, query = null) {
+  if (app.spotifyRefreshing) return;
+  app.spotifyRefreshing = true;
+  try {
+    const requestedQuery = query === null ? (app.spotify?.query || "") : query;
+    app.spotify = await api(`/api/spotify${requestedQuery ? `?q=${encodeURIComponent(requestedQuery)}` : ""}`);
+    app.spotifyFetchedAt = Date.now();
+    renderSpotifyConsole();
+  } catch (error) {
+    if (showErrors) toast("Spotify console unavailable", error.message, "error");
+    const message = $("spotify-search-message");
+    if (message) message.textContent = error.message;
+  } finally {
+    app.spotifyRefreshing = false;
+  }
+}
+
+function renderSpotifyConsole() {
+  const spotify = app.spotify || { connected: false, devices: [], results: [] };
+  $("spotify-console-setup")?.classList.toggle("hidden", Boolean(spotify.connected));
+  $("spotify-console-connected")?.classList.toggle("hidden", !spotify.connected);
+  if (!spotify.connected) return;
+
+  const playback = spotify.playback || {};
+  const track = playback.track || {};
+  const activeDevice = playback.device || spotify.devices.find((device) => device.is_active) || null;
+  setText("spotify-player-state", playback.is_playing ? "PLAYING" : track.name ? "PAUSED" : "IDLE");
+  setText("spotify-track-title", track.name || "Choose music from Spotify");
+  setText("spotify-track-artists", track.artists?.length ? track.artists.join(", ") : "Search below or use your usual Spotify app.");
+  setText("spotify-album", track.album || "No active playback");
+  setText("spotify-position", formatTime(playback.progress_ms));
+  setText("spotify-duration", formatTime(track.duration_ms));
+  setText("spotify-device-name", activeDevice?.name || "No active device");
+  setText("spotify-control-scope", spotify.control_authorized ? "CONTROL READY" : "RECONNECT REQUIRED");
+
+  const cover = $("spotify-cover-image");
+  if (cover) {
+    if (track.image_url) {
+      cover.src = track.image_url;
+      cover.alt = `${track.album || track.name || "Spotify"} cover`;
+    } else {
+      cover.removeAttribute("src");
+      cover.alt = "";
+    }
+  }
+  $("spotify-cover-placeholder")?.classList.toggle("hidden", Boolean(track.image_url));
+  if ($("spotify-play-button")) $("spotify-play-button").textContent = playback.is_playing ? "❚❚" : "▶";
+  if ($("spotify-seek") && document.activeElement !== $("spotify-seek")) {
+    $("spotify-seek").value = track.duration_ms
+      ? Math.round(clamp(Number(playback.progress_ms || 0) / Number(track.duration_ms)) * 1000)
+      : 0;
+  }
+
+  const deviceSelect = $("spotify-device-select");
+  if (deviceSelect) {
+    const selected = deviceSelect.value;
+    deviceSelect.innerHTML = spotify.devices.length
+      ? spotify.devices
+        .map((device) => `<option value="${escapeHtml(device.id || "")}" ${device.id === selected || (!selected && device.is_active) ? "selected" : ""}>${escapeHtml(device.name || "Unnamed device")} · ${escapeHtml(device.type || "device")}${device.is_active ? " · active" : ""}</option>`)
+        .join("")
+      : `<option value="">No Connect devices reported</option>`;
+  }
+  const selectedDevice = spotify.devices.find((device) => device.id === deviceSelect?.value) || activeDevice;
+  if ($("spotify-volume") && document.activeElement !== $("spotify-volume")) {
+    $("spotify-volume").value = Number(selectedDevice?.volume_percent ?? 50);
+    $("spotify-volume").disabled = !selectedDevice?.supports_volume;
+  }
+
+  $$(
+    "#spotify-previous-button, #spotify-play-button, #spotify-next-button, #spotify-transfer-button, #spotify-seek, #spotify-volume",
+  ).forEach((control) => {
+    if (control.id !== "spotify-volume" || selectedDevice?.supports_volume) {
+      control.disabled = !spotify.control_authorized;
+    }
+  });
+
+  const message = $("spotify-search-message");
+  if (message) {
+    message.textContent = spotify.control_authorized
+      ? spotify.query
+        ? `${spotify.results.length} result${spotify.results.length === 1 ? "" : "s"} for “${spotify.query}”.`
+        : "Search the Spotify catalog, then play on the selected Connect device or add a track to the queue."
+      : "Reconnect Spotify from System once to grant playback-control permission.";
+  }
+  const results = $("spotify-results");
+  if (results) {
+    results.innerHTML = (spotify.results || [])
+      .map((item) => `<div class="spotify-result">
+        ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="">` : `<span class="result-cover"></span>`}
+        <div class="spotify-result-copy">
+          <b>${escapeHtml(item.name || "Untitled")}${item.explicit ? " · E" : ""}</b>
+          <span>${escapeHtml(item.artists?.join(", ") || "Unknown artist")}</span>
+          <small>${escapeHtml(item.album || "")} · ${formatTime(item.duration_ms)}</small>
+        </div>
+        <div class="spotify-result-actions">
+          <button data-spotify-play="${escapeHtml(item.uri || "")}" ${spotify.control_authorized ? "" : "disabled"}>Play</button>
+          <button data-spotify-queue="${escapeHtml(item.uri || "")}" ${spotify.control_authorized ? "" : "disabled"}>Queue</button>
+        </div>
+      </div>`)
+      .join("");
+    $$("[data-spotify-play]", results).forEach((button) => {
+      button.addEventListener("click", () => spotifyCommand("play", { uri: button.dataset.spotifyPlay }));
+    });
+    $$("[data-spotify-queue]", results).forEach((button) => {
+      button.addEventListener("click", () => spotifyCommand("queue", { uri: button.dataset.spotifyQueue }));
+    });
+  }
+}
+
+function selectedSpotifyDeviceId() {
+  return $("spotify-device-select")?.value || app.spotify?.playback?.device?.id || "";
+}
+
+async function spotifyCommand(action, values = {}) {
+  try {
+    await api("/api/spotify/control", {
+      method: "POST",
+      body: { action, device_id: selectedSpotifyDeviceId(), ...values },
+    });
+    window.setTimeout(() => refreshSpotifyConsole(false), 350);
+  } catch (error) {
+    toast("Spotify command failed", error.message, "error");
+  }
 }
 
 function renderExpression(decision, expression, observation) {
@@ -349,6 +546,18 @@ function renderExpression(decision, expression, observation) {
   const phase = clamp(observation.beat_phase);
   if ($("beat-dial-progress")) $("beat-dial-progress").style.strokeDashoffset = String(circumference * (1 - phase));
   if ($("beat-hand")) $("beat-hand").style.transform = `rotate(${phase * 360}deg)`;
+  const beatArrived = (
+    observation.beat_confidence >= 0.35
+    && app.lastBeatPhase !== null
+    && phase < app.lastBeatPhase
+  ) || observation.onset_strength >= 0.72;
+  if (beatArrived) {
+    const lamp = $("beat-receive-lamp");
+    lamp?.classList.remove("pulse");
+    void lamp?.offsetWidth;
+    lamp?.classList.add("pulse");
+  }
+  app.lastBeatPhase = phase;
 }
 
 function renderDmx(status) {
@@ -389,9 +598,21 @@ function updateComponentStatuses() {
   if (!engine || !system) return;
   const audio = $("audio-status");
   const hasAudio = Boolean(system.audio?.cards?.length);
+  const audioState = app.status?.audio?.state;
   if (audio) {
-    audio.querySelector("b").textContent = engine.running && engine.mode !== "demo" ? "Capturing" : hasAudio ? "Available" : "Not reported";
-    setStatusClass(audio, engine.running && engine.mode !== "demo" ? "active" : hasAudio ? "ok" : "warn");
+    const text = audioState === "signal" ? `${Number(app.status.audio.metrics?.dbfs ?? -120).toFixed(0)} dBFS`
+      : audioState === "quiet" ? "PCM live"
+      : audioState === "clipping" ? "Clipping"
+      : audioState === "waiting" ? "Opening"
+      : audioState === "stale" ? "Stalled"
+      : hasAudio ? "Available" : "Not reported";
+    audio.querySelector("b").textContent = text;
+    setStatusClass(
+      audio,
+      audioState === "signal" || audioState === "quiet" ? "active"
+        : audioState === "clipping" || audioState === "stale" ? "error"
+        : hasAudio ? "ok" : "warn",
+    );
   }
   const dmx = $("dmx-status");
   const hasDmx = Boolean(system.dmx?.ft232r_devices?.length && system.dmx?.native_driver_ready);
@@ -714,7 +935,7 @@ function drawScope() {
   if (!configured) return;
   const { context: ctx, width, height } = configured;
   ctx.clearRect(0, 0, width, height);
-  const values = app.scope;
+  const values = app.status?.audio?.metrics?.waveform || [];
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
   gradient.addColorStop(0, "rgba(100, 222, 213, .85)");
   gradient.addColorStop(1, "rgba(69, 126, 163, .42)");
@@ -723,10 +944,14 @@ function drawScope() {
   ctx.shadowColor = "rgba(100, 222, 213, .4)";
   ctx.shadowBlur = 4;
   ctx.beginPath();
-  values.forEach((value, index) => {
+  if (!values.length) {
+    ctx.moveTo(0, height * 0.5);
+    ctx.lineTo(width, height * 0.5);
+  }
+  values.forEach((rawValue, index) => {
+    const value = Math.max(-1, Math.min(1, Number(rawValue) || 0));
     const x = index / Math.max(1, values.length - 1) * width;
-    const modulation = Math.sin(index * 1.8 + performance.now() / 80) * value * height * 0.16;
-    const y = height * 0.5 - modulation - (value - 0.5) * height * 0.18;
+    const y = height * 0.5 - value * height * 0.44;
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
@@ -1061,8 +1286,42 @@ function installHandlers() {
   $("rescan-system-button")?.addEventListener("click", rescanSystem);
   $("system-rescan-button")?.addEventListener("click", rescanSystem);
   $("shutdown-lumen-button")?.addEventListener("click", shutdownLumen);
+  $("audio-input-test-button")?.addEventListener("click", () => {
+    if (app.status?.engine?.running && app.status.engine.mode === "monitor") stopEngine();
+    else startEngine("monitor");
+  });
   $("save-audio-device-button")?.addEventListener("click", saveAudioDevice);
   $("spotify-connect-button")?.addEventListener("click", connectSpotify);
+  $("spotify-refresh-button")?.addEventListener("click", () => refreshSpotifyConsole(true));
+  $("spotify-search-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    refreshSpotifyConsole(true, $("spotify-search-input")?.value.trim() || "");
+  });
+  $("spotify-previous-button")?.addEventListener("click", () => spotifyCommand("previous"));
+  $("spotify-play-button")?.addEventListener("click", () => {
+    spotifyCommand(app.spotify?.playback?.is_playing ? "pause" : "play");
+  });
+  $("spotify-next-button")?.addEventListener("click", () => spotifyCommand("next"));
+  $("spotify-transfer-button")?.addEventListener("click", () => spotifyCommand("transfer", {
+    play: Boolean(app.spotify?.playback?.is_playing),
+  }));
+  $("spotify-seek")?.addEventListener("change", (event) => {
+    const duration = Number(app.spotify?.playback?.track?.duration_ms || 0);
+    if (duration) spotifyCommand("seek", { position_ms: Math.round(duration * Number(event.target.value) / 1000) });
+  });
+  $("spotify-volume")?.addEventListener("change", (event) => {
+    spotifyCommand("volume", { volume_percent: Number(event.target.value) });
+  });
+  $("spotify-device-select")?.addEventListener("change", () => renderSpotifyConsole());
+  $("copy-spotify-redirect-button")?.addEventListener("click", async () => {
+    const redirect = "http://127.0.0.1:8765/callback";
+    try {
+      await navigator.clipboard.writeText(redirect);
+      toast("Spotify redirect URI copied", redirect, "success");
+    } catch {
+      toast("Spotify redirect URI", redirect);
+    }
+  });
   $("copy-remote-address")?.addEventListener("click", async () => {
     const address = $("remote-address").dataset.address || $("remote-address").textContent;
     try {
@@ -1152,8 +1411,8 @@ async function requestFreshGesture() {
 
 function handleHotkey(event) {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName) || event.target?.isContentEditable) return;
-  if (/^[1-5]$/.test(event.key)) {
-    setPage(["performance", "rig", "audio", "memory", "system"][Number(event.key) - 1]);
+  if (/^[1-6]$/.test(event.key)) {
+    setPage(["performance", "rig", "audio", "memory", "music", "system"][Number(event.key) - 1]);
     event.preventDefault();
   } else if (event.key.toLowerCase() === "b") {
     toggleBlackout();

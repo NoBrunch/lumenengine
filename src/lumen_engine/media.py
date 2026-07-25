@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import secrets
 import time
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -21,7 +21,11 @@ from lumen_engine.models import MediaIdentity
 
 SPOTIFY_ACCOUNTS = "https://accounts.spotify.com"
 SPOTIFY_API = "https://api.spotify.com/v1"
-SPOTIFY_SCOPES = "user-read-currently-playing user-read-playback-state"
+SPOTIFY_SCOPES = (
+    "user-read-currently-playing "
+    "user-read-playback-state "
+    "user-modify-playback-state"
+)
 
 
 class MediaIdentityProvider(Protocol):
@@ -139,6 +143,7 @@ class SpotifyOAuthPKCE:
                     "code_challenge_method": "S256",
                     "code_challenge": challenge,
                     "state": expected_state,
+                    "show_dialog": "true",
                 }
             )
         )
@@ -240,6 +245,224 @@ class SpotifyNowPlayingProvider:
         return media_identity_from_spotify(payload)
 
 
+class SpotifyWebAPI:
+    """Small Web API client for Lumen's private Spotify Connect console."""
+
+    def __init__(
+        self,
+        token_supplier: Callable[[], SpotifyToken],
+        timeout_s: float = 10.0,
+    ) -> None:
+        self.token_supplier = token_supplier
+        self.timeout_s = timeout_s
+        self.last_playback_payload: dict[str, Any] | None = None
+
+    def console(self, query: str = "") -> dict[str, Any]:
+        playback = self._request("/me/player")
+        self.last_playback_payload = (
+            playback if isinstance(playback, dict) else None
+        )
+        devices_payload = self._request("/me/player/devices") or {}
+        token = self.token_supplier()
+        granted = set(token.scope.split())
+        result: dict[str, Any] = {
+            "connected": True,
+            "control_authorized": "user-modify-playback-state" in granted,
+            "granted_scopes": sorted(granted),
+            "playback": spotify_playback_summary(playback),
+            "devices": [
+                spotify_device_summary(device)
+                for device in devices_payload.get("devices", [])
+                if isinstance(device, dict)
+            ],
+            "results": [],
+            "query": query,
+        }
+        if query.strip():
+            search = self._request(
+                "/search",
+                query={"q": query.strip(), "type": "track", "limit": 10},
+            ) or {}
+            tracks = search.get("tracks", {})
+            if isinstance(tracks, dict):
+                result["results"] = [
+                    spotify_track_summary(track)
+                    for track in tracks.get("items", [])
+                    if isinstance(track, dict)
+                ]
+        return result
+
+    def command(self, action: str, payload: dict[str, Any]) -> None:
+        device_id = str(payload.get("device_id", "")).strip() or None
+        device_query = {"device_id": device_id} if device_id else None
+        if action == "play":
+            uri = str(payload.get("uri", "")).strip()
+            body = {"uris": [uri]} if uri else None
+            self._request(
+                "/me/player/play",
+                method="PUT",
+                query=device_query,
+                body=body,
+            )
+        elif action == "pause":
+            self._request("/me/player/pause", method="PUT", query=device_query)
+        elif action == "next":
+            self._request("/me/player/next", method="POST", query=device_query)
+        elif action == "previous":
+            self._request("/me/player/previous", method="POST", query=device_query)
+        elif action == "seek":
+            position_ms = max(0, int(payload.get("position_ms", 0)))
+            query = {"position_ms": position_ms}
+            if device_id:
+                query["device_id"] = device_id
+            self._request("/me/player/seek", method="PUT", query=query)
+        elif action == "volume":
+            volume = max(0, min(100, int(payload.get("volume_percent", 0))))
+            query = {"volume_percent": volume}
+            if device_id:
+                query["device_id"] = device_id
+            self._request("/me/player/volume", method="PUT", query=query)
+        elif action == "transfer":
+            if not device_id:
+                raise ValueError("device_id is required to transfer playback")
+            self._request(
+                "/me/player",
+                method="PUT",
+                body={
+                    "device_ids": [device_id],
+                    "play": bool(payload.get("play", False)),
+                },
+            )
+        elif action == "queue":
+            uri = str(payload.get("uri", "")).strip()
+            if not uri:
+                raise ValueError("uri is required to add an item to the queue")
+            query = {"uri": uri}
+            if device_id:
+                query["device_id"] = device_id
+            self._request("/me/player/queue", method="POST", query=query)
+        else:
+            raise ValueError(f"unknown Spotify command {action!r}")
+
+    def playback(self) -> dict[str, Any] | None:
+        payload = self._request("/me/player")
+        return payload if isinstance(payload, dict) else None
+
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        query: dict[str, object] | None = None,
+        body: dict[str, object] | None = None,
+    ) -> Any:
+        token = self.token_supplier()
+        url = f"{SPOTIFY_API}{path}"
+        if query:
+            encoded = urlencode(
+                {
+                    key: value
+                    for key, value in query.items()
+                    if value is not None and value != ""
+                }
+            )
+            if encoded:
+                url = f"{url}?{encoded}"
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        headers = {"Authorization": f"Bearer {token.access_token}"}
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        request = Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=self.timeout_s) as response:
+                if response.status == 204:
+                    return None
+                return json.load(response)
+        except HTTPError as error:
+            if error.code == 204:
+                return None
+            if error.code == 429:
+                retry_after = error.headers.get("Retry-After", "unknown")
+                raise RuntimeError(
+                    f"Spotify rate limited this request; retry after {retry_after}s"
+                ) from error
+            try:
+                detail = json.loads(error.read().decode("utf-8"))
+                message = detail.get("error", {}).get("message")
+            except Exception:
+                message = None
+            raise RuntimeError(
+                f"Spotify returned {error.code}"
+                + (f": {message}" if message else "")
+            ) from error
+
+
+def spotify_track_summary(track: dict[str, Any]) -> dict[str, Any]:
+    album = track.get("album")
+    album_payload = album if isinstance(album, dict) else {}
+    artists = track.get("artists")
+    artist_payload = artists if isinstance(artists, list) else []
+    images = album_payload.get("images")
+    image_payload = images if isinstance(images, list) else []
+    image_url = next(
+        (
+            str(image.get("url"))
+            for image in image_payload
+            if isinstance(image, dict) and image.get("url")
+        ),
+        None,
+    )
+    return {
+        "uri": track.get("uri"),
+        "id": track.get("id"),
+        "name": track.get("name"),
+        "artists": [
+            str(artist.get("name"))
+            for artist in artist_payload
+            if isinstance(artist, dict) and artist.get("name")
+        ],
+        "album": album_payload.get("name"),
+        "duration_ms": track.get("duration_ms"),
+        "image_url": image_url,
+        "explicit": bool(track.get("explicit")),
+    }
+
+
+def spotify_device_summary(device: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": device.get("id"),
+        "name": device.get("name"),
+        "type": device.get("type"),
+        "is_active": bool(device.get("is_active")),
+        "is_restricted": bool(device.get("is_restricted")),
+        "volume_percent": device.get("volume_percent"),
+        "supports_volume": bool(device.get("supports_volume")),
+    }
+
+
+def spotify_playback_summary(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    item = payload.get("item")
+    device = payload.get("device")
+    return {
+        "track": (
+            spotify_track_summary(item)
+            if isinstance(item, dict)
+            else None
+        ),
+        "device": (
+            spotify_device_summary(device)
+            if isinstance(device, dict)
+            else None
+        ),
+        "is_playing": bool(payload.get("is_playing")),
+        "progress_ms": payload.get("progress_ms"),
+        "repeat_state": payload.get("repeat_state"),
+        "shuffle_state": bool(payload.get("shuffle_state")),
+    }
+
+
 def media_identity_from_spotify(payload: dict[str, object]) -> MediaIdentity | None:
     item = payload.get("item")
     if not isinstance(item, dict):
@@ -287,4 +510,3 @@ def media_identity_from_spotify(payload: dict[str, object]) -> MediaIdentity | N
         context_uri=context_uri,
         raw=payload,
     )
-

@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from lumen_engine.control import LumenApplication
 
@@ -37,8 +38,11 @@ class ControlApplicationTests(unittest.TestCase):
             status = self.application.snapshot()
         self.assertEqual(status["engine"]["mode"], "demo")
         self.assertEqual(status["output"]["backend"], "Virtual DMX")
+        self.assertEqual(status["audio"]["state"], "simulated")
+        self.assertEqual(status["audio"]["packets_received"], 0)
         self.assertIsNotNone(status["decision"])
         self.assertGreater(len(status["dmx"]["active_channels"]), 0)
+        self.assertEqual(self.application.memory.summary()["totals"]["decisions"], 0)
         self.application.stop()
 
     def test_controls_feedback_target_and_fixture_edit_are_operable(self) -> None:
@@ -83,6 +87,38 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertEqual(
             bootstrap["rig"]["fixtures"][0]["position_m"],
             [-1.1, -2.2, 2.8],
+        )
+
+    @patch("lumen_engine.control.subprocess.run")
+    @patch("lumen_engine.control.shutil.which", return_value="/usr/bin/amixer")
+    def test_default_input_prepares_dedicated_line_mixer(
+        self,
+        _which: object,
+        run: object,
+    ) -> None:
+        run.return_value.returncode = 0
+        run.return_value.stdout = ""
+        run.return_value.stderr = ""
+        self.application._prepare_dedicated_line_input()
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(
+            commands,
+            [
+                [
+                    "amixer",
+                    "-q",
+                    "-c",
+                    "0",
+                    "sset",
+                    "Input Source",
+                    "Line",
+                ],
+                ["amixer", "-q", "-c", "0", "sset", "Capture", "0dB"],
+            ],
+        )
+        self.assertIn(
+            "0 dB",
+            self.application.snapshot()["events"][0]["message"],
         )
 
 
