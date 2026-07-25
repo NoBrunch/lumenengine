@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 from lumen_engine.dmx import (
@@ -57,6 +57,8 @@ class PerformanceRuntime:
         self.motion_extents = motion_extents
         self._previous: dict[str, tuple[float, float]] = {}
         self._last_timestamp_s: float | None = None
+        self._audio_quiet_since_s: float | None = None
+        self._audio_idle_amount = 0.0
 
     def step(self, observation: MusicalObservation) -> RuntimeFrame:
         decision = self.expression.decide(observation)
@@ -64,6 +66,12 @@ class PerformanceRuntime:
             None
             if self._last_timestamp_s is None
             else max(0.0, observation.timestamp_s - self._last_timestamp_s)
+        )
+        idle_amount = self._update_audio_idle(observation)
+        output_decision = replace(
+            decision,
+            brightness=decision.brightness
+            + (24.0 / 255.0 - decision.brightness) * idle_amount,
         )
         frame = DMXFrame()
         solutions: list[TargetingSolution] = []
@@ -78,12 +86,31 @@ class PerformanceRuntime:
             )
             previous = self._previous.get(fixture.fixture_id)
             try:
-                solution = self.targeting.solve(
-                    fixture,
-                    target,
-                    previous_pan_deg=None if previous is None else previous[0],
-                    previous_tilt_deg=None if previous is None else previous[1],
-                )
+                if observation.loudness < 0.02 and previous is not None:
+                    direction = self.targeting.direction_for_angles(
+                        fixture, previous[0], previous[1]
+                    )
+                    solution = TargetingSolution(
+                        fixture_id=fixture.fixture_id,
+                        target=fixture.position_m + direction * 5.0,
+                        pan_deg=previous[0],
+                        tilt_deg=previous[1],
+                        distance_m=5.0,
+                        movement_cost_deg=0.0,
+                        aim_error_deg=0.0,
+                        branch="quiet-hold",
+                    )
+                else:
+                    solution = self.targeting.solve(
+                        fixture,
+                        target,
+                        previous_pan_deg=None
+                        if previous is None
+                        else previous[0],
+                        previous_tilt_deg=None
+                        if previous is None
+                        else previous[1],
+                    )
                 if observation.loudness >= 0.02:
                     solution = self._performance_solution(
                         fixture,
@@ -100,13 +127,14 @@ class PerformanceRuntime:
                 )
                 solutions.append(solution)
                 apply_moving_head_solution(
-                    frame, fixture, solution, decision.brightness
+                    frame, fixture, solution, output_decision.brightness
                 )
                 apply_moving_head_profile(
                     frame,
                     fixture,
-                    decision,
+                    output_decision,
                     observation,
+                    idle_amount=idle_amount,
                 )
             except UnreachableTargetError as error:
                 warnings.append(str(error))
@@ -115,8 +143,9 @@ class PerformanceRuntime:
             apply_auxiliary_fixture(
                 frame,
                 fixture,
-                decision,
+                output_decision,
                 observation,
+                idle_amount=idle_amount,
             )
 
         self.output.send(frame)
@@ -127,6 +156,19 @@ class PerformanceRuntime:
             dmx=frame,
             warnings=tuple(warnings),
         )
+
+    def _update_audio_idle(self, observation: MusicalObservation) -> float:
+        """Fade active effects into Party Parrot's quiet/rest state."""
+
+        if observation.loudness >= 0.02:
+            self._audio_quiet_since_s = None
+            self._audio_idle_amount = 0.0
+            return 0.0
+        if self._audio_quiet_since_s is None:
+            self._audio_quiet_since_s = observation.timestamp_s
+        quiet_for = max(0.0, observation.timestamp_s - self._audio_quiet_since_s)
+        self._audio_idle_amount = clamp((quiet_for - 3.0) / 2.0, 0.0, 1.0)
+        return self._audio_idle_amount
 
     def close(self) -> None:
         self.output.close()

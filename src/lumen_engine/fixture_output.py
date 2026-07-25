@@ -44,17 +44,23 @@ def apply_moving_head_profile(
     fixture: FixturePatch,
     decision: PerformanceDecision,
     observation: MusicalObservation | None = None,
+    idle_amount: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
         return
     if fixture.profile_key == "generic_rgbw_moving_head_11ch":
         channels = profile.channels
-        _set_relative(frame, fixture.universe, fixture.address, channels["movement_speed"], 0)
+        speed = round(200.0 * clamp(idle_amount, 0.0, 1.0))
+        _set_relative(frame, fixture.universe, fixture.address, channels["movement_speed"], speed)
         beat_pulse = 0.0 if observation is None else observation.beat_pulse
         strobe = (
             round(70 + 150 * beat_pulse)
-            if beat_pulse >= 0.52 and decision.expression.energy >= 0.42
+            if (
+                idle_amount < 1.0
+                and beat_pulse >= 0.52
+                and decision.expression.energy >= 0.42
+            )
             else 0
         )
         _set_relative(
@@ -78,6 +84,7 @@ def apply_auxiliary_fixture(
     fixture: ProfileFixturePatch,
     decision: PerformanceDecision,
     observation: MusicalObservation | None = None,
+    idle_amount: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -88,6 +95,7 @@ def apply_auxiliary_fixture(
             fixture,
             decision,
             observation,
+            idle_amount,
         )
         return
     dimmer = profile.channels.get("dimmer")
@@ -106,10 +114,38 @@ def _apply_generic_multi_effect(
     fixture: ProfileFixturePatch,
     decision: PerformanceDecision,
     observation: MusicalObservation | None = None,
+    idle_amount: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     assert profile is not None
     channels = profile.channels
+    if idle_amount >= 1.0:
+        rgbw = rgb_to_rgbw(expression_rgb(decision))
+        values = {
+            "body_rotation": 128,
+            "body_rotation_speed": 200,
+            "arm_1_motor": 128,
+            "arm_2_motor": 128,
+            "master_dimmer": 24,
+            "strobe": 0,
+            "red_laser": 0,
+            "green_laser": 0,
+            "strip_program": _strip_color_value(expression_rgb(decision)),
+            "strip_speed": 0,
+            "macro": 0,
+        }
+        for prefix in ("magic_ball", "arm_beams"):
+            for color_name, value in zip(("red", "green", "blue", "white"), rgbw):
+                values[f"{prefix}_{color_name}"] = round(value * 0.20)
+        for channel_name, value in values.items():
+            _set_relative(
+                frame,
+                fixture.universe,
+                fixture.address,
+                channels[channel_name],
+                max(0, min(255, int(value))),
+            )
+        return
     timestamp = decision.timestamp_s
     motion = decision.expression.motion
     energy = decision.expression.energy

@@ -32,6 +32,48 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.warnings, ())
         self.assertIn(0, result.dmx.universes)
 
+    def test_real_silence_parks_center_and_holds_movers(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        output = VirtualDMXOutput()
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            output,
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+        )
+        runtime.step(
+            MusicalObservation(
+                timestamp_s=0.0,
+                loudness=0.8,
+                onset_strength=0.8,
+                low_energy=0.6,
+                mid_energy=0.4,
+                high_energy=0.2,
+                beat_pulse=1.0,
+                beat_confidence=0.8,
+                bpm=120.0,
+            )
+        )
+        for index in range(1, 15):
+            result = runtime.step(
+                MusicalObservation(
+                    timestamp_s=index * 0.5,
+                    loudness=0.0,
+                    onset_strength=0.0,
+                    low_energy=0.0,
+                    mid_energy=0.0,
+                    high_energy=0.0,
+                )
+            )
+        self.assertTrue(result.solutions[0].branch.startswith("quiet-hold"))
+        self.assertEqual(result.dmx.get_channel(0, 1), 128)
+        self.assertEqual(result.dmx.get_channel(0, 2), 200)
+        self.assertEqual(result.dmx.get_channel(0, 3), 128)
+        self.assertEqual(result.dmx.get_channel(0, 4), 128)
+        self.assertEqual(result.dmx.get_channel(0, 5), 24)
+        self.assertEqual(result.dmx.get_channel(0, 6), 0)
+        self.assertEqual(result.dmx.get_channel(0, 15), 0)
+        self.assertEqual(result.dmx.get_channel(0, 16), 0)
+
     def test_active_garage_rig_uses_room_and_center_fixture_on_beats(
         self,
     ) -> None:
