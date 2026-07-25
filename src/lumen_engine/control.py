@@ -70,12 +70,12 @@ DEFAULT_SPOTIFY_TOKEN = (
 
 @dataclass(slots=True)
 class OperatorControls:
-    master: float = 0.78
-    intensity: float = 0.50
-    motion: float = 0.46
-    focus: float = 0.58
-    warmth: float = 0.42
-    influence: float = 0.62
+    master: float = 0.86
+    intensity: float = 0.62
+    motion: float = 0.68
+    focus: float = 0.50
+    warmth: float = 0.44
+    influence: float = 0.74
     blackout: bool = False
     palette: str = "midnight_teal"
 
@@ -539,6 +539,14 @@ class LumenApplication:
                 "Fresh PCM is arriving from the selected ALSA line input and "
                 "is being analyzed."
             )
+        elif self.media is not None and self.media.is_playing:
+            state = "missing"
+            label = "SPOTIFY PLAYING — NO LINE SIGNAL"
+            detail = (
+                "Spotify reports active playback, but the physical line input "
+                f"is only {self._audio_metrics.dbfs:.1f} dBFS. Lumen cannot "
+                "synchronize lighting until the splitter signal reaches this input."
+            )
         else:
             state = "quiet"
             label = "PCM LIVE — INPUT QUIET"
@@ -584,6 +592,11 @@ class LumenApplication:
             output,
             auxiliary_fixtures=self.rig.auxiliary_fixtures,
             expression=OperatorExpressionEngine(self.controls, policy),
+            motion_extents=Vec3(
+                max(0.8, self.rig.room.width_m * 0.44),
+                max(1.8, self.rig.room.depth_m * 0.33),
+                min(2.6, max(2.2, self.rig.room.height_m * 0.45)),
+            ),
         )
 
     def patch_controls(self, values: dict[str, Any]) -> dict[str, Any]:
@@ -613,22 +626,22 @@ class LumenApplication:
                 "influence": 0.78,
             },
             "balanced": {
-                "intensity": 0.50,
-                "motion": 0.46,
-                "focus": 0.58,
-                "warmth": 0.42,
-                "influence": 0.62,
+                "intensity": 0.62,
+                "motion": 0.68,
+                "focus": 0.50,
+                "warmth": 0.44,
+                "influence": 0.74,
             },
             "open": {
                 "intensity": 0.62,
-                "motion": 0.40,
+                "motion": 0.56,
                 "focus": 0.20,
                 "warmth": 0.55,
                 "influence": 0.72,
             },
             "drive": {
-                "intensity": 0.82,
-                "motion": 0.84,
+                "intensity": 0.90,
+                "motion": 0.94,
                 "focus": 0.38,
                 "warmth": 0.68,
                 "influence": 0.86,
@@ -1069,7 +1082,7 @@ class LumenApplication:
             return {
                 "project": {
                     "name": "Lumen Engine",
-                    "version": "0.3.1",
+                    "version": "0.4.0",
                     "role": "Spatial music-lighting control",
                 },
                 "rig": self._rig_payload,
@@ -1426,6 +1439,8 @@ def _demo_observation(index: int) -> MusicalObservation:
         mid_energy=clamp(0.40 + energy * 0.42, 0.0, 1.0),
         high_energy=clamp(0.18 + cycle * 0.72, 0.0, 1.0),
         beat_phase=(index % 4) / 4.0,
+        bar_phase=(index % 16) / 16.0,
+        beat_pulse=1.0 if beat else 0.18,
         beat_confidence=0.88,
         bpm=125.0,
         section=section,

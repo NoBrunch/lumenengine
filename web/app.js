@@ -13,6 +13,7 @@ const app = {
   rigView: "plan",
   lastAudioPacketCount: 0,
   lastBeatPhase: null,
+  lastBeatPulse: 0,
   pointer: { dragging: false, moved: false, fixtureId: null },
   polling: null,
   controlTimer: null,
@@ -284,6 +285,7 @@ function renderAudioDiagnostics(audio = {}, engine = {}) {
   const stateLabel = {
     signal: "Signal",
     quiet: "PCM live",
+    missing: "No line signal",
     clipping: "Clipping",
     waiting: "Opening input",
     stale: "Stalled",
@@ -294,7 +296,7 @@ function renderAudioDiagnostics(audio = {}, engine = {}) {
   setText("remote-audio-state", stateLabel);
   setText(
     "remote-audio-level",
-    ["signal", "quiet", "clipping"].includes(state)
+    ["signal", "quiet", "missing", "clipping"].includes(state)
       ? `${Number(metrics.dbfs ?? -120).toFixed(1)} dBFS · ${Number(audio.packets_received || 0).toLocaleString()} packets`
       : audio.detail || "Start Monitor on the console",
   );
@@ -667,16 +669,21 @@ function renderExpression(decision, expression, observation) {
   setText("beat-confidence-detail", percent(observation.beat_confidence));
   setText("beat-phase-detail", Number(observation.beat_phase || 0).toFixed(2));
   setText("novelty-detail", Number(observation.novelty || 0).toFixed(2));
+  setText("beat-pulse-detail", percent(observation.beat_pulse || 0));
   setText("beat-lock-badge", observation.beat_confidence >= 0.5 ? "LOCKED" : "SEARCHING");
   const circumference = 2 * Math.PI * 66;
   const phase = clamp(observation.beat_phase);
   if ($("beat-dial-progress")) $("beat-dial-progress").style.strokeDashoffset = String(circumference * (1 - phase));
   if ($("beat-hand")) $("beat-hand").style.transform = `rotate(${phase * 360}deg)`;
+  const beatPulse = Number(observation.beat_pulse || 0);
   const beatArrived = (
+    beatPulse >= 0.50
+    && app.lastBeatPulse < 0.50
+  ) || (
     observation.beat_confidence >= 0.35
     && app.lastBeatPhase !== null
     && phase < app.lastBeatPhase
-  ) || observation.onset_strength >= 0.72;
+  );
   if (beatArrived) {
     const lamp = $("beat-receive-lamp");
     lamp?.classList.remove("pulse");
@@ -684,6 +691,7 @@ function renderExpression(decision, expression, observation) {
     lamp?.classList.add("pulse");
   }
   app.lastBeatPhase = phase;
+  app.lastBeatPulse = beatPulse;
 }
 
 function renderDmx(status) {

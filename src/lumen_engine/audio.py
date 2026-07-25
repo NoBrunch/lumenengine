@@ -67,7 +67,10 @@ class RealtimeAudioAnalyzer:
         self.channels = channels
         self._previous_loudness = 0.0
         self._beat_tracker = BeatTracker()
-        self._noise_floor = 0.005
+        self._noise_floor = 0.0005
+        self._level_envelope = 0.005
+        self._beat_envelope = 0.0
+        self._last_timestamp: float | None = None
         self.last_metrics = AudioInputMetrics.silence(channels=channels)
 
     def analyze_pcm16(
@@ -87,15 +90,56 @@ class RealtimeAudioAnalyzer:
         mono = self._downmix(samples)
         rms = math.sqrt(sum(sample * sample for sample in mono) / len(mono)) / 32768.0
         self.last_metrics = self._input_metrics(samples, mono, timestamp, rms)
-        # A gentle logarithmic mapping makes normal line levels readable.
-        loudness = clamp(math.log10(1.0 + 24.0 * rms), 0.0, 1.0)
-        self._noise_floor = 0.995 * self._noise_floor + 0.005 * min(rms, 0.08)
-        rise = max(0.0, loudness - self._previous_loudness)
-        onset = clamp(rise * 5.0 + max(0.0, rms - self._noise_floor * 2.5) * 1.8, 0, 1)
+        # Track the actual interface noise without allowing sustained music to
+        # drag the floor upward. This prevents electrical hiss from becoming a
+        # fictional low-frequency "performance" during silence.
+        noise_alpha = 0.97 if rms <= self._noise_floor * 1.5 else 0.9995
+        self._noise_floor = clamp(
+            noise_alpha * self._noise_floor
+            + (1.0 - noise_alpha) * min(rms, 0.02),
+            0.00005,
+            0.02,
+        )
+        signal_present = rms >= max(0.001, self._noise_floor * 2.2)
+        if signal_present:
+            # A gentle logarithmic mapping makes normal line levels readable.
+            loudness = clamp(math.log10(1.0 + 24.0 * rms), 0.0, 1.0)
+            rise = max(0.0, loudness - self._previous_loudness)
+            transient = max(
+                0.0,
+                (rms - self._level_envelope)
+                / max(0.01, self._level_envelope),
+            )
+            onset = clamp(rise * 3.8 + transient * 0.85, 0.0, 1.0)
+            self._level_envelope += 0.08 * (rms - self._level_envelope)
+            low, mid, high = self._spectral_proportions(mono)
+        else:
+            loudness = 0.0
+            onset = 0.0
+            low = mid = high = 0.0
+            self._level_envelope += 0.02 * (
+                max(self._noise_floor, rms) - self._level_envelope
+            )
         self._previous_loudness = loudness
 
-        low, mid, high = self._spectral_proportions(mono)
-        beat_state = self._beat_tracker.update(low * loudness, now=timestamp)
+        beat_state = self._beat_tracker.update(
+            low * loudness if signal_present else 0.0,
+            now=timestamp,
+        )
+        elapsed = (
+            1.0 / 24.0
+            if self._last_timestamp is None
+            else max(0.0, min(0.25, timestamp - self._last_timestamp))
+        )
+        self._last_timestamp = timestamp
+        self._beat_envelope *= math.exp(-elapsed / 0.14)
+        if beat_state.beat:
+            self._beat_envelope = 1.0
+        elif onset >= 0.72:
+            # Strong transients remain useful while the tempo tracker is
+            # collecting enough beats to establish a confident clock.
+            self._beat_envelope = max(self._beat_envelope, 0.58)
+
         bpm = beat_state.bpm or None
         beat_confidence = beat_state.confidence
         beat_phase = (beat_state.bar_progress * 4.0) % 1.0
@@ -108,6 +152,8 @@ class RealtimeAudioAnalyzer:
             mid_energy=mid,
             high_energy=high,
             beat_phase=beat_phase,
+            bar_phase=beat_state.bar_progress,
+            beat_pulse=clamp(self._beat_envelope, 0.0, 1.0),
             beat_confidence=beat_confidence,
             bpm=bpm,
             novelty=novelty,
@@ -178,11 +224,26 @@ class RealtimeAudioAnalyzer:
     ) -> tuple[float, float, float]:
         if len(samples) < 8:
             return 0.0, 0.0, 0.0
+        # A raw, rectangular PCM window leaks DC and low-frequency power into
+        # every Goertzel bin.  On the garage line input that made ordinary
+        # full-range music appear to be roughly 99% bass.  Remove the packet's
+        # DC offset and taper both ends before measuring the bands.
+        mean = sum(samples) / len(samples)
+        last_index = len(samples) - 1
+        windowed = [
+            (sample - mean)
+            * (0.5 - 0.5 * math.cos(math.tau * index / last_index))
+            for index, sample in enumerate(samples)
+        ]
         # Goertzel bins are cheaper than a general FFT and sufficient for the
         # initial low/mid/high character estimate.
-        low_power = sum(self._goertzel(samples, f) for f in (63, 100, 160, 250))
-        mid_power = sum(self._goertzel(samples, f) for f in (400, 800, 1600, 2500))
-        high_power = sum(self._goertzel(samples, f) for f in (4000, 6300, 9000))
+        low_power = sum(self._goertzel(windowed, f) for f in (63, 100, 160, 250))
+        mid_power = sum(
+            self._goertzel(windowed, f) for f in (400, 800, 1600, 2500)
+        )
+        high_power = sum(
+            self._goertzel(windowed, f) for f in (4000, 6300, 9000)
+        )
         total = low_power + mid_power + high_power
         if total <= 1e-9:
             return 0.0, 0.0, 0.0

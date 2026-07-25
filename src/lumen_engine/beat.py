@@ -59,7 +59,7 @@ class BeatTracker:
         previous = self._last_energy
         if previous is not None:
             crossed_threshold = previous < threshold <= energy
-            sharp_rise = energy >= threshold and energy - previous >= 0.18
+            sharp_rise = energy >= threshold and energy - previous >= 0.10
             enough_time_elapsed = (
                 self._last_beat_time is None
                 or now - self._last_beat_time >= self._refractory_seconds
@@ -110,7 +110,7 @@ class BeatTracker:
         energies = sorted(energy for _, energy in self._energy_history)
         floor = _percentile(energies, 50)
         peak = _percentile(energies, 95)
-        return clamp(floor + (peak - floor) * 0.62, 0.35, 0.85)
+        return clamp(floor + (peak - floor) * 0.58, 0.18, 0.85)
 
     def _record_beat(self, now: float) -> None:
         if self._last_beat_time is not None:
@@ -188,4 +188,3 @@ def _percentile(sorted_values: list[float], percentile: float) -> float:
     return sorted_values[lower] + (
         sorted_values[upper] - sorted_values[lower]
     ) * fraction
-

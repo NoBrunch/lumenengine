@@ -14,6 +14,25 @@ from lumen_engine.media import (
 
 
 class SpotifyMappingTests(unittest.TestCase):
+    def test_successful_non_json_player_acknowledgement_is_accepted(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            @staticmethod
+            def read() -> bytes:
+                return b"OK"
+
+        token = SpotifyToken("access", "refresh", 9999999999, "")
+        client = SpotifyWebAPI(lambda: token)
+        with patch("lumen_engine.media.urlopen", return_value=Response()):
+            self.assertIsNone(client._request("/me/player/play", method="PUT"))
+
     def test_maps_playback_payload_without_leaking_provider_shape(self) -> None:
         media = media_identity_from_spotify(
             {

@@ -28,10 +28,10 @@ class ExpressionPolicy:
     room_center: Vec3 = Vec3(0.0, 0.0, 1.2)
     room_high: Vec3 = Vec3(0.0, 0.0, 2.4)
     room_wide: Vec3 = Vec3(2.0, 0.0, 1.4)
-    minimum_gesture_hold_s: float = 1.5
-    release_onset_threshold: float = 0.82
-    high_energy_threshold: float = 0.68
-    quiet_threshold: float = 0.25
+    minimum_gesture_hold_s: float = 0.8
+    release_onset_threshold: float = 0.68
+    high_energy_threshold: float = 0.48
+    quiet_threshold: float = 0.16
 
 
 class ExpressionEngine:
@@ -44,9 +44,10 @@ class ExpressionEngine:
 
     def update_state(self, observation: MusicalObservation) -> ExpressionState:
         raw_energy = clamp(
-            0.55 * observation.loudness
-            + 0.25 * observation.onset_strength
-            + 0.20 * observation.low_energy,
+            0.48 * observation.loudness
+            + 0.20 * observation.onset_strength
+            + 0.20 * observation.low_energy
+            + 0.12 * observation.beat_pulse,
             0.0,
             1.0,
         )
@@ -60,9 +61,10 @@ class ExpressionEngine:
             1.0,
         )
         raw_motion = clamp(
-            0.45 * observation.onset_strength
-            + 0.30 * observation.beat_confidence
-            + 0.25 * observation.mid_energy,
+            0.30 * observation.onset_strength
+            + 0.25 * observation.beat_confidence
+            + 0.20 * observation.mid_energy
+            + 0.25 * observation.beat_pulse,
             0.0,
             1.0,
         )
@@ -98,9 +100,16 @@ class ExpressionEngine:
         reason = "Maintaining the current visual idea to avoid restless changes."
 
         is_release = (
-            observation.onset_strength >= self.policy.release_onset_threshold
+            (
+                observation.onset_strength
+                >= self.policy.release_onset_threshold
+                or observation.beat_pulse >= 0.90
+            )
             and state.energy >= self.policy.high_energy_threshold
-            and observation.beat_confidence >= 0.45
+            and (
+                observation.beat_confidence >= 0.25
+                or observation.beat_pulse >= 0.90
+            )
         )
         is_build = observation.section == "build" and state.tension >= 0.42
 
@@ -120,11 +129,14 @@ class ExpressionEngine:
             gesture = Gesture.BREATHE
             target = self.policy.room_high
             reason = "Low energy favors a slow, spacious gesture with visual restraint."
-        elif state.motion >= 0.60 and state.energy >= 0.45 and can_change:
+        elif state.motion >= 0.42 and state.energy >= 0.32 and can_change:
             gesture = Gesture.SWEEP
             target = self.policy.room_wide
             reason = "Rhythmic activity is sustained enough to support coordinated motion."
-        elif observation.onset_strength >= 0.55 and can_change:
+        elif (
+            observation.beat_pulse >= 0.48
+            or observation.onset_strength >= 0.45
+        ) and can_change:
             gesture = Gesture.PULSE
             target = self.policy.room_center
             reason = "A clear onset supports a contained accent without changing the motif."
@@ -138,7 +150,11 @@ class ExpressionEngine:
             self._last_gesture_at = observation.timestamp_s
         self._last_target = target
 
-        brightness = clamp(0.06 + 0.82 * state.energy, 0.0, 0.88)
+        brightness = clamp(
+            0.09 + 0.78 * state.energy + 0.24 * observation.beat_pulse,
+            0.0,
+            1.0,
+        )
         confidence = clamp(
             0.55 * state.confidence
             + 0.25 * observation.beat_confidence

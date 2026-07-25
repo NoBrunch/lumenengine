@@ -449,9 +449,17 @@ class SpotifyWebAPI:
         request = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=self.timeout_s) as response:
-                if response.status == 204:
+                payload = response.read()
+                if response.status == 204 or not payload.strip():
                     return None
-                return json.load(response)
+                try:
+                    return json.loads(payload)
+                except json.JSONDecodeError:
+                    # Player-control endpoints occasionally return a short
+                    # non-JSON acknowledgement despite a successful 2xx
+                    # status. The command was accepted; there is no provider
+                    # payload for Lumen to consume.
+                    return None
         except HTTPError as error:
             if error.code == 204:
                 return None

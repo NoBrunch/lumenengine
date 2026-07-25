@@ -44,7 +44,11 @@ The command-line tools below remain available for development and diagnostics.
 - Exact active-garage profiles for the 11-channel RGBW movers and 19-channel
   rotating multi-effect
 - Party Parrot's stable tempo tracker ported into the dependency-free core
-- Dependency-free ALSA PCM16 capture and first-pass audio features
+- Dependency-free ALSA PCM16 capture with a noise gate, transient envelope,
+  explicit beat pulse, beat phase, and four-beat bar clock
+- Broad bar-synchronized room trajectories plus short beat accents for mover
+  position, brightness, color, emitters, lasers, ring programs, and strobe
+- Tempo-aware compound control of the center 19-channel rotating multi-effect
 - Interpretable energy, tension, motion, and intimacy state
 - Explainable gesture selection
 - Private SQLite song, analysis, routine, decision, and feedback memory

@@ -47,12 +47,14 @@ class PerformanceRuntime:
         auxiliary_fixtures: tuple[ProfileFixturePatch, ...] = (),
         expression: ExpressionEngine | None = None,
         targeting: SpatialTargetingEngine | None = None,
+        motion_extents: Vec3 = Vec3(1.0, 3.0, 2.5),
     ) -> None:
         self.fixtures = fixtures
         self.output = output
         self.auxiliary_fixtures = auxiliary_fixtures
         self.expression = expression or ExpressionEngine()
         self.targeting = targeting or SpatialTargetingEngine()
+        self.motion_extents = motion_extents
         self._previous: dict[str, tuple[float, float]] = {}
         self._last_timestamp_s: float | None = None
 
@@ -68,7 +70,12 @@ class PerformanceRuntime:
         warnings: list[str] = []
 
         for index, fixture in enumerate(self.fixtures):
-            target = self._target_for_fixture(decision, fixture, index)
+            target = self._target_for_fixture(
+                decision,
+                fixture,
+                index,
+                observation,
+            )
             previous = self._previous.get(fixture.fixture_id)
             try:
                 solution = self.targeting.solve(
@@ -87,12 +94,22 @@ class PerformanceRuntime:
                 apply_moving_head_solution(
                     frame, fixture, solution, decision.brightness
                 )
-                apply_moving_head_profile(frame, fixture, decision)
+                apply_moving_head_profile(
+                    frame,
+                    fixture,
+                    decision,
+                    observation,
+                )
             except UnreachableTargetError as error:
                 warnings.append(str(error))
 
         for fixture in self.auxiliary_fixtures:
-            apply_auxiliary_fixture(frame, fixture, decision)
+            apply_auxiliary_fixture(
+                frame,
+                fixture,
+                decision,
+                observation,
+            )
 
         self.output.send(frame)
         self._last_timestamp_s = observation.timestamp_s
@@ -106,31 +123,84 @@ class PerformanceRuntime:
     def close(self) -> None:
         self.output.close()
 
-    @staticmethod
     def _target_for_fixture(
-        decision: PerformanceDecision, fixture: FixturePatch, index: int
+        self,
+        decision: PerformanceDecision,
+        fixture: FixturePatch,
+        index: int,
+        observation: MusicalObservation,
     ) -> Vec3:
         target = decision.target
         phase = decision.timestamp_s
-        if decision.gesture == Gesture.SWEEP:
-            return Vec3(
-                abs(target.x) * math.sin(phase * 0.9),
-                target.y,
-                target.z + 0.175 * (1.0 + math.sin(phase * 0.45)),
-            )
-        if decision.gesture == Gesture.EXPAND:
-            side = -1.0 if index % 2 == 0 else 1.0
-            return Vec3(side * abs(target.x), target.y, target.z)
-        if decision.gesture == Gesture.BREATHE:
+        if observation.loudness < 0.02:
             return Vec3(
                 target.x,
                 target.y,
                 target.z + 0.25 * math.sin(phase * 0.55 + index * 0.4),
             )
-        if decision.gesture == Gesture.RELEASE:
-            side = -1.0 if fixture.position_m.x <= 0 else 1.0
-            return Vec3(side * abs(target.x), target.y, target.z)
-        return target
+
+        state = decision.expression
+        activity = clamp(
+            0.28 + 0.48 * state.energy + 0.42 * state.motion,
+            0.0,
+            1.0,
+        )
+        tempo_locked = (
+            observation.bpm is not None
+            and observation.beat_confidence >= 0.18
+        )
+        phase = (
+            observation.bar_phase * math.tau
+            if tempo_locked
+            else decision.timestamp_s * (0.42 + 0.95 * state.motion)
+        )
+        extents = self.motion_extents
+        pair_phase = phase + index * math.pi
+        x = (
+            extents.x
+            * (0.35 + 0.65 * activity)
+            * math.sin(pair_phase)
+        )
+        # Each ceiling mover aims into the opposite half of the garage. This
+        # uses the calibrated room rather than asking a mover to point almost
+        # straight beneath itself, which is outside the imported envelope.
+        away = -1.0 if fixture.position_m.y > 0.0 else 1.0
+        y = away * extents.y * (
+            0.55 + 0.35 * math.cos(phase + index * 0.45)
+        )
+        floor_z = 0.65
+        z_span = max(0.5, extents.z - floor_z)
+        z = floor_z + z_span * (
+            0.50 + 0.42 * math.sin(phase * 2.0 + index * math.pi / 2.0)
+        )
+
+        if decision.gesture is Gesture.CONVERGE:
+            x *= 0.38
+            y *= 0.72
+            z = 1.15 + (z - 1.15) * 0.42
+        elif decision.gesture in {Gesture.EXPAND, Gesture.RELEASE}:
+            side = -1.0 if index % 2 == 0 else 1.0
+            x = side * extents.x * (0.76 + 0.24 * activity)
+            y = away * extents.y * (0.72 + 0.20 * activity)
+        elif decision.gesture is Gesture.BREATHE:
+            # Breathe is spacious rather than nearly stationary once music is
+            # actually present.
+            x *= 0.72
+            z = 1.35 + (z - 1.35) * 0.65
+
+        pulse = observation.beat_pulse
+        if pulse > 0.02:
+            beat_index = int(observation.bar_phase * 4.0) % 4
+            accent_side = -1.0 if (beat_index + index) % 2 else 1.0
+            x += accent_side * extents.x * 0.32 * pulse
+            y += away * extents.y * 0.10 * pulse
+            z += 0.38 * pulse
+
+        return Vec3(
+            clamp(x, -extents.x, extents.x),
+            clamp(y, -extents.y, extents.y),
+            clamp(z, floor_z, extents.z),
+        )
 
     def _rate_limit(
         self,

@@ -205,6 +205,8 @@ class MusicalObservation:
     mid_energy: float
     high_energy: float
     beat_phase: float = 0.0
+    bar_phase: float = 0.0
+    beat_pulse: float = 0.0
     beat_confidence: float = 0.0
     bpm: float | None = None
     section: str | None = None
@@ -219,6 +221,8 @@ class MusicalObservation:
             "mid_energy",
             "high_energy",
             "beat_phase",
+            "bar_phase",
+            "beat_pulse",
             "beat_confidence",
             "section_confidence",
             "novelty",

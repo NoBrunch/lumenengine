@@ -295,6 +295,8 @@ def _live_demo(args: argparse.Namespace) -> int:
                 mid_energy=observation.mid_energy,
                 high_energy=observation.high_energy,
                 beat_phase=observation.beat_phase,
+                bar_phase=observation.bar_phase,
+                beat_pulse=observation.beat_pulse,
                 beat_confidence=observation.beat_confidence,
                 bpm=observation.bpm,
                 section=observation.section,
@@ -387,6 +389,8 @@ def _synthetic_observation(index: int, total: int) -> MusicalObservation:
         mid_energy=min(1.0, 0.48 + 0.25 * progress),
         high_energy=min(1.0, 0.20 + 0.62 * progress),
         beat_phase=0.0,
+        bar_phase=(index % 4) / 4.0,
+        beat_pulse=1.0 if index % 2 == 0 else 0.12,
         beat_confidence=min(0.95, 0.45 + 0.50 * progress),
         bpm=120.0,
         section=section,
@@ -414,6 +418,11 @@ def _runtime_for_rig(
         output,
         auxiliary_fixtures=rig.auxiliary_fixtures,
         expression=ExpressionEngine(policy),
+        motion_extents=Vec3(
+            max(0.8, rig.room.width_m * 0.44),
+            max(1.8, rig.room.depth_m * 0.33),
+            min(2.6, max(2.2, rig.room.height_m * 0.45)),
+        ),
     )
 
 

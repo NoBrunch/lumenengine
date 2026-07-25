@@ -1889,7 +1889,7 @@ textarea::placeholder { color: #536360; }
 
 .beat-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   margin: auto 14px 15px;
   border: 1px solid #2d3d41;
   background: #0b1113;
@@ -2000,6 +2000,12 @@ textarea::placeholder { color: #536360; }
 .audio-proof[data-state="signal"] b,
 .audio-proof[data-state="signal"] > strong { color: #8de6d8; }
 .audio-proof[data-state="quiet"] b { color: #b8c9c5; }
+.audio-proof[data-state="missing"] {
+  border-left: 3px solid #e0a34f;
+  background: linear-gradient(90deg, rgba(151, 88, 27, .18), transparent 65%), #17120c;
+}
+.audio-proof[data-state="missing"] b,
+.audio-proof[data-state="missing"] > strong { color: #f1bd73; }
 .audio-proof[data-state="clipping"] { border-left: 3px solid #dd7359; background-color: #1d1212; }
 .audio-proof[data-state="clipping"] b,
 .audio-proof[data-state="clipping"] > strong { color: #f09a82; }

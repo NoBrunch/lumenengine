@@ -55,6 +55,44 @@ class AudioAnalyzerTests(unittest.TestCase):
         self.assertGreater(metrics.channel_rms[0], metrics.channel_rms[1])
         self.assertGreaterEqual(metrics.clipped_samples, 1024)
 
+    def test_periodic_kicks_create_tempo_clock_and_visible_pulse(self) -> None:
+        sample_rate = 48_000
+        frames = 2_048
+        analyzer = RealtimeAudioAnalyzer(sample_rate=sample_rate, channels=1)
+        pulse_count = 0
+        observation = None
+        for chunk in range(180):
+            amplitude = 18_000 if chunk % 12 == 0 else 500
+            start = chunk * frames
+            pcm = array(
+                "h",
+                (
+                    round(
+                        amplitude
+                        * math.sin(
+                            2
+                            * math.pi
+                            * 100
+                            * (start + index)
+                            / sample_rate
+                        )
+                    )
+                    for index in range(frames)
+                ),
+            ).tobytes()
+            observation = analyzer.analyze_pcm16(
+                pcm,
+                timestamp_s=chunk * frames / sample_rate,
+            )
+            if observation.beat_pulse >= 0.9:
+                pulse_count += 1
+        assert observation is not None
+        self.assertGreaterEqual(pulse_count, 12)
+        self.assertAlmostEqual(observation.bpm or 0.0, 117.2, delta=2.0)
+        self.assertGreater(observation.beat_confidence, 0.8)
+        self.assertGreaterEqual(observation.bar_phase, 0.0)
+        self.assertLessEqual(observation.bar_phase, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
