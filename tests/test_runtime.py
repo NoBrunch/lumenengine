@@ -83,12 +83,12 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(warnings, [])
         for pan, tilt in angles.values():
-            self.assertGreater(max(pan) - min(pan), 10.0)
-            self.assertGreater(max(tilt) - min(tilt), 8.0)
-        self.assertGreater(max(center_body) - min(center_body), 150)
-        self.assertGreater(max(center_arm_1) - min(center_arm_1), 120)
-        self.assertGreater(max(center_arm_2) - min(center_arm_2), 120)
-        self.assertGreater(max(center_strobe), 0)
+            self.assertGreater(max(pan) - min(pan), 50.0)
+            self.assertGreater(max(tilt) - min(tilt), 70.0)
+        self.assertGreater(max(center_body) - min(center_body), 200)
+        self.assertGreater(max(center_arm_1) - min(center_arm_1), 190)
+        self.assertGreater(max(center_arm_2) - min(center_arm_2), 190)
+        self.assertGreater(max(center_strobe), 150)
 
 
 if __name__ == "__main__":

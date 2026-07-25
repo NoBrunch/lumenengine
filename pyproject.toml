@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lumenengine"
-version = "0.4.0"
+version = "0.5.0"
 description = "A private, spatial and expressive music-lighting engine"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "Private project - all rights reserved"}
 authors = [{name = "David Mack"}]
-dependencies = []
+dependencies = ["numpy>=2.3,<3"]
 
 [project.optional-dependencies]
 tty = ["pyserial>=3.5"]

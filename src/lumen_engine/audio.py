@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from array import array
+from collections import deque
 from dataclasses import dataclass
 import math
 import subprocess
@@ -10,8 +11,10 @@ import sys
 import time
 from typing import Iterator
 
+import numpy as np
+
 from lumen_engine.models import MusicalObservation, clamp
-from lumen_engine.beat import BeatTracker
+from lumen_engine.beat import BeatTracker, SpectralTempoTracker
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,9 +70,15 @@ class RealtimeAudioAnalyzer:
         self.channels = channels
         self._previous_loudness = 0.0
         self._beat_tracker = BeatTracker()
+        self._tempo_tracker: SpectralTempoTracker | None = None
+        self._tempo_update_rate = 0.0
         self._noise_floor = 0.0005
         self._level_envelope = 0.005
         self._beat_envelope = 0.0
+        self._previous_spectrum: np.ndarray | None = None
+        self._previous_bass_level = 0.0
+        self._flux_history: deque[float] = deque(maxlen=420)
+        self._bass_rise_history: deque[float] = deque(maxlen=420)
         self._last_timestamp: float | None = None
         self.last_metrics = AudioInputMetrics.silence(channels=channels)
 
@@ -105,26 +114,44 @@ class RealtimeAudioAnalyzer:
             # A gentle logarithmic mapping makes normal line levels readable.
             loudness = clamp(math.log10(1.0 + 24.0 * rms), 0.0, 1.0)
             rise = max(0.0, loudness - self._previous_loudness)
-            transient = max(
+            amplitude_transient = max(
                 0.0,
                 (rms - self._level_envelope)
                 / max(0.01, self._level_envelope),
             )
-            onset = clamp(rise * 3.8 + transient * 0.85, 0.0, 1.0)
+            low, mid, high, spectral_onset = self._spectral_features(mono)
+            onset = clamp(
+                0.76 * spectral_onset
+                + 0.16 * rise * 3.0
+                + 0.08 * amplitude_transient,
+                0.0,
+                1.0,
+            )
             self._level_envelope += 0.08 * (rms - self._level_envelope)
-            low, mid, high = self._spectral_proportions(mono)
         else:
             loudness = 0.0
             onset = 0.0
+            spectral_onset = 0.0
             low = mid = high = 0.0
             self._level_envelope += 0.02 * (
                 max(self._noise_floor, rms) - self._level_envelope
             )
         self._previous_loudness = loudness
 
-        beat_state = self._beat_tracker.update(
-            low * loudness if signal_present else 0.0,
-            now=timestamp,
+        beat_drive = spectral_onset * loudness if signal_present else 0.0
+        fallback_beat_state = self._beat_tracker.update(beat_drive, now=timestamp)
+        update_rate = self.sample_rate / max(1, len(mono))
+        if (
+            self._tempo_tracker is None
+            or abs(update_rate - self._tempo_update_rate) > 0.01
+        ):
+            self._tempo_update_rate = update_rate
+            self._tempo_tracker = SpectralTempoTracker(update_rate)
+        spectral_beat_state = self._tempo_tracker.update(beat_drive, timestamp)
+        beat_state = (
+            spectral_beat_state
+            if spectral_beat_state.bpm > 0.0
+            else fallback_beat_state
         )
         elapsed = (
             1.0 / 24.0
@@ -135,7 +162,7 @@ class RealtimeAudioAnalyzer:
         self._beat_envelope *= math.exp(-elapsed / 0.14)
         if beat_state.beat:
             self._beat_envelope = 1.0
-        elif onset >= 0.72:
+        elif onset >= 0.72 and beat_state.confidence < 0.15:
             # Strong transients remain useful while the tempo tracker is
             # collecting enough beats to establish a confident clock.
             self._beat_envelope = max(self._beat_envelope, 0.58)
@@ -222,32 +249,76 @@ class RealtimeAudioAnalyzer:
     def _spectral_proportions(
         self, samples: list[float]
     ) -> tuple[float, float, float]:
+        low, mid, high, _onset = self._spectral_features(samples)
+        return low, mid, high
+
+    def _spectral_features(
+        self, samples: list[float]
+    ) -> tuple[float, float, float, float]:
         if len(samples) < 8:
-            return 0.0, 0.0, 0.0
-        # A raw, rectangular PCM window leaks DC and low-frequency power into
-        # every Goertzel bin.  On the garage line input that made ordinary
-        # full-range music appear to be roughly 99% bass.  Remove the packet's
-        # DC offset and taper both ends before measuring the bands.
-        mean = sum(samples) / len(samples)
-        last_index = len(samples) - 1
-        windowed = [
-            (sample - mean)
-            * (0.5 - 0.5 * math.cos(math.tau * index / last_index))
-            for index, sample in enumerate(samples)
-        ]
-        # Goertzel bins are cheaper than a general FFT and sufficient for the
-        # initial low/mid/high character estimate.
-        low_power = sum(self._goertzel(windowed, f) for f in (63, 100, 160, 250))
-        mid_power = sum(
-            self._goertzel(windowed, f) for f in (400, 800, 1600, 2500)
-        )
-        high_power = sum(
-            self._goertzel(windowed, f) for f in (4000, 6300, 9000)
-        )
-        total = low_power + mid_power + high_power
-        if total <= 1e-9:
-            return 0.0, 0.0, 0.0
-        return low_power / total, mid_power / total, high_power / total
+            return 0.0, 0.0, 0.0, 0.0
+        values = np.asarray(samples, dtype=np.float64) / 32768.0
+        values -= float(np.mean(values))
+        magnitude = np.abs(np.fft.rfft(values * np.hanning(len(values))))
+        frequencies = np.fft.rfftfreq(len(values), 1.0 / self.sample_rate)
+        power = magnitude * magnitude
+
+        def band_level(low_hz: float, high_hz: float) -> float:
+            mask = (frequencies >= low_hz) & (frequencies < high_hz)
+            if not np.any(mask):
+                return 0.0
+            return float(np.sqrt(np.mean(power[mask])))
+
+        # Compare average power density rather than a few isolated bins. This
+        # avoids both DC leakage and the unequal bandwidth bias that previously
+        # labeled a full-range mix as almost entirely bass.
+        low_level = band_level(35.0, 250.0)
+        mid_level = band_level(250.0, 3_000.0)
+        high_level = band_level(3_000.0, 12_000.0)
+        total = low_level + mid_level + high_level
+        if total <= 1e-12:
+            low = mid = high = 0.0
+        else:
+            low = low_level / total
+            mid = mid_level / total
+            high = high_level / total
+
+        log_spectrum = np.log1p(magnitude * 20.0)
+        onset_mask = (frequencies >= 40.0) & (frequencies <= 4_000.0)
+        if (
+            self._previous_spectrum is None
+            or self._previous_spectrum.shape != log_spectrum.shape
+        ):
+            raw_flux = 0.0
+        else:
+            raw_flux = float(
+                np.mean(
+                    np.maximum(
+                        0.0,
+                        log_spectrum[onset_mask]
+                        - self._previous_spectrum[onset_mask],
+                    )
+                )
+            )
+        self._previous_spectrum = log_spectrum
+        bass_level = math.log1p(low_level * 20.0)
+        bass_rise = max(0.0, bass_level - self._previous_bass_level)
+        self._previous_bass_level = bass_level
+        self._flux_history.append(raw_flux)
+        self._bass_rise_history.append(bass_rise)
+        flux = self._normalize_feature(raw_flux, self._flux_history)
+        bass = self._normalize_feature(bass_rise, self._bass_rise_history)
+        onset = clamp(0.68 * flux + 0.32 * bass, 0.0, 1.0)
+        return low, mid, high, onset
+
+    @staticmethod
+    def _normalize_feature(value: float, history: deque[float]) -> float:
+        if len(history) < 8:
+            return clamp(value, 0.0, 1.0)
+        values = np.asarray(history, dtype=np.float64)
+        low = float(np.percentile(values, 10))
+        high = float(np.percentile(values, 95))
+        return clamp((value - low) / max(1e-9, high - low), 0.0, 1.0)
 
     def _goertzel(self, samples: list[float], frequency: float) -> float:
         omega = 2.0 * math.pi * frequency / self.sample_rate

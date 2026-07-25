@@ -13,6 +13,7 @@ from lumen_engine.models import (
     FixtureCalibration,
     FixturePatch,
     Gesture,
+    MusicalObservation,
     PerformanceDecision,
     ProfileFixturePatch,
     Vec3,
@@ -67,10 +68,27 @@ class FixtureOutputTests(unittest.TestCase):
             housing_rotation=EulerXYZ(),
         )
         frame = DMXFrame()
-        apply_auxiliary_fixture(frame, fixture, decision())
+        apply_auxiliary_fixture(
+            frame,
+            fixture,
+            decision(),
+            MusicalObservation(
+                timestamp_s=2.0,
+                loudness=0.8,
+                onset_strength=0.9,
+                low_energy=0.6,
+                mid_energy=0.3,
+                high_energy=0.1,
+                beat_pulse=1.0,
+                beat_confidence=0.9,
+                bpm=128.0,
+            ),
+        )
         self.assertNotEqual(frame.get_channel(0, 1), 0)  # body
-        self.assertEqual(frame.get_channel(0, 5), round(0.75 * 255))  # dimmer
-        self.assertEqual(frame.get_channel(0, 6), 92)  # release strobe
+        self.assertGreaterEqual(
+            frame.get_channel(0, 5), round(0.75 * 255)
+        )  # reinforced master dimmer
+        self.assertGreater(frame.get_channel(0, 6), 150)  # beat strobe
         self.assertTrue(any(frame.get_channel(0, channel) for channel in range(7, 15)))
         self.assertTrue(any(frame.get_channel(0, channel) for channel in (15, 16)))
         self.assertEqual(frame.get_channel(0, 19), 0)  # no internal macro
@@ -78,4 +96,3 @@ class FixtureOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

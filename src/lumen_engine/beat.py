@@ -1,10 +1,13 @@
-"""Party Parrot's stable beat tracker, ported to the dependency-free core."""
+"""Transient and spectrum-onset tempo tracking for musical synchronization."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import statistics
 import time
+
+import numpy as np
 
 from lumen_engine.models import clamp
 
@@ -176,6 +179,228 @@ class BeatTracker:
         elapsed = max(0.0, now - self._last_beat_time)
         beat_position = (self._beat_count % 4) + elapsed / beat_period
         return clamp(beat_position / 4.0, 0.0, 1.0)
+
+
+class SpectralTempoTracker:
+    """Recover a stable beat grid from a fixed-rate spectral-onset envelope.
+
+    The original interval tracker is useful for clean, isolated triggers but
+    can mistake hi-hats or syncopated notes for every beat in a full mix.
+    This tracker instead compares several seconds of onset history against
+    every plausible musical period.  A phase-locked grid then continues
+    between individual transients, so movement does not wander when a kick is
+    briefly absent.
+    """
+
+    def __init__(
+        self,
+        updates_per_second: float,
+        min_bpm: float = 72.0,
+        max_bpm: float = 165.0,
+        history_seconds: float = 18.0,
+        minimum_history_seconds: float = 5.0,
+    ) -> None:
+        if updates_per_second <= 0:
+            raise ValueError("updates_per_second must be positive")
+        self.updates_per_second = float(updates_per_second)
+        self.min_bpm = float(min_bpm)
+        self.max_bpm = float(max_bpm)
+        self._maximum_frames = round(history_seconds * updates_per_second)
+        self._minimum_frames = round(
+            minimum_history_seconds * updates_per_second
+        )
+        self._activation: list[float] = []
+        self._bpm = 0.0
+        self._confidence = 0.0
+        self._last_estimate_at = float("-inf")
+        self._previous_activation = 0.0
+        self._last_onset_time: float | None = None
+        self._recent_peak_time: float | None = None
+        self._origin_time: float | None = None
+        self._last_grid_index: int | None = None
+        self._pending_bpm: float | None = None
+        self._pending_count = 0
+
+    def update(self, activation: float, now: float) -> BeatState:
+        value = clamp(float(activation), 0.0, 1.0)
+        onset = self._is_onset(value, now)
+        self._activation.append(value)
+        if len(self._activation) > self._maximum_frames:
+            del self._activation[: len(self._activation) - self._maximum_frames]
+        if (
+            len(self._activation) >= self._minimum_frames
+            and now - self._last_estimate_at >= 0.45
+        ):
+            self._last_estimate_at = now
+            self._estimate_tempo()
+
+        if self._bpm <= 0.0:
+            self._previous_activation = value
+            return BeatState(
+                bpm=0.0,
+                beat=onset,
+                beat_count=0,
+                bar_progress=0.0,
+                confidence=0.0,
+            )
+
+        period = 60.0 / self._bpm
+        if self._origin_time is None:
+            self._origin_time = self._recent_peak_time or now
+        if onset:
+            nearest = round((now - self._origin_time) / period)
+            predicted = self._origin_time + nearest * period
+            error = now - predicted
+            if abs(error) <= period * 0.24:
+                # A restrained phase correction keeps the grid attached to
+                # real kicks without allowing every syncopation to reset it.
+                self._origin_time += error * (
+                    0.24 + 0.22 * (1.0 - self._confidence)
+                )
+
+        position = (now - self._origin_time) / period
+        grid_index = math.floor(position + 0.10)
+        beat = False
+        if self._last_grid_index is None:
+            self._last_grid_index = grid_index
+        elif grid_index > self._last_grid_index:
+            beat = True
+            self._last_grid_index = grid_index
+        elif grid_index < self._last_grid_index - 1:
+            self._last_grid_index = grid_index
+
+        phase_position = (now - self._origin_time) / period
+        beat_index = math.floor(phase_position)
+        beat_phase = phase_position - beat_index
+        bar_progress = ((beat_index % 4) + beat_phase) / 4.0
+        self._previous_activation = value
+        return BeatState(
+            bpm=self._bpm,
+            beat=beat,
+            beat_count=beat_index % 64,
+            bar_progress=bar_progress % 1.0,
+            confidence=self._confidence,
+        )
+
+    def _is_onset(self, value: float, now: float) -> bool:
+        if len(self._activation) < 8:
+            threshold = 0.52
+        else:
+            recent = np.asarray(
+                self._activation[-round(self.updates_per_second * 3.0) :],
+                dtype=np.float64,
+            )
+            median = float(np.median(recent))
+            high = float(np.percentile(recent, 90))
+            threshold = clamp(median + 0.52 * (high - median), 0.28, 0.78)
+        refractory = 60.0 / self.max_bpm * 0.68
+        onset = (
+            value >= threshold
+            and value - self._previous_activation >= 0.09
+            and (
+                self._last_onset_time is None
+                or now - self._last_onset_time >= refractory
+            )
+        )
+        if onset:
+            self._last_onset_time = now
+            self._recent_peak_time = now
+        return onset
+
+    def _estimate_tempo(self) -> None:
+        values = np.asarray(self._activation, dtype=np.float64)
+        low = float(np.percentile(values, 10))
+        high = float(np.percentile(values, 95))
+        if high - low <= 0.04:
+            self._confidence *= 0.85
+            return
+        normalized = np.clip((values - low) / (high - low), 0.0, 1.0)
+        floor = float(np.percentile(normalized, 35))
+        novelty = np.maximum(0.0, normalized - floor)
+        novelty -= float(np.mean(novelty))
+
+        minimum_lag = max(
+            2, round(self.updates_per_second * 60.0 / self.max_bpm)
+        )
+        maximum_lag = round(
+            self.updates_per_second * 60.0 / self.min_bpm
+        )
+        lags = list(range(minimum_lag, maximum_lag + 1))
+        correlations: list[float] = []
+        for lag in lags:
+            current = novelty[lag:]
+            delayed = novelty[:-lag]
+            denominator = float(
+                np.linalg.norm(current) * np.linalg.norm(delayed)
+            )
+            correlations.append(
+                0.0
+                if denominator <= 1e-9
+                else float(np.dot(current, delayed) / denominator)
+            )
+        best_offset = max(
+            range(len(correlations)),
+            key=correlations.__getitem__,
+        )
+        best_lag = float(lags[best_offset])
+        best_score = correlations[best_offset]
+        if 0 < best_offset < len(correlations) - 1:
+            left = correlations[best_offset - 1]
+            center = correlations[best_offset]
+            right = correlations[best_offset + 1]
+            denominator = left - 2.0 * center + right
+            if abs(denominator) > 1e-9:
+                best_lag += clamp(
+                    0.5 * (left - right) / denominator,
+                    -0.5,
+                    0.5,
+                )
+        candidate_bpm = 60.0 * self.updates_per_second / best_lag
+
+        competitors = [
+            score
+            for index, score in enumerate(correlations)
+            if abs(index - best_offset) > 1
+        ]
+        second_score = max(competitors, default=0.0)
+        prominence = best_score - second_score
+        evidence = clamp(
+            (len(values) / self.updates_per_second - 3.0) / 3.0,
+            0.0,
+            1.0,
+        )
+        quality = clamp((best_score - 0.04) / 0.34, 0.0, 1.0)
+        # A strong half-time harmonic is normal in four-on-the-floor music;
+        # it should modestly temper confidence rather than prevent lock.
+        distinctness = 0.82 + 0.18 * clamp(prominence / 0.14, 0.0, 1.0)
+        confidence = clamp(evidence * quality * distinctness, 0.0, 1.0)
+        self._confidence = 0.45 * self._confidence + 0.55 * confidence
+
+        if self._bpm <= 0.0:
+            if confidence >= 0.12:
+                self._bpm = candidate_bpm
+            return
+        difference = abs(candidate_bpm - self._bpm) / self._bpm
+        if difference <= 0.08:
+            self._bpm += (candidate_bpm - self._bpm) * 0.24
+            self._pending_bpm = None
+            self._pending_count = 0
+            return
+        if (
+            self._pending_bpm is not None
+            and abs(candidate_bpm - self._pending_bpm)
+            / max(self._pending_bpm, 1e-6)
+            <= 0.05
+        ):
+            self._pending_bpm += (candidate_bpm - self._pending_bpm) * 0.35
+            self._pending_count += 1
+        else:
+            self._pending_bpm = candidate_bpm
+            self._pending_count = 1
+        if self._pending_count >= 4 and confidence >= 0.25:
+            self._bpm = self._pending_bpm
+            self._pending_bpm = None
+            self._pending_count = 0
 
 
 def _percentile(sorted_values: list[float], percentile: float) -> float:

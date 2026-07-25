@@ -1082,7 +1082,7 @@ class LumenApplication:
             return {
                 "project": {
                     "name": "Lumen Engine",
-                    "version": "0.4.0",
+                    "version": "0.5.0",
                     "role": "Spatial music-lighting control",
                 },
                 "rig": self._rig_payload,

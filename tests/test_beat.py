@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from lumen_engine.beat import BeatTracker
+from lumen_engine.beat import BeatTracker, SpectralTempoTracker
 
 
 def feed_beat(tracker: BeatTracker, beat_time: float):
@@ -11,6 +11,22 @@ def feed_beat(tracker: BeatTracker, beat_time: float):
 
 
 class BeatTrackerTests(unittest.TestCase):
+    def test_spectral_clock_ignores_syncopation_and_holds_the_grid(self) -> None:
+        updates_per_second = 48_000 / 2_048
+        tracker = SpectralTempoTracker(updates_per_second)
+        emitted_beats = 0
+        for index in range(360):
+            phase = index % 11
+            activation = 1.0 if phase == 0 else 0.42 if phase == 5 else 0.05
+            state = tracker.update(
+                activation,
+                now=index / updates_per_second,
+            )
+            emitted_beats += int(state.beat)
+        self.assertAlmostEqual(state.bpm, 127.8, delta=1.5)
+        self.assertGreater(state.confidence, 0.75)
+        self.assertGreater(emitted_beats, 12)
+
     def test_measures_house_tempo(self) -> None:
         tracker = BeatTracker()
         interval = 60.0 / 132.0

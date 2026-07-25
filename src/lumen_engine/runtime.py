@@ -84,6 +84,14 @@ class PerformanceRuntime:
                     previous_pan_deg=None if previous is None else previous[0],
                     previous_tilt_deg=None if previous is None else previous[1],
                 )
+                if observation.loudness >= 0.02:
+                    solution = self._performance_solution(
+                        fixture,
+                        index,
+                        observation,
+                        decision,
+                        solution,
+                    )
                 if previous is not None and elapsed is not None:
                     solution = self._rate_limit(fixture, solution, previous, elapsed)
                 self._previous[fixture.fixture_id] = (
@@ -200,6 +208,89 @@ class PerformanceRuntime:
             clamp(x, -extents.x, extents.x),
             clamp(y, -extents.y, extents.y),
             clamp(z, floor_z, extents.z),
+        )
+
+    def _performance_solution(
+        self,
+        fixture: FixturePatch,
+        index: int,
+        observation: MusicalObservation,
+        decision: PerformanceDecision,
+        spatial_solution: TargetingSolution,
+    ) -> TargetingSolution:
+        """Use the calibrated fixture envelope as a choreographic instrument.
+
+        A room target remains appropriate for static cues and calibration, but
+        ordinary targets occupy a small angular patch when a mover is mounted
+        several metres away. Music performance therefore follows four
+        beat-indexed anchor points spread across the known-good DMX envelope.
+        The resulting direction is projected back into room space so the
+        dashboard still shows where the beam is actually being sent.
+        """
+
+        if observation.bpm is not None and observation.beat_confidence >= 0.12:
+            bar_phase = observation.bar_phase % 1.0
+        else:
+            assumed_bpm = observation.bpm or 120.0
+            bar_phase = (
+                observation.timestamp_s * assumed_bpm / 60.0 / 4.0
+            ) % 1.0
+        beat_position = bar_phase * 4.0
+        beat_index = math.floor(beat_position) % 4
+        local_phase = beat_position - math.floor(beat_position)
+        # Reach the next visual station early in the beat, then hold it long
+        # enough for the physical beam to register as a deliberate accent.
+        travel = clamp(local_phase / 0.68, 0.0, 1.0)
+        travel = travel * travel * (3.0 - 2.0 * travel)
+
+        pan_patterns = (
+            (0.08, 0.90, 0.68, 0.18),
+            (0.92, 0.10, 0.32, 0.82),
+        )
+        tilt_patterns = (
+            (0.16, 0.72, 0.90, 0.34),
+            (0.78, 0.20, 0.40, 0.88),
+        )
+        pan_pattern = pan_patterns[index % len(pan_patterns)]
+        tilt_pattern = tilt_patterns[index % len(tilt_patterns)]
+        next_beat = (beat_index + 1) % 4
+        pan_normalized = (
+            pan_pattern[beat_index]
+            + (pan_pattern[next_beat] - pan_pattern[beat_index]) * travel
+        )
+        tilt_normalized = (
+            tilt_pattern[beat_index]
+            + (tilt_pattern[next_beat] - tilt_pattern[beat_index]) * travel
+        )
+
+        state = decision.expression
+        envelope = clamp(0.76 + 0.30 * state.motion, 0.76, 1.0)
+        if decision.gesture is Gesture.CONVERGE:
+            envelope *= 0.66
+        elif decision.gesture is Gesture.BREATHE:
+            envelope *= 0.58
+        pan_normalized = 0.5 + (pan_normalized - 0.5) * envelope
+        tilt_normalized = 0.5 + (tilt_normalized - 0.5) * envelope
+
+        calibration = fixture.calibration
+        pan = calibration.pan_min_deg + pan_normalized * (
+            calibration.pan_max_deg - calibration.pan_min_deg
+        )
+        tilt = calibration.tilt_min_deg + tilt_normalized * (
+            calibration.tilt_max_deg - calibration.tilt_min_deg
+        )
+        direction = self.targeting.direction_for_angles(fixture, pan, tilt)
+        distance = max(4.0, spatial_solution.distance_m)
+        target = fixture.position_m + direction * distance
+        return TargetingSolution(
+            fixture_id=fixture.fixture_id,
+            target=target,
+            pan_deg=pan,
+            tilt_deg=tilt,
+            distance_m=distance,
+            movement_cost_deg=0.0,
+            aim_error_deg=0.0,
+            branch="performance-envelope",
         )
 
     def _rate_limit(

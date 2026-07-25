@@ -9,7 +9,8 @@ required to leave the PC.
 The current modules are:
 
 - `audio`: line-in capture and musical observations
-- `beat`: dependency-free port of Party Parrot's stable tempo tracker
+- `beat`: Party Parrot's trigger tracker plus a spectrum-onset autocorrelation
+  tempo clock for stable full-mix BPM and phase
 - `media`: optional recording identity providers
 - `memory`: private song and performance knowledge
 - `expression`: interpretable expressive state and gesture policy

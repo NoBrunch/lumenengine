@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 from lumen_engine.dmx import DMXFrame
 from lumen_engine.models import (
     FixturePatch,
@@ -55,7 +53,7 @@ def apply_moving_head_profile(
         _set_relative(frame, fixture.universe, fixture.address, channels["movement_speed"], 0)
         beat_pulse = 0.0 if observation is None else observation.beat_pulse
         strobe = (
-            round(22 + 76 * beat_pulse)
+            round(70 + 150 * beat_pulse)
             if beat_pulse >= 0.52 and decision.expression.energy >= 0.42
             else 0
         )
@@ -125,40 +123,52 @@ def _apply_generic_multi_effect(
         0.0,
         1.0,
     )
-    phase = (
-        bar_phase * math.tau
-        if beat_confidence >= 0.18
-        else timestamp * (0.48 + 0.92 * activity)
+    if beat_confidence >= 0.12:
+        pattern_phase = bar_phase
+    else:
+        assumed_bpm = (
+            120.0
+            if observation is None or observation.bpm is None
+            else observation.bpm
+        )
+        pattern_phase = (timestamp * assumed_bpm / 60.0 / 4.0) % 1.0
+    beat_index = int(pattern_phase * 4.0) % 4
+    # Hold widely separated motor targets for a complete beat instead of
+    # sending a continuously moving sine target that the inexpensive motors
+    # can never catch. The fixture itself supplies the physical easing.
+    body_pattern = (18.0, 18.0, 237.0, 237.0)
+    arm_1_pattern = (20.0, 232.0, 232.0, 20.0)
+    arm_2_pattern = (235.0, 235.0, 23.0, 23.0)
+    motion_scale = clamp(0.78 + 0.26 * activity, 0.78, 1.0)
+    if decision.gesture is Gesture.BREATHE:
+        motion_scale *= 0.56
+    body = round(128.0 + (body_pattern[beat_index] - 128.0) * motion_scale)
+    arm_1 = round(
+        128.0 + (arm_1_pattern[beat_index] - 128.0) * motion_scale
     )
-    beat_index = int(bar_phase * 4.0) % 4
-    accent_side = -1.0 if beat_index % 2 else 1.0
-
-    body_amplitude = 50.0 + 66.0 * activity
-    arm_amplitude = 42.0 + 58.0 * activity
-    body = 128.0 + body_amplitude * math.sin(phase)
-    arm_1 = 128.0 + arm_amplitude * math.sin(phase * 1.25)
-    arm_2 = 128.0 - arm_amplitude * math.sin(phase * 1.25)
-    if beat_pulse > 0.02:
-        body += accent_side * 46.0 * beat_pulse
-        arm_1 += accent_side * 54.0 * beat_pulse
-        arm_2 -= accent_side * 54.0 * beat_pulse
-    body = round(clamp(body, 8.0, 247.0))
-    arm_1 = round(clamp(arm_1, 12.0, 243.0))
-    arm_2 = round(clamp(arm_2, 12.0, 243.0))
+    arm_2 = round(
+        128.0 + (arm_2_pattern[beat_index] - 128.0) * motion_scale
+    )
     # This fixture's CH2 is inverted: zero is fastest and 255 is slowest.
-    body_speed = round(clamp(112.0 - activity * 88.0, 18.0, 116.0))
+    body_speed = 0
     strobe = 0
     if beat_pulse >= 0.52 and energy >= 0.38:
-        strobe = round(18.0 + 92.0 * beat_pulse * activity)
-    elif decision.gesture is Gesture.RELEASE:
-        strobe = 92
+        strobe = round(70.0 + 150.0 * beat_pulse * activity)
 
     values = {
         "body_rotation": body,
         "body_rotation_speed": body_speed,
         "arm_1_motor": arm_1,
         "arm_2_motor": arm_2,
-        "master_dimmer": round(decision.brightness * 255),
+        "master_dimmer": round(
+            clamp(
+                max(decision.brightness, 0.76 + 0.18 * energy)
+                + 0.10 * beat_pulse,
+                0.0,
+                1.0,
+            )
+            * 255
+        ),
         "strobe": strobe,
         "strip_speed": 0,
         "macro": 0,
@@ -166,8 +176,16 @@ def _apply_generic_multi_effect(
     rgbw = rgb_to_rgbw(expression_rgb(decision))
     even_beat = beat_index % 2 == 0
     contrast = beat_pulse * (0.45 + 0.45 * activity)
-    ball_scale = clamp(0.78 + (0.22 if even_beat else -0.48) * contrast, 0.24, 1.0)
-    arm_scale = clamp(0.78 + (-0.48 if even_beat else 0.22) * contrast, 0.24, 1.0)
+    ball_scale = clamp(
+        0.92 + (0.18 if even_beat else -0.72) * contrast,
+        0.18,
+        1.0,
+    )
+    arm_scale = clamp(
+        0.92 + (-0.72 if even_beat else 0.18) * contrast,
+        0.18,
+        1.0,
+    )
     for prefix, scale in (
         ("magic_ball", ball_scale),
         ("arm_beams", arm_scale),
@@ -176,14 +194,14 @@ def _apply_generic_multi_effect(
             values[f"{prefix}_{color_name}"] = round(value * scale)
 
     red, green, _blue = expression_rgb(decision)
-    laser_floor = 26.0 + 118.0 * activity
+    laser_floor = 72.0 + 138.0 * activity
     red_laser = laser_floor * max(0.32, red)
     green_laser = laser_floor * max(0.32, green)
     if beat_pulse >= 0.35:
         if even_beat:
-            red_laser += 118.0 * beat_pulse
+            red_laser += 150.0 * beat_pulse
         else:
-            green_laser += 118.0 * beat_pulse
+            green_laser += 150.0 * beat_pulse
     values["red_laser"] = round(clamp(red_laser, 0.0, 255.0))
     values["green_laser"] = round(clamp(green_laser, 0.0, 255.0))
 
