@@ -20,6 +20,8 @@ const app = {
   pollCount: 0,
   spotifyRefreshing: false,
   spotifyFetchedAt: 0,
+  spotifyPlaylistId: "",
+  spotifyTransferDeviceId: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -389,7 +391,10 @@ async function refreshSpotifyConsole(showErrors = false, query = null) {
   app.spotifyRefreshing = true;
   try {
     const requestedQuery = query === null ? (app.spotify?.query || "") : query;
-    app.spotify = await api(`/api/spotify${requestedQuery ? `?q=${encodeURIComponent(requestedQuery)}` : ""}`);
+    const parameters = new URLSearchParams();
+    if (requestedQuery) parameters.set("q", requestedQuery);
+    if (app.spotifyPlaylistId) parameters.set("playlist_id", app.spotifyPlaylistId);
+    app.spotify = await api(`/api/spotify${parameters.size ? `?${parameters}` : ""}`);
     app.spotifyFetchedAt = Date.now();
     renderSpotifyConsole();
   } catch (error) {
@@ -402,22 +407,43 @@ async function refreshSpotifyConsole(showErrors = false, query = null) {
 }
 
 function renderSpotifyConsole() {
-  const spotify = app.spotify || { connected: false, devices: [], results: [] };
+  const spotify = app.spotify || {
+    connected: false,
+    devices: [],
+    playlists: [],
+    playlist_tracks: [],
+    results: [],
+  };
   $("spotify-console-setup")?.classList.toggle("hidden", Boolean(spotify.connected));
   $("spotify-console-connected")?.classList.toggle("hidden", !spotify.connected);
   if (!spotify.connected) return;
 
   const playback = spotify.playback || {};
   const track = playback.track || {};
+  const profile = spotify.profile || {};
+  const diagnostics = spotify.diagnostics || {};
   const activeDevice = playback.device || spotify.devices.find((device) => device.is_active) || null;
   setText("spotify-player-state", playback.is_playing ? "PLAYING" : track.name ? "PAUSED" : "IDLE");
+  setText(
+    "spotify-account-name",
+    `${profile.display_name || profile.id || "Spotify account"}${profile.product ? ` · ${label(profile.product)}` : ""}`,
+  );
   setText("spotify-track-title", track.name || "Choose music from Spotify");
   setText("spotify-track-artists", track.artists?.length ? track.artists.join(", ") : "Search below or use your usual Spotify app.");
   setText("spotify-album", track.album || "No active playback");
   setText("spotify-position", formatTime(playback.progress_ms));
   setText("spotify-duration", formatTime(track.duration_ms));
-  setText("spotify-device-name", activeDevice?.name || "No active device");
-  setText("spotify-control-scope", spotify.control_authorized ? "CONTROL READY" : "RECONNECT REQUIRED");
+  setText("spotify-device-name", activeDevice?.name ? `${activeDevice.name} · active in Spotify` : "No active Spotify route");
+  setText(
+    "spotify-route-description",
+    activeDevice?.name
+      ? `Commands follow ${activeDevice.name}; Lumen does not select this computer automatically.`
+      : "Start playback or choose Chromecast Audio in Spotify, then refresh.",
+  );
+  setText(
+    "spotify-control-scope",
+    spotify.control_authorized && spotify.library_authorized ? "ACCOUNT READY" : "RECONNECT REQUIRED",
+  );
 
   const cover = $("spotify-cover-image");
   if (cover) {
@@ -439,62 +465,160 @@ function renderSpotifyConsole() {
 
   const deviceSelect = $("spotify-device-select");
   if (deviceSelect) {
-    const selected = deviceSelect.value;
-    deviceSelect.innerHTML = spotify.devices.length
-      ? spotify.devices
-        .map((device) => `<option value="${escapeHtml(device.id || "")}" ${device.id === selected || (!selected && device.is_active) ? "selected" : ""}>${escapeHtml(device.name || "Unnamed device")} · ${escapeHtml(device.type || "device")}${device.is_active ? " · active" : ""}</option>`)
-        .join("")
-      : `<option value="">No Connect devices reported</option>`;
+    if (
+      app.spotifyTransferDeviceId
+      && !spotify.devices.some((device) => device.id === app.spotifyTransferDeviceId)
+    ) {
+      app.spotifyTransferDeviceId = "";
+    }
+    deviceSelect.innerHTML = [
+      `<option value="" ${app.spotifyTransferDeviceId ? "" : "selected"}>Follow Spotify active route${activeDevice?.name ? ` · ${escapeHtml(activeDevice.name)}` : ""}</option>`,
+      ...spotify.devices.map(
+        (device) => `<option value="${escapeHtml(device.id || "")}" ${device.id === app.spotifyTransferDeviceId ? "selected" : ""}>Transfer to ${escapeHtml(device.name || "Unnamed device")} · ${escapeHtml(device.type || "device")}${device.is_active ? " · currently active" : ""}</option>`,
+      ),
+    ].join("");
   }
-  const selectedDevice = spotify.devices.find((device) => device.id === deviceSelect?.value) || activeDevice;
+  const selectedDevice = spotify.devices.find((device) => device.id === app.spotifyTransferDeviceId) || activeDevice;
   if ($("spotify-volume") && document.activeElement !== $("spotify-volume")) {
     $("spotify-volume").value = Number(selectedDevice?.volume_percent ?? 50);
     $("spotify-volume").disabled = !selectedDevice?.supports_volume;
   }
 
   $$(
-    "#spotify-previous-button, #spotify-play-button, #spotify-next-button, #spotify-transfer-button, #spotify-seek, #spotify-volume",
+    "#spotify-previous-button, #spotify-play-button, #spotify-next-button, #spotify-seek, #spotify-volume",
   ).forEach((control) => {
     if (control.id !== "spotify-volume" || selectedDevice?.supports_volume) {
       control.disabled = !spotify.control_authorized;
     }
   });
+  if ($("spotify-transfer-button")) {
+    $("spotify-transfer-button").disabled = !spotify.control_authorized || !app.spotifyTransferDeviceId;
+  }
+
+  $("spotify-library-auth")?.classList.toggle("hidden", Boolean(spotify.library_authorized));
+  $("spotify-library-browser")?.classList.toggle("scope-missing", !spotify.library_authorized);
+  const playlistSelect = $("spotify-playlist-select");
+  if (playlistSelect) {
+    playlistSelect.innerHTML = [
+      `<option value="">Choose a playlist…</option>`,
+      ...(spotify.playlists || []).map(
+        (playlist) => `<option value="${escapeHtml(playlist.id || "")}" ${playlist.id === app.spotifyPlaylistId ? "selected" : ""}>${escapeHtml(playlist.name || "Untitled playlist")} · ${Number(playlist.track_count || 0)} tracks</option>`,
+      ),
+    ].join("");
+    playlistSelect.disabled = !spotify.library_authorized;
+  }
+  const selectedPlaylist = (spotify.playlists || []).find(
+    (playlist) => playlist.id === app.spotifyPlaylistId,
+  ) || spotify.selected_playlist || null;
+  if ($("spotify-play-playlist-button")) {
+    $("spotify-play-playlist-button").disabled = !selectedPlaylist?.uri || !spotify.control_authorized;
+  }
+  const openPlaylistLink = $("spotify-open-playlist-link");
+  if (openPlaylistLink) {
+    openPlaylistLink.classList.toggle("hidden", !selectedPlaylist?.spotify_url);
+    if (selectedPlaylist?.spotify_url) openPlaylistLink.href = selectedPlaylist.spotify_url;
+  }
 
   const message = $("spotify-search-message");
   if (message) {
-    message.textContent = spotify.control_authorized
-      ? spotify.query
-        ? `${spotify.results.length} result${spotify.results.length === 1 ? "" : "s"} for “${spotify.query}”.`
-        : "Search the Spotify catalog, then play on the selected Connect device or add a track to the queue."
-      : "Reconnect Spotify from System once to grant playback-control permission.";
+    if (!spotify.library_authorized) {
+      message.textContent = "Reconnect once for playlist access. Track search and current-playback metadata remain available.";
+    } else if (spotify.query) {
+      message.textContent = `${spotify.results.length} result${spotify.results.length === 1 ? "" : "s"} for “${spotify.query}”. Playback follows Spotify's active device.`;
+    } else if (app.spotifyPlaylistId && spotify.playlist_error) {
+      message.textContent = `${spotify.playlist_error} Open this playlist in Spotify to browse it there.`;
+    } else if (app.spotifyPlaylistId) {
+      message.textContent = `${spotify.playlist_tracks.length} track${spotify.playlist_tracks.length === 1 ? "" : "s"} loaded from ${selectedPlaylist?.name || "the selected playlist"}.`;
+    } else {
+      message.textContent = `${spotify.playlists.length} playlist${spotify.playlists.length === 1 ? "" : "s"} available. Choose one or search for a song.`;
+    }
   }
   const results = $("spotify-results");
   if (results) {
-    results.innerHTML = (spotify.results || [])
-      .map((item) => `<div class="spotify-result">
-        ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="">` : `<span class="result-cover"></span>`}
-        <div class="spotify-result-copy">
-          <b>${escapeHtml(item.name || "Untitled")}${item.explicit ? " · E" : ""}</b>
-          <span>${escapeHtml(item.artists?.join(", ") || "Unknown artist")}</span>
-          <small>${escapeHtml(item.album || "")} · ${formatTime(item.duration_ms)}</small>
-        </div>
-        <div class="spotify-result-actions">
-          <button data-spotify-play="${escapeHtml(item.uri || "")}" ${spotify.control_authorized ? "" : "disabled"}>Play</button>
-          <button data-spotify-queue="${escapeHtml(item.uri || "")}" ${spotify.control_authorized ? "" : "disabled"}>Queue</button>
-        </div>
-      </div>`)
-      .join("");
+    const displayedTracks = spotify.query
+      ? (spotify.results || [])
+      : app.spotifyPlaylistId
+        ? (spotify.playlist_tracks || [])
+        : null;
+    results.innerHTML = displayedTracks
+      ? displayedTracks
+        .map((item) => `<div class="spotify-result">
+          ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="">` : `<span class="result-cover"></span>`}
+          <div class="spotify-result-copy">
+            <b>${escapeHtml(item.name || "Untitled")}${item.explicit ? " · E" : ""}</b>
+            <span>${escapeHtml(item.artists?.join(", ") || "Unknown artist")}</span>
+            <small>${escapeHtml(item.album || "")} · ${formatTime(item.duration_ms)}</small>
+          </div>
+          <div class="spotify-result-actions">
+            <button data-spotify-play="${escapeHtml(item.uri || "")}" ${spotify.control_authorized ? "" : "disabled"}>Play</button>
+            <button data-spotify-queue="${escapeHtml(item.uri || "")}" ${spotify.control_authorized ? "" : "disabled"}>Queue</button>
+            ${item.spotify_url ? `<a href="${escapeHtml(item.spotify_url)}" target="_blank" rel="noreferrer">Spotify ↗</a>` : ""}
+          </div>
+        </div>`)
+        .join("")
+      : (spotify.playlists || [])
+        .map((playlist) => `<div class="spotify-result">
+          ${playlist.image_url ? `<img src="${escapeHtml(playlist.image_url)}" alt="">` : `<span class="result-cover"></span>`}
+          <div class="spotify-result-copy">
+            <b>${escapeHtml(playlist.name || "Untitled playlist")}</b>
+            <span>${escapeHtml(playlist.owner || "Spotify playlist")}</span>
+            <small>${Number(playlist.track_count || 0)} tracks</small>
+          </div>
+          <div class="spotify-result-actions">
+            <button data-spotify-browse="${escapeHtml(playlist.id || "")}">Browse</button>
+            <button data-spotify-context="${escapeHtml(playlist.uri || "")}" ${spotify.control_authorized ? "" : "disabled"}>Play</button>
+            ${playlist.spotify_url ? `<a href="${escapeHtml(playlist.spotify_url)}" target="_blank" rel="noreferrer">Spotify ↗</a>` : ""}
+          </div>
+        </div>`)
+        .join("");
     $$("[data-spotify-play]", results).forEach((button) => {
-      button.addEventListener("click", () => spotifyCommand("play", { uri: button.dataset.spotifyPlay }));
+      button.addEventListener("click", () => spotifyCommand("play", app.spotifyPlaylistId && selectedPlaylist?.uri
+        ? {
+          context_uri: selectedPlaylist.uri,
+          offset_uri: button.dataset.spotifyPlay,
+        }
+        : { uri: button.dataset.spotifyPlay }));
     });
     $$("[data-spotify-queue]", results).forEach((button) => {
       button.addEventListener("click", () => spotifyCommand("queue", { uri: button.dataset.spotifyQueue }));
     });
+    $$("[data-spotify-context]", results).forEach((button) => {
+      button.addEventListener("click", () => spotifyCommand("play", { context_uri: button.dataset.spotifyContext }));
+    });
+    $$("[data-spotify-browse]", results).forEach((button) => {
+      button.addEventListener("click", () => {
+        app.spotifyPlaylistId = button.dataset.spotifyBrowse || "";
+        if ($("spotify-search-input")) $("spotify-search-input").value = "";
+        app.spotify = { ...spotify, query: "" };
+        refreshSpotifyConsole(true, "");
+      });
+    });
   }
+
+  setText(
+    "spotify-diagnostic-metadata",
+    track.name
+      ? `${track.artists?.join(", ") || "Unknown artist"} — ${track.name} · ${formatTime(playback.progress_ms)} / ${formatTime(track.duration_ms)}`
+      : "Connected; Spotify reports no current track.",
+  );
+  setText(
+    "spotify-diagnostic-devices",
+    diagnostics.available_device_count
+      ? `${diagnostics.available_device_count}: ${(diagnostics.available_device_names || []).join(", ")}`
+      : "Spotify returned no API-controllable devices.",
+  );
+  setText("spotify-diagnostic-route", "Follow Spotify active device; no forced device ID");
+  setText(
+    "spotify-diagnostic-command",
+    diagnostics.last_command
+      ? `${diagnostics.last_command.ok ? "Accepted" : "Failed"} · ${label(diagnostics.last_command.action)} · ${diagnostics.last_command.message}`
+      : "None sent since Lumen started.",
+  );
+  setText("spotify-diagnostic-note", diagnostics.api_note || "");
 }
 
 function selectedSpotifyDeviceId() {
-  return $("spotify-device-select")?.value || app.spotify?.playback?.device?.id || "";
+  return app.spotifyTransferDeviceId || "";
 }
 
 async function spotifyCommand(action, values = {}) {
@@ -503,9 +627,11 @@ async function spotifyCommand(action, values = {}) {
       method: "POST",
       body: { action, device_id: selectedSpotifyDeviceId(), ...values },
     });
+    if (action === "transfer") app.spotifyTransferDeviceId = "";
     window.setTimeout(() => refreshSpotifyConsole(false), 350);
   } catch (error) {
     toast("Spotify command failed", error.message, "error");
+    window.setTimeout(() => refreshSpotifyConsole(false), 100);
   }
 }
 
@@ -1295,7 +1421,20 @@ function installHandlers() {
   $("spotify-refresh-button")?.addEventListener("click", () => refreshSpotifyConsole(true));
   $("spotify-search-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
+    app.spotifyPlaylistId = "";
     refreshSpotifyConsole(true, $("spotify-search-input")?.value.trim() || "");
+  });
+  $("spotify-reconnect-button")?.addEventListener("click", connectSpotify);
+  $("spotify-playlist-select")?.addEventListener("change", (event) => {
+    app.spotifyPlaylistId = event.target.value || "";
+    if ($("spotify-search-input")) $("spotify-search-input").value = "";
+    refreshSpotifyConsole(true, "");
+  });
+  $("spotify-play-playlist-button")?.addEventListener("click", () => {
+    const playlist = (app.spotify?.playlists || []).find(
+      (candidate) => candidate.id === app.spotifyPlaylistId,
+    );
+    if (playlist?.uri) spotifyCommand("play", { context_uri: playlist.uri });
   });
   $("spotify-previous-button")?.addEventListener("click", () => spotifyCommand("previous"));
   $("spotify-play-button")?.addEventListener("click", () => {
@@ -1312,7 +1451,10 @@ function installHandlers() {
   $("spotify-volume")?.addEventListener("change", (event) => {
     spotifyCommand("volume", { volume_percent: Number(event.target.value) });
   });
-  $("spotify-device-select")?.addEventListener("change", () => renderSpotifyConsole());
+  $("spotify-device-select")?.addEventListener("change", (event) => {
+    app.spotifyTransferDeviceId = event.target.value || "";
+    renderSpotifyConsole();
+  });
   $("copy-spotify-redirect-button")?.addEventListener("click", async () => {
     const redirect = "http://127.0.0.1:8765/callback";
     try {

@@ -246,6 +246,7 @@ class LumenApplication:
         self._status_sequence = 0
         self._last_media_poll = 0.0
         self._spotify_error: str | None = None
+        self._spotify_last_command: dict[str, Any] | None = None
         self._audio_metrics = AudioInputMetrics.silence()
         self._audio_packets = 0
         self._audio_frames = 0
@@ -738,16 +739,27 @@ class LumenApplication:
                 self._add_event("fault", f"Spotify connection: {error}")
                 self._status_sequence += 1
 
-    def spotify_console(self, query: str = "") -> dict[str, Any]:
+    def spotify_console(
+        self,
+        query: str = "",
+        playlist_id: str = "",
+    ) -> dict[str, Any]:
         if not self.spotify_client_id or not DEFAULT_SPOTIFY_TOKEN.exists():
             return {
                 "connected": False,
                 "control_authorized": False,
+                "library_authorized": False,
                 "granted_scopes": [],
+                "profile": None,
                 "playback": None,
                 "devices": [],
+                "playlists": [],
+                "selected_playlist": None,
+                "playlist_tracks": [],
+                "playlist_error": None,
                 "results": [],
                 "query": query,
+                "playlist_id": playlist_id,
                 "message": (
                     "Connect a private Spotify developer app in System to "
                     "activate this console."
@@ -759,11 +771,32 @@ class LumenApplication:
                 cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
             )
             client = SpotifyWebAPI(oauth.valid_token)
-            console = client.console(query=query[:200])
+            console = client.console(
+                query=query[:200],
+                playlist_id=playlist_id[:128],
+            )
             with self._lock:
                 self._spotify_error = None
                 self._remember_spotify_payload(client.last_playback_payload)
                 self._status_sequence += 1
+                playback = console.get("playback") or {}
+                active_device = playback.get("device") or {}
+                console["diagnostics"] = {
+                    "route_policy": "follow_spotify_active_device",
+                    "active_device": active_device.get("name"),
+                    "available_device_count": len(console.get("devices", [])),
+                    "available_device_names": [
+                        device.get("name")
+                        for device in console.get("devices", [])
+                        if device.get("name")
+                    ],
+                    "last_command": self._spotify_last_command,
+                    "api_note": (
+                        "Spotify does not return every device model through "
+                        "its Web API. Choose Chromecast in Spotify itself; "
+                        "Lumen will follow that active route."
+                    ),
+                }
             return console
         except Exception as error:
             with self._lock:
@@ -786,10 +819,22 @@ class LumenApplication:
         except Exception as error:
             with self._lock:
                 self._spotify_error = str(error)
+                self._spotify_last_command = {
+                    "action": action,
+                    "ok": False,
+                    "message": str(error),
+                    "at_unix_ms": round(time.time() * 1000),
+                }
                 self._status_sequence += 1
             raise RuntimeError(str(error)) from error
         with self._lock:
             self._spotify_error = None
+            self._spotify_last_command = {
+                "action": action,
+                "ok": True,
+                "message": "Spotify accepted the command.",
+                "at_unix_ms": round(time.time() * 1000),
+            }
             self._last_media_poll = 0.0
             self._add_event("media", f"Spotify control: {action}")
             self._status_sequence += 1
@@ -1024,7 +1069,7 @@ class LumenApplication:
             return {
                 "project": {
                     "name": "Lumen Engine",
-                    "version": "0.3.0",
+                    "version": "0.3.1",
                     "role": "Spatial music-lighting control",
                 },
                 "rig": self._rig_payload,
@@ -1150,11 +1195,16 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/spotify":
-            query = parse_qs(parsed.query).get("q", [""])[0]
+            query_values = parse_qs(parsed.query)
+            query = query_values.get("q", [""])[0]
+            playlist_id = query_values.get("playlist_id", [""])[0]
             try:
                 self._json(
                     HTTPStatus.OK,
-                    self.server.application.spotify_console(query),
+                    self.server.application.spotify_console(
+                        query,
+                        playlist_id,
+                    ),
                 )
             except RuntimeError as error:
                 self._json(HTTPStatus.CONFLICT, {"error": str(error)})

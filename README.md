@@ -135,9 +135,9 @@ Listen to line-in for ten seconds without generating DMX:
 
 ## Spotify music console
 
-Spotify is an optional music browser, Connect remote, and identity source. The
-line-in remains authoritative for musical timing and Lumen's own analysis, so
-the engine also works for instruments and other non-Spotify sources.
+Spotify is an optional account, library, playback-control, and identity source.
+The line-in remains authoritative for musical timing and Lumen's own analysis,
+so the engine also works for instruments and other non-Spotify sources.
 
 1. Open **System → Spotify playback identity** in the desktop console.
 2. Use its link to create a private app in the Spotify developer dashboard and
@@ -151,8 +151,17 @@ the engine also works for instruments and other non-Spotify sources.
 5. Approve the private app once in the desktop browser, then open
    **Spotify console** in Lumen.
 
-The console controls the existing Chromecast Audio through Spotify Connect; it
-does not move playback to the Ubuntu PC.
+Use **Open Spotify player + device picker** for Spotify's full browsing
+experience and to choose Chromecast Audio. Lumen follows the device that is
+active in Spotify: normal transport and song-selection commands intentionally
+omit a device ID. The optional transfer selector lists only devices Spotify
+exposes through its Web API; Spotify documents that some device models are not
+returned there.
+
+Lumen reads the current artist, title, album, track length, live track position,
+playing state, playlist context, and active-device name. Its library panel
+lists the account's playlists, lets the operator play a playlist context, and
+can start a selected playlist track without losing next/previous context.
 
 The equivalent command-line login and inspection commands remain available for
 diagnostics:

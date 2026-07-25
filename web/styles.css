@@ -2303,9 +2303,23 @@ textarea::placeholder { color: #536360; }
   min-height: calc(100vh - 223px);
 }
 .spotify-player-panel {
-  display: grid;
-  grid-template-rows: 31px auto auto auto 1fr;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
 }
+.spotify-open-link { text-decoration: none; }
+.spotify-account-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid #27383a;
+  padding: 8px 13px;
+  background: #0a1214;
+  color: #617773;
+  font-size: 8px;
+}
+.spotify-account-line b { color: #9bc7c0; font-weight: 500; }
 .spotify-player-hero {
   display: grid;
   grid-template-columns: 190px minmax(0, 1fr);
@@ -2383,6 +2397,35 @@ textarea::placeholder { color: #536360; }
   color: #e7fffb;
   font-size: 13px;
 }
+.spotify-native-route {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #293a3c;
+  padding: 11px 13px;
+  background: linear-gradient(90deg, rgba(37, 92, 85, .2), transparent);
+}
+.spotify-native-route b,
+.spotify-native-route span { display: block; }
+.spotify-native-route b { color: #b3d8d2; font-size: 9px; }
+.spotify-native-route span {
+  margin-top: 4px;
+  color: #6f8581;
+  font-size: 7px;
+  line-height: 1.4;
+}
+.spotify-native-route a,
+.spotify-library-browser a {
+  border: 1px solid #4d7772;
+  border-radius: 3px;
+  padding: 7px 9px;
+  background: linear-gradient(#315a56, #1a3734);
+  color: #d2e7e3;
+  font-size: 8px;
+  text-decoration: none;
+  white-space: nowrap;
+}
 .spotify-routing {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(130px, .65fr);
@@ -2424,7 +2467,90 @@ textarea::placeholder { color: #536360; }
 .spotify-route-proof b { color: #acd0ca; font-size: 9px; }
 .spotify-route-proof span { margin-top: 4px; color: #617672; font-size: 7px; }
 
-.spotify-search-panel { display: grid; grid-template-rows: 31px auto auto 1fr; min-height: 0; }
+.spotify-diagnostics {
+  margin: 0 13px 13px;
+  border: 1px solid #273b3a;
+  background: #091112;
+}
+.spotify-diagnostics summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: #75908b;
+  font-size: 8px;
+}
+.spotify-diagnostics dl {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+  border-top: 1px solid #243534;
+}
+.spotify-diagnostics dl div {
+  min-width: 0;
+  border-right: 1px solid #243534;
+  border-bottom: 1px solid #243534;
+  padding: 8px 10px;
+}
+.spotify-diagnostics dl div:nth-child(even) { border-right: 0; }
+.spotify-diagnostics dt { color: #536b67; font-size: 7px; }
+.spotify-diagnostics dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: #a5bfba;
+  font: 7px var(--font-mono);
+}
+.spotify-diagnostics p {
+  margin: 0;
+  padding: 8px 10px;
+  color: #657b77;
+  font-size: 7px;
+  line-height: 1.45;
+}
+
+.spotify-search-panel {
+  display: grid;
+  grid-template-rows: 31px auto auto auto auto minmax(0, 1fr);
+  min-height: 0;
+}
+.spotify-library-auth {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #684b34;
+  padding: 10px 13px;
+  background: #211812;
+}
+.spotify-library-auth b,
+.spotify-library-auth span { display: block; }
+.spotify-library-auth b { color: #d0ad85; font-size: 9px; }
+.spotify-library-auth span { margin-top: 3px; color: #92765b; font-size: 7px; }
+.spotify-library-auth button,
+.spotify-library-browser button {
+  min-height: 29px;
+  border: 1px solid #49716d;
+  border-radius: 3px;
+  padding: 0 10px;
+  background: linear-gradient(#315b57, #1d3b38);
+  color: #d0e5e1;
+  font-size: 8px;
+  white-space: nowrap;
+}
+.spotify-library-browser {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 7px;
+  border-bottom: 1px solid #29393b;
+  padding: 11px 13px;
+  background: #0c1517;
+}
+.spotify-library-browser label > span {
+  display: block;
+  margin-bottom: 5px;
+  color: #67807b;
+  font-size: 7px;
+}
+.spotify-library-browser select { width: 100%; }
 .spotify-search-form {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -2479,6 +2605,15 @@ textarea::placeholder { color: #536360; }
   background: linear-gradient(#253837, #152221);
   color: #9fc1bc;
   font-size: 7px;
+}
+.spotify-result-actions a {
+  border: 1px solid #3a5453;
+  border-radius: 3px;
+  padding: 5px 7px;
+  background: #101c1d;
+  color: #789b95;
+  font-size: 7px;
+  text-decoration: none;
 }
 
 .system-layout {
