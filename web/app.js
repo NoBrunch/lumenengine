@@ -23,6 +23,8 @@ const app = {
   spotifyFetchedAt: 0,
   spotifyPlaylistId: "",
   spotifyTransferDeviceId: "",
+  calibrationActive: false,
+  calibrationCaptures: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -834,6 +836,14 @@ function selectFixture(id) {
     });
     updateCalibrationSliderReadouts();
   }
+  if (fixture.kind === "moving") {
+    const pan = fixture.calibration?.home_pan_dmx ?? 32768;
+    const tilt = fixture.calibration?.home_tilt_dmx ?? 32768;
+    if ($("calibration-pan")) $("calibration-pan").value = pan;
+    if ($("calibration-tilt")) $("calibration-tilt").value = tilt;
+    setText("calibration-pan-value", pan);
+    setText("calibration-tilt-value", tilt);
+  }
   const channelMap = $("fixture-channel-map");
   if (channelMap) {
     channelMap.innerHTML = Object.entries(profile?.channels || {})
@@ -869,6 +879,35 @@ function setCalibrationRange(kind) {
   updateCalibrationSliderReadouts();
 }
 
+function selectedMoverId() {
+  const fixture = selectedFixture();
+  return fixture?.kind === "moving" ? fixture.id : fixtures().find((item) => item.kind === "moving")?.id;
+}
+
+async function sendCalibration(active, values = {}) {
+  const fixtureId = selectedMoverId();
+  if (!fixtureId) return;
+  try {
+    if (active && !app.status?.engine?.running) {
+      app.status = await api("/api/engine/start", { method: "POST", body: { mode: "live" } });
+    }
+    await api("/api/calibration", { method: "POST", body: { fixture_id: fixtureId, active, ...values } });
+    app.calibrationActive = active;
+    setText("calibration-toggle", active ? "Stop calibration" : "Start calibration");
+    ["calibration-pan", "calibration-tilt", "calibration-speed"].forEach((id) => { if ($(id)) $(id).disabled = !active; });
+    $$('[data-calibration-capture]').forEach((button) => { button.disabled = !active; });
+  } catch (error) { toast("Calibration unavailable", error.message, "error"); }
+}
+
+function calibrationJog() {
+  if (!app.calibrationActive) return;
+  sendCalibration(true, {
+    pan_dmx: Number($("calibration-pan")?.value || 32768),
+    tilt_dmx: Number($("calibration-tilt")?.value || 32768),
+    speed: Number($("calibration-speed")?.value || 192),
+  });
+}
+
 async function saveSelectedFixture() {
   const fixture = selectedFixture();
   if (!fixture) {
@@ -891,6 +930,7 @@ async function saveSelectedFixture() {
   }
   setText("rig-save-state", "Saving…");
   try {
+    if (app.calibrationActive) await sendCalibration(false);
     app.bootstrap = await api("/api/rig/fixture", { method: "POST", body: payload });
     app.status = app.bootstrap.status;
     app.memory = app.bootstrap.memory;
@@ -1485,6 +1525,32 @@ function installHandlers() {
   });
   $$('[data-calibration-preset]').forEach((button) => {
     button.addEventListener('click', () => setCalibrationRange(button.dataset.calibrationPreset));
+  });
+  $("calibration-toggle")?.addEventListener("click", () => sendCalibration(!app.calibrationActive));
+  ["calibration-pan", "calibration-tilt", "calibration-speed"].forEach((id) => {
+    $(id)?.addEventListener("input", () => {
+      setText(`${id}-value`, $(id).value);
+      calibrationJog();
+    });
+  });
+  $$('[data-calibration-capture]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const kind = button.dataset.calibrationCapture;
+      const pan = Number($("calibration-pan").value);
+      const tilt = Number($("calibration-tilt").value);
+      app.calibrationCaptures[kind] = { pan, tilt };
+      if (kind === "left") $("[data-calibration=pan_dmx_min_u16]").value = pan;
+      if (kind === "right") $("[data-calibration=pan_dmx_max_u16]").value = pan;
+      if (kind === "home") {
+        $("[data-calibration=home_pan_dmx]").value = pan;
+        $("[data-calibration=home_tilt_dmx]").value = tilt;
+      }
+      if (kind === "left" || kind === "right") {
+        // Tilt captures are taken independently with the same jog controls.
+        $("[data-calibration=tilt_dmx_min_u16]").value = kind === "left" ? tilt : $("[data-calibration=tilt_dmx_min_u16]").value;
+        $("[data-calibration=tilt_dmx_max_u16]").value = kind === "right" ? tilt : $("[data-calibration=tilt_dmx_max_u16]").value;
+      }
+    });
   });
   $$("[data-preset]").forEach((button) => button.addEventListener("click", () => applyPreset(button.dataset.preset)));
   $$("[data-feedback]").forEach((button) => {

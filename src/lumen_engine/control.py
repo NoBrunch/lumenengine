@@ -263,6 +263,7 @@ class LumenApplication:
         self._spotify_error: str | None = None
         self._spotify_last_command: dict[str, Any] | None = None
         self._feedback_biases: dict[str, dict[str, float]] = {}
+        self._calibration_overrides: dict[str, dict[str, float]] = {}
         self._audio_metrics = AudioInputMetrics.silence()
         self._audio_packets = 0
         self._audio_frames = 0
@@ -621,7 +622,30 @@ class LumenApplication:
                 motion_delta=bias.get("motion", 0.0),
                 intensity_delta=bias.get("intensity", 0.0),
             )
+        for fixture_id, override in self._calibration_overrides.items():
+            runtime.set_calibration_override(fixture_id, active=True, **override)
         return runtime
+
+    def calibration_control(self, payload: dict[str, Any]) -> dict[str, Any]:
+        fixture_id = str(payload.get("fixture_id", "")).strip()
+        if not any(f.fixture_id == fixture_id for f in self.rig.fixtures):
+            raise ValueError("calibration requires a moving-head fixture")
+        active = bool(payload.get("active", True))
+        if active:
+            override = {
+                "pan_dmx": clamp(float(payload.get("pan_dmx", 32768)), 0, 65535),
+                "tilt_dmx": clamp(float(payload.get("tilt_dmx", 32768)), 0, 65535),
+                "speed": clamp(float(payload.get("speed", 192)), 0, 255),
+            }
+            self._calibration_overrides[fixture_id] = override
+        else:
+            override = self._calibration_overrides.pop(fixture_id, None) or {}
+        runtime = self._runtime
+        if runtime is not None:
+            runtime.set_calibration_override(fixture_id, active=active, **override)
+        self._add_event("rig", f"Calibration {'active' if active else 'stopped'}: {fixture_id[:8]}")
+        self._status_sequence += 1
+        return {"active": active, "fixture_id": fixture_id, **override}
 
     def patch_controls(self, values: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -1016,6 +1040,10 @@ class LumenApplication:
             "pick_it_up": (0.35, 0.10),
             "too_bright": (0.0, -0.25),
             "too_dim": (0.0, 0.25),
+            "great_timing": (0.16, 0.06),
+            "perfect_motion": (0.14, 0.0),
+            "more_like_this": (0.12, 0.08),
+            "great_transition": (0.10, 0.06),
         }
         motion_delta, intensity_delta = effects.get(label, (0.0, 0.0))
         motion_delta *= abs(value) if value else 1.0
@@ -1330,6 +1358,8 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.apply_preset(str(payload.get("preset", "")))
             elif path == "/api/feedback":
                 result = app.add_feedback(payload)
+            elif path == "/api/calibration":
+                result = app.calibration_control(payload)
             elif path == "/api/gesture/fresh":
                 result = app.request_fresh_gesture()
             elif path == "/api/settings":

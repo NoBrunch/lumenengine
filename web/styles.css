@@ -989,6 +989,20 @@ kbd {
   gap: 9px;
   min-height: calc(100vh - 222px);
 }
+.performance-grid > .panel,
+.audio-layout > .panel,
+.desktop-workspace > .panel { min-height: 0; overflow: auto; }
+.control-help { margin: 0 10px 8px; color: #6f8581; font-size: 7px; line-height: 1.45; }
+
+.live-calibration-panel { margin-top: 9px; border: 1px solid #385457; border-radius: 3px; padding: 8px; background: #0b1416; }
+.live-calibration-heading { display: flex; justify-content: space-between; align-items: center; color: #9ab5b1; font-size: 8px; }
+.live-calibration-heading button { border: 1px solid #4c8e83; border-radius: 2px; padding: 4px 6px; background: #173b38; color: #bce9df; font: 7px var(--font-mono); }
+.live-calibration-panel p { color: #718682; font-size: 7px; line-height: 1.4; }
+.live-calibration-panel label { display: grid; grid-template-columns: 65px 1fr auto; gap: 6px; align-items: center; margin-top: 7px; }
+.live-calibration-panel input[type="range"] { width: 100%; accent-color: var(--cyan); }
+.live-calibration-panel output { color: var(--cyan); font: 7px var(--font-mono); }
+.calibration-captures { display: flex; gap: 4px; margin-top: 8px; }
+.calibration-captures button { flex: 1; border: 1px solid #3b5557; border-radius: 2px; padding: 5px; background: #17272a; color: #9bb1ae; font: 7px var(--font-mono); }
 
 .now-playing-panel { grid-column: 1 / 3; }
 .room-panel { grid-column: 1 / 3; grid-row: 2; }

@@ -253,6 +253,7 @@
                   <button data-preset="open">Open room</button>
                   <button data-preset="drive">Drive</button>
                 </div>
+                <p class="control-help">Master is the final output level. Intensity and Movement bias the generated energy and travel. Focus narrows or widens the room target; Warmth shifts the palette. “How much Lumen follows you” blends those choices into the automatic audio response.</p>
                 <div class="control-slider-grid">
                   <label>
                     <span><b>Master</b><output data-output="master">78%</output></span>
@@ -298,6 +299,9 @@
                   <button data-feedback="too_dim" data-value="1"><span>◐</span>Too dim</button>
                   <button data-feedback="bad_timing" data-value="-1"><span>◷</span>Bad timing</button>
                   <button data-feedback="hold_this" data-value="1"><span>◇</span>Hold this idea</button>
+                  <button data-feedback="great_timing" data-value="1"><span>✓</span>Timing was right</button>
+                  <button data-feedback="perfect_motion" data-value="1"><span>✦</span>Perfect motion</button>
+                  <button data-feedback="more_like_this" data-value="1"><span>★</span>More like this</button>
                 </div>
                 <label class="feedback-target">Applies to
                   <select id="feedback-scope"><option value="overall">Overall performance</option></select>
@@ -419,6 +423,14 @@
                       <label>Tilt minimum <output id="tilt-range-readout">—</output><input data-calibration-slider="tilt_min_deg" type="range" min="0" max="270" step="0.1" value="0"></label>
                       <label>Tilt maximum <input data-calibration-slider="tilt_max_deg" type="range" min="0" max="270" step="0.1" value="270"></label>
                       <div class="calibration-presets"><button type="button" data-calibration-preset="wide">Wide</button><button type="button" data-calibration-preset="center">Center</button><button type="button" data-calibration-preset="reset">Loaded</button></div>
+                    </div>
+                    <div class="live-calibration-panel">
+                      <div class="live-calibration-heading"><b>Live mover calibration</b><button type="button" id="calibration-toggle">Start calibration</button></div>
+                      <p>Jog the selected mover at low output, capture left/home/right and save the room envelope.</p>
+                      <label>Pan jog <output id="calibration-pan-value">32768</output><input id="calibration-pan" type="range" min="0" max="65535" value="32768" disabled></label>
+                      <label>Tilt jog <output id="calibration-tilt-value">32768</output><input id="calibration-tilt" type="range" min="0" max="65535" value="32768" disabled></label>
+                      <label>Jog speed <output id="calibration-speed-value">192</output><input id="calibration-speed" type="range" min="0" max="255" value="192" disabled></label>
+                      <div class="calibration-captures"><button type="button" data-calibration-capture="left" disabled>Capture left</button><button type="button" data-calibration-capture="home" disabled>Capture home</button><button type="button" data-calibration-capture="right" disabled>Capture right</button></div>
                     </div>
                     <div class="form-grid two">
                       <label>Pan minimum<input data-calibration="pan_min_deg" type="number" step="0.01"></label>
@@ -853,6 +865,9 @@
             <button data-feedback="too_dim" data-value="1"><span>◐</span><b>Too dim</b></button>
             <button data-feedback="bad_timing" data-value="-1"><span>◷</span><b>Bad timing</b></button>
             <button data-feedback="hold_this" data-value="1"><span>◇</span><b>Hold this idea</b></button>
+            <button data-feedback="great_timing" data-value="1"><span>✓</span><b>Timing was right</b></button>
+            <button data-feedback="perfect_motion" data-value="1"><span>✦</span><b>Perfect motion</b></button>
+            <button data-feedback="more_like_this" data-value="1"><span>★</span><b>More like this</b></button>
             <button id="remote-note-open"><span>+</span><b>Add a note</b></button>
           </div>
           <label class="feedback-target">Applies to

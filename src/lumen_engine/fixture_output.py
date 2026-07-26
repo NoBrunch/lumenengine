@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from lumen_engine.dmx import DMXFrame
 from lumen_engine.models import (
     FixturePatch,
@@ -173,24 +175,28 @@ def _apply_generic_multi_effect(
         )
         pattern_phase = (timestamp * assumed_bpm / 60.0 / 4.0) % 1.0
     beat_index = int(pattern_phase * 4.0) % 4
-    # Hold widely separated motor targets for a complete beat instead of
-    # sending a continuously moving sine target that the inexpensive motors
-    # can never catch. The fixture itself supplies the physical easing.
-    body_pattern = (18.0, 18.0, 237.0, 237.0)
-    arm_1_pattern = (20.0, 232.0, 232.0, 20.0)
-    arm_2_pattern = (235.0, 235.0, 23.0, 23.0)
-    motion_scale = clamp(0.78 + 0.26 * activity, 0.78, 1.0)
+    # Change the gesture every bar: opposing sweeps, circles, alternating
+    # arms, and a restrained nod. Motor speed follows energy so the effect
+    # visibly settles with the music instead of racing through quiet parts.
+    bar_number = int(timestamp * (observation.bpm or 120.0) / 60.0 / 4.0)
+    pattern = bar_number % 4
+    motion_scale = clamp(0.22 + 0.78 * activity, 0.16, 1.0)
     if decision.gesture is Gesture.BREATHE:
         motion_scale *= 0.56
-    body = round(128.0 + (body_pattern[beat_index] - 128.0) * motion_scale)
-    arm_1 = round(
-        128.0 + (arm_1_pattern[beat_index] - 128.0) * motion_scale
-    )
-    arm_2 = round(
-        128.0 + (arm_2_pattern[beat_index] - 128.0) * motion_scale
-    )
+    motion_phase = timestamp * (observation.bpm or 120.0) / 60.0 * math.tau / 4.0
+    if pattern == 0:
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase * 2), math.cos(motion_phase * 2)
+    elif pattern == 1:
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.cos(motion_phase), math.sin(motion_phase)
+    elif pattern == 2:
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * .5), math.sin(motion_phase), -math.sin(motion_phase)
+    else:
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * 2), (1 if beat_index % 2 == 0 else -1), (-1 if beat_index % 2 == 0 else 1)
+    body = round(128.0 + 127.0 * motion_scale * body_motion)
+    arm_1 = round(128.0 + 127.0 * motion_scale * arm_1_motion)
+    arm_2 = round(128.0 + 127.0 * motion_scale * arm_2_motion)
     # This fixture's CH2 is inverted: zero is fastest and 255 is slowest.
-    body_speed = 0
+    body_speed = round(235.0 - 210.0 * activity)
     strobe = 0
     if beat_pulse >= 0.52 and energy >= 0.38:
         strobe = round(70.0 + 150.0 * beat_pulse * activity)
@@ -202,7 +208,7 @@ def _apply_generic_multi_effect(
         "arm_2_motor": arm_2,
         "master_dimmer": round(
             clamp(
-                max(decision.brightness, 0.76 + 0.18 * energy)
+                max(decision.brightness, 0.20 + 0.70 * energy)
                 + 0.10 * beat_pulse,
                 0.0,
                 1.0,

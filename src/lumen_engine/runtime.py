@@ -63,6 +63,20 @@ class PerformanceRuntime:
         self._feedback_intensity: dict[str, float] = {}
         self._motion_phase = 0.0
         self._motion_clock_s: float | None = None
+        self._calibration_overrides: dict[str, dict[str, float]] = {}
+
+    def set_calibration_override(
+        self, fixture_id: str, *, active: bool, pan_dmx: float = 0.0,
+        tilt_dmx: float = 0.0, speed: float = 192.0,
+    ) -> None:
+        if active:
+            self._calibration_overrides[fixture_id] = {
+                "pan_dmx": clamp(pan_dmx, 0.0, 65535.0),
+                "tilt_dmx": clamp(tilt_dmx, 0.0, 65535.0),
+                "speed": clamp(speed, 0.0, 255.0),
+            }
+        else:
+            self._calibration_overrides.pop(fixture_id, None)
 
     def apply_feedback(
         self,
@@ -129,7 +143,22 @@ class PerformanceRuntime:
                 ),
             )
             try:
-                if observation.loudness < 0.02 and previous is not None:
+                calibration_override = self._calibration_overrides.get(fixture.fixture_id)
+                if calibration_override is not None:
+                    calibration = fixture.calibration
+                    pan_norm = calibration_override["pan_dmx"] / 65535.0
+                    tilt_norm = calibration_override["tilt_dmx"] / 65535.0
+                    pan = calibration.pan_min_deg + pan_norm * (calibration.pan_max_deg - calibration.pan_min_deg)
+                    tilt = calibration.tilt_min_deg + tilt_norm * (calibration.tilt_max_deg - calibration.tilt_min_deg)
+                    direction = self.targeting.direction_for_angles(fixture, pan, tilt)
+                    solution = TargetingSolution(
+                        fixture_id=fixture.fixture_id,
+                        target=fixture.position_m + direction * 5.0,
+                        pan_deg=pan, tilt_deg=tilt, distance_m=5.0,
+                        movement_cost_deg=0.0, aim_error_deg=0.0,
+                        branch="calibration-jog",
+                    )
+                elif observation.loudness < 0.02 and previous is not None:
                     direction = self.targeting.direction_for_angles(
                         fixture, previous[0], previous[1]
                     )
@@ -180,6 +209,11 @@ class PerformanceRuntime:
                     observation,
                     idle_amount=idle_amount,
                 )
+                if calibration_override is not None:
+                    # The profile's speed channel is intentionally overridden
+                    # only while the operator is in calibration mode.
+                    speed_channel = fixture.address + 5 - 1
+                    frame.set_channel(fixture.universe, speed_channel, round(calibration_override["speed"]))
             except UnreachableTargetError as error:
                 warnings.append(str(error))
 
@@ -223,7 +257,10 @@ class PerformanceRuntime:
         if self._audio_quiet_since_s is None:
             self._audio_quiet_since_s = observation.timestamp_s
         quiet_for = max(0.0, observation.timestamp_s - self._audio_quiet_since_s)
-        self._audio_idle_amount = clamp((quiet_for - 3.0) / 2.0, 0.0, 1.0)
+        # Movers hold immediately; the center effect reaches its parked state
+        # on the same short musical silence window instead of continuing its
+        # fast motor program for several seconds.
+        self._audio_idle_amount = clamp((quiet_for - 0.8) / 1.0, 0.0, 1.0)
         return self._audio_idle_amount
 
     def close(self) -> None:
@@ -369,13 +406,22 @@ class PerformanceRuntime:
             envelope *= 0.66
         elif decision.gesture is Gesture.BREATHE:
             envelope *= 0.58
-        pan_normalized = 0.5 + envelope * (
-            0.43 * math.sin(phase) + 0.10 * math.sin(phase * 2.0 + index)
-        )
-        tilt_normalized = 0.5 + envelope * (
-            0.38 * math.sin(phase * 1.31 + index * 0.8)
-            + 0.10 * math.cos(phase * 0.63 + index)
-        )
+        mode = int((observation.timestamp_s * (bpm or 120.0) / 60.0 / 4.0)) % 4
+        if mode == 0:  # figure eight: a fast vertical harmonic over a pan loop
+            pan_motion = math.sin(phase)
+            tilt_motion = math.sin(phase * 2.0 + index * 0.6)
+        elif mode == 1:  # broad circle with fixture-to-fixture phase opposition
+            pan_motion = math.sin(phase + index * math.pi)
+            tilt_motion = math.cos(phase + index * math.pi)
+        elif mode == 2:  # smooth pan sweep with a smaller tilt breathe
+            pan_motion = 2.0 * ((phase / math.tau + 0.5) % 1.0) - 1.0
+            pan_motion = 2.0 * abs(pan_motion) - 1.0
+            tilt_motion = math.sin(phase * 0.5 + index)
+        else:  # beat nods and alternating sides
+            pan_motion = math.sin(phase * 0.5 + index * math.pi)
+            tilt_motion = math.sin(phase * 2.0 + observation.beat_phase * math.tau)
+        pan_normalized = 0.5 + envelope * 0.47 * pan_motion
+        tilt_normalized = 0.5 + envelope * 0.44 * tilt_motion
         if observation.beat_pulse > 0.02:
             pan_normalized += (
                 1.0 if (beat_index + index) % 2 else -1.0
