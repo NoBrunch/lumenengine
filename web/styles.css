@@ -1739,6 +1739,12 @@ textarea::placeholder { color: #536360; }
 }
 .fixture-form legend small { margin-left: 4px; color: #5d706d; }
 .calibration-guide { margin: 0 0 9px; color: #738884; font-size: 7px; line-height: 1.45; }
+.calibration-slider-panel { border: 1px solid #2b4144; border-radius: 3px; padding: 8px; background: #0b1315; }
+.calibration-slider-panel label { display: grid; grid-template-columns: 78px 1fr; align-items: center; gap: 6px; margin: 5px 0; }
+.calibration-slider-panel output { grid-column: 2; color: var(--cyan); font: 7px var(--font-mono); }
+.calibration-slider-panel input[type="range"] { grid-column: 2; width: 100%; accent-color: var(--cyan); }
+.calibration-presets { display: flex; gap: 5px; margin-top: 7px; }
+.calibration-presets button { flex: 1; border: 1px solid #3a5555; border-radius: 2px; padding: 5px; background: #17272a; color: #9bb1ae; font: 7px var(--font-mono); }
 .fixture-form label {
   color: #70817f;
   font-size: 7px;

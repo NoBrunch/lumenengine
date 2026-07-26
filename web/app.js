@@ -211,6 +211,9 @@ function renderBootstrap() {
 
 function renderFeedbackTargets() {
   const options = ['<option value="overall">Overall performance</option>'];
+  if (fixtures().filter((fixture) => fixture.kind === "moving").length > 1) {
+    options.push('<option value="group:movers">Both movers</option>');
+  }
   for (const fixture of fixtures()) {
     options.push(`<option value="fixture:${escapeHtml(fixture.id)}">${escapeHtml(fixture.name || fixture.id)} · ${fixture.kind === "moving" ? "Mover" : "Effect"}</option>`);
   }
@@ -826,6 +829,10 @@ function selectFixture(id) {
       const value = fixture.calibration[input.dataset.calibration];
       if (value !== undefined) input.value = value;
     });
+    $$('[data-calibration-slider]').forEach((slider) => {
+      if (fixture.calibration[slider.dataset.calibrationSlider] !== undefined) slider.value = fixture.calibration[slider.dataset.calibrationSlider];
+    });
+    updateCalibrationSliderReadouts();
   }
   const channelMap = $("fixture-channel-map");
   if (channelMap) {
@@ -834,6 +841,28 @@ function selectFixture(id) {
       .join("");
   }
   drawRig();
+}
+
+function updateCalibrationSliderReadouts() {
+  const value = (key) => Number($(`[data-calibration="${key}"]`)?.value || 0).toFixed(1);
+  setText("pan-range-readout", `${value("pan_min_deg")}° – ${value("pan_max_deg")}°`);
+  setText("tilt-range-readout", `${value("tilt_min_deg")}° – ${value("tilt_max_deg")}°`);
+}
+
+function setCalibrationRange(kind) {
+  const limits = kind === "wide"
+    ? ["pan_min_deg", 0, "pan_max_deg", 540, "tilt_min_deg", 0, "tilt_max_deg", 270]
+    : kind === "center"
+      ? ["pan_min_deg", 90, "pan_max_deg", 450, "tilt_min_deg", 35, "tilt_max_deg", 235]
+      : null;
+  if (!limits) return;
+  for (let i = 0; i < limits.length; i += 2) {
+    const input = $(`[data-calibration="${limits[i]}"]`);
+    if (input) input.value = limits[i + 1];
+    const slider = $(`[data-calibration-slider="${limits[i]}"]`);
+    if (slider) slider.value = limits[i + 1];
+  }
+  updateCalibrationSliderReadouts();
 }
 
 async function saveSelectedFixture() {
@@ -1370,9 +1399,13 @@ async function applyPreset(preset) {
 async function sendFeedback(labelValue, value, note = null, surface = "desktop") {
   const selector = $(surface === "remote" ? "remote-feedback-scope" : "feedback-scope");
   const selected = selector?.value || "overall";
-  const [scope, fixtureId] = selected.startsWith("fixture:") ? ["fixture", selected.slice(8)] : ["overall", null];
+  const [scope, fixtureId, groupId] = selected.startsWith("fixture:")
+    ? ["fixture", selected.slice(8), null]
+    : selected.startsWith("group:")
+      ? ["group", null, selected.slice(6)]
+      : ["overall", null, null];
   try {
-    await api("/api/feedback", { method: "POST", body: { label: labelValue, value: Number(value), note, scope, fixture_id: fixtureId } });
+    await api("/api/feedback", { method: "POST", body: { label: labelValue, value: Number(value), note, scope, fixture_id: fixtureId, group_id: groupId } });
     toast("Feedback remembered", note || label(labelValue), "success");
     app.memory = await api("/api/memory");
     renderMemory(app.memory);
@@ -1438,6 +1471,16 @@ function installHandlers() {
 
   $$("[data-control]").forEach((input) => {
     input.addEventListener("input", () => queueControl(input.dataset.control, Number(input.value) / 100));
+  });
+  $$('[data-calibration-slider]').forEach((slider) => {
+    slider.addEventListener('input', () => {
+      const field = $(`[data-calibration="${slider.dataset.calibrationSlider}"]`);
+      if (field) field.value = slider.value;
+      updateCalibrationSliderReadouts();
+    });
+  });
+  $$('[data-calibration-preset]').forEach((button) => {
+    button.addEventListener('click', () => setCalibrationRange(button.dataset.calibrationPreset));
   });
   $$("[data-preset]").forEach((button) => button.addEventListener("click", () => applyPreset(button.dataset.preset)));
   $$("[data-feedback]").forEach((button) => {

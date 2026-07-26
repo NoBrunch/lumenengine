@@ -157,9 +157,24 @@ class OperatorExpressionEngine(ExpressionEngine):
         motion_bias = (self.controls.motion - 0.5) * 0.50 * influence
         state = replace(
             state,
-            energy=clamp(state.energy * intensity_scale, 0.0, 1.0),
+            # The influence fader is the blend between Lumen's read of the
+            # music and the operator's explicit intensity/motion targets.
+            # This makes the controls perceptible instead of merely nudging a
+            # multiplier around the neutral midpoint.
+            energy=clamp(
+                state.energy * (1.0 - influence)
+                + clamp(self.controls.intensity * intensity_scale, 0.0, 1.0) * influence,
+                0.0,
+                1.0,
+            ),
             tension=clamp(state.tension + warm_bias, 0.0, 1.0),
-            motion=clamp(state.motion + motion_bias, 0.0, 1.0),
+            motion=clamp(
+                state.motion * (1.0 - influence)
+                + clamp(self.controls.motion * motion_scale, 0.0, 1.0) * influence
+                + motion_bias * 0.35,
+                0.0,
+                1.0,
+            ),
             intimacy=clamp(state.intimacy - warm_bias * 0.35, 0.0, 1.0),
         )
         focus = self.controls.focus
@@ -978,11 +993,15 @@ class LumenApplication:
         value = float(payload.get("value", 1.0 if label == "liked_this" else -1.0))
         note = str(payload.get("note", "")).strip() or None
         scope = str(payload.get("scope", "overall")).strip().lower()
-        if scope not in {"overall", "fixture"}:
-            raise ValueError("feedback scope must be overall or fixture")
-        fixture_id = str(payload.get("fixture_id", "")).strip() or None
+        if scope not in {"overall", "fixture", "group"}:
+            raise ValueError("feedback scope must be overall, group, or fixture")
+        raw_fixture_id = payload.get("fixture_id")
+        fixture_id = str(raw_fixture_id).strip() if raw_fixture_id is not None else None
+        group_id = str(payload.get("group_id", "")).strip() or None
         if scope == "fixture" and not fixture_id:
             raise ValueError("fixture feedback requires a fixture_id")
+        if scope == "group" and group_id != "movers":
+            raise ValueError("unknown feedback group")
         if fixture_id and not any(
             fixture.fixture_id == fixture_id
             for fixture in (*self.rig.fixtures, *self.rig.auxiliary_fixtures)
@@ -1001,24 +1020,29 @@ class LumenApplication:
         motion_delta, intensity_delta = effects.get(label, (0.0, 0.0))
         motion_delta *= abs(value) if value else 1.0
         intensity_delta *= abs(value) if value else 1.0
-        bias_key = fixture_id if scope == "fixture" else "overall"
+        target_ids = [fixture_id] if scope == "fixture" else []
+        if scope == "group" and group_id == "movers":
+            target_ids = [fixture.fixture_id for fixture in self.rig.fixtures]
         with self._lock:
-            bias = self._feedback_biases.setdefault(
-                bias_key, {"motion": 0.0, "intensity": 0.0}
-            )
-            bias["motion"] = clamp(
-                bias["motion"] + motion_delta, -1.0, 1.0
-            )
-            bias["intensity"] = clamp(
-                bias["intensity"] + intensity_delta, -1.0, 1.0
-            )
-            if self._runtime is not None:
-                self._runtime.apply_feedback(
-                    scope=scope,
-                    fixture_id=fixture_id,
-                    motion_delta=motion_delta,
-                    intensity_delta=intensity_delta,
+            keys = target_ids or ["overall"]
+            for bias_key in keys:
+                bias = self._feedback_biases.setdefault(
+                    bias_key, {"motion": 0.0, "intensity": 0.0}
                 )
+                bias["motion"] = clamp(bias["motion"] + motion_delta, -1.0, 1.0)
+                bias["intensity"] = clamp(bias["intensity"] + intensity_delta, -1.0, 1.0)
+            if self._runtime is not None:
+                if not target_ids:
+                    self._runtime.apply_feedback(
+                        scope="overall", fixture_id=None,
+                        motion_delta=motion_delta, intensity_delta=intensity_delta,
+                    )
+                else:
+                    for target_id in target_ids:
+                        self._runtime.apply_feedback(
+                            scope="fixture", fixture_id=target_id,
+                            motion_delta=motion_delta, intensity_delta=intensity_delta,
+                        )
             if self.song_id is None:
                 media = self.media or MediaIdentity(
                     provider="line-in",
@@ -1036,7 +1060,7 @@ class LumenApplication:
                     value=clamp(value, -1.0, 1.0),
                     note=note,
                     scope=scope,
-                    fixture_id=fixture_id,
+                    fixture_id=group_id if scope == "group" else fixture_id,
                 )
             )
             self._add_event("feedback", f"Recorded feedback: {label.replace('_', ' ')}")

@@ -275,7 +275,7 @@
                     <input type="range" min="0" max="100" value="42" data-control="warmth">
                   </label>
                   <label>
-                    <span><b>Your influence</b><output data-output="influence">62%</output></span>
+                    <span><b>How much Lumen follows you</b><output data-output="influence">62%</output></span>
                     <input type="range" min="0" max="100" value="62" data-control="influence">
                   </label>
                 </div>
@@ -413,6 +413,13 @@
                   <fieldset id="calibration-fieldset">
                     <legend>Mechanical calibration <small>Party Parrot-style live envelope</small></legend>
                     <p class="calibration-guide">Set the safe pan/tilt travel first. Lumen maps musical motion inside these limits; the live resolver and 3D view update after saving.</p>
+                    <div class="calibration-slider-panel">
+                      <label>Pan minimum <output id="pan-range-readout">—</output><input data-calibration-slider="pan_min_deg" type="range" min="0" max="540" step="0.1" value="0"></label>
+                      <label>Pan maximum <input data-calibration-slider="pan_max_deg" type="range" min="0" max="540" step="0.1" value="540"></label>
+                      <label>Tilt minimum <output id="tilt-range-readout">—</output><input data-calibration-slider="tilt_min_deg" type="range" min="0" max="270" step="0.1" value="0"></label>
+                      <label>Tilt maximum <input data-calibration-slider="tilt_max_deg" type="range" min="0" max="270" step="0.1" value="270"></label>
+                      <div class="calibration-presets"><button type="button" data-calibration-preset="wide">Wide</button><button type="button" data-calibration-preset="center">Center</button><button type="button" data-calibration-preset="reset">Loaded</button></div>
+                    </div>
                     <div class="form-grid two">
                       <label>Pan minimum<input data-calibration="pan_min_deg" type="number" step="0.01"></label>
                       <label>Pan maximum<input data-calibration="pan_max_deg" type="number" step="0.01"></label>
@@ -424,6 +431,8 @@
                       <label>Tilt direction<select data-calibration="tilt_direction"><option value="1">Normal (+1)</option><option value="-1">Reverse (-1)</option></select></label>
                       <label>Pan speed °/s<input data-calibration="max_pan_speed_deg_s" type="number" step="1"></label>
                       <label>Tilt speed °/s<input data-calibration="max_tilt_speed_deg_s" type="number" step="1"></label>
+                      <label>Home pan DMX<input data-calibration="home_pan_dmx" type="number" min="0" max="255" step="1"></label>
+                      <label>Home tilt DMX<input data-calibration="home_tilt_dmx" type="number" min="0" max="255" step="1"></label>
                     </div>
                     <details>
                       <summary>DMX endpoint calibration</summary>
@@ -826,7 +835,7 @@
           <div class="remote-sliders">
             <label><span>Intensity <output data-output="intensity">50%</output></span><input type="range" min="0" max="100" value="50" data-control="intensity"></label>
             <label><span>Movement <output data-output="motion">46%</output></span><input type="range" min="0" max="100" value="46" data-control="motion"></label>
-            <label><span>Your influence <output data-output="influence">62%</output></span><input type="range" min="0" max="100" value="62" data-control="influence"></label>
+            <label><span>How much Lumen follows you <output data-output="influence">62%</output></span><input type="range" min="0" max="100" value="62" data-control="influence"></label>
           </div>
         </section>
 
