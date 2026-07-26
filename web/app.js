@@ -850,6 +850,10 @@ function updateCalibrationSliderReadouts() {
 }
 
 function setCalibrationRange(kind) {
+  if (kind === "reset") {
+    if (app.selectedFixtureId) selectFixture(app.selectedFixtureId);
+    return;
+  }
   const limits = kind === "wide"
     ? ["pan_min_deg", 0, "pan_max_deg", 540, "tilt_min_deg", 0, "tilt_max_deg", 270]
     : kind === "center"
