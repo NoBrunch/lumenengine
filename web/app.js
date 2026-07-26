@@ -198,6 +198,7 @@ function renderBootstrap() {
   setText("patch-channel-count", footprint);
   renderFixtureList();
   renderFeedbackTargets();
+  if (!app.selectedFixtureId && fixtures().length) selectFixture(fixtures()[0].id);
   renderSystem(app.system);
   renderOperatorSettings(app.bootstrap.settings || {});
   renderMemory(app.memory);
@@ -1093,6 +1094,7 @@ function drawRoom3d(ctx, width, height, interactive = false) {
   };
   ctx.fillStyle = "rgba(25,48,51,.45)"; ctx.beginPath(); ctx.moveTo(floor[0].x, floor[0].y);
   floor.slice(1).forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "rgba(38,67,69,.18)"; ctx.beginPath(); ctx.moveTo(floor[2].x, floor[2].y); ctx.lineTo(floor[3].x, floor[3].y); ctx.lineTo(ceiling[3].x, ceiling[3].y); ctx.lineTo(ceiling[2].x, ceiling[2].y); ctx.closePath(); ctx.fill();
   for (let i = 0; i < 4; i += 1) { line(floor[i], floor[(i + 1) % 4]); line(ceiling[i], ceiling[(i + 1) % 4], "rgba(102,163,160,.16)"); line(floor[i], ceiling[i], "rgba(102,163,160,.22)"); }
   for (let i = 1; i < 6; i += 1) {
     const x = -w + (2 * w * i / 6); line(corner(x, -d, 0), corner(x, d, 0), "rgba(102,163,160,.12)", [3, 5]);
@@ -1102,7 +1104,10 @@ function drawRoom3d(ctx, width, height, interactive = false) {
   for (const fixture of fixtures()) {
     if (fixture.kind !== "moving") continue;
     const fp = project(fixture.position_m); const target = live.get(fixture.id)?.target || app.status.selected_target || { x: 0, y: 0, z: 1.2 }; const tp = project(target);
-    line(fp, tp, "rgba(102,220,211,.55)");
+    ctx.save();
+    const beam = ctx.createLinearGradient(fp.x, fp.y, tp.x, tp.y);
+    beam.addColorStop(0, "rgba(130,245,230,.72)"); beam.addColorStop(1, "rgba(64,125,139,.08)");
+    ctx.strokeStyle = beam; ctx.lineWidth = 2.4; ctx.beginPath(); ctx.moveTo(fp.x, fp.y); ctx.lineTo(tp.x, tp.y); ctx.stroke(); ctx.restore();
   }
   const target = project(app.status.selected_target || { x: 0, y: 0, z: 1.2 });
   ctx.strokeStyle = "#e2b464"; ctx.beginPath(); ctx.arc(target.x, target.y, 7, 0, Math.PI * 2); ctx.stroke();

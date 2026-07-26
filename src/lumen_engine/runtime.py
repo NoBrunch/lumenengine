@@ -359,6 +359,12 @@ class PerformanceRuntime:
             0.12,
             1.0,
         )
+        # The second corner mover (DMX 43) has a more restrictive usable
+        # mounting envelope in the imported calibration. Give it a little
+        # extra choreographic travel so it reads as an active partner rather
+        # than a mostly stationary accent, while still respecting its limits.
+        if fixture.address == 43:
+            envelope = clamp(envelope * 1.22, 0.12, 1.0)
         if decision.gesture is Gesture.CONVERGE:
             envelope *= 0.66
         elif decision.gesture is Gesture.BREATHE:
