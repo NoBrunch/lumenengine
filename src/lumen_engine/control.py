@@ -247,6 +247,7 @@ class LumenApplication:
         self._last_media_poll = 0.0
         self._spotify_error: str | None = None
         self._spotify_last_command: dict[str, Any] | None = None
+        self._feedback_biases: dict[str, dict[str, float]] = {}
         self._audio_metrics = AudioInputMetrics.silence()
         self._audio_packets = 0
         self._audio_frames = 0
@@ -587,7 +588,7 @@ class LumenApplication:
                 min(self.rig.room.height_m * 0.52, 1.4),
             ),
         )
-        return PerformanceRuntime(
+        runtime = PerformanceRuntime(
             self.rig.fixtures,
             output,
             auxiliary_fixtures=self.rig.auxiliary_fixtures,
@@ -598,6 +599,14 @@ class LumenApplication:
                 min(2.6, max(2.2, self.rig.room.height_m * 0.45)),
             ),
         )
+        for key, bias in self._feedback_biases.items():
+            runtime.apply_feedback(
+                scope="fixture" if key != "overall" else "overall",
+                fixture_id=None if key == "overall" else key,
+                motion_delta=bias.get("motion", 0.0),
+                intensity_delta=bias.get("intensity", 0.0),
+            )
+        return runtime
 
     def patch_controls(self, values: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -968,7 +977,48 @@ class LumenApplication:
             raise ValueError("feedback label is required")
         value = float(payload.get("value", 1.0 if label == "liked_this" else -1.0))
         note = str(payload.get("note", "")).strip() or None
+        scope = str(payload.get("scope", "overall")).strip().lower()
+        if scope not in {"overall", "fixture"}:
+            raise ValueError("feedback scope must be overall or fixture")
+        fixture_id = str(payload.get("fixture_id", "")).strip() or None
+        if scope == "fixture" and not fixture_id:
+            raise ValueError("fixture feedback requires a fixture_id")
+        if fixture_id and not any(
+            fixture.fixture_id == fixture_id
+            for fixture in (*self.rig.fixtures, *self.rig.auxiliary_fixtures)
+        ):
+            raise ValueError("feedback fixture_id is not in the active rig")
+        effects = {
+            "increase_movement": (0.28, 0.0),
+            "decrease_movement": (-0.28, 0.0),
+            "too_busy": (-0.28, 0.0),
+            "not_busy_enough": (0.28, 0.0),
+            "calm_down": (-0.35, -0.08),
+            "pick_it_up": (0.35, 0.10),
+            "too_bright": (0.0, -0.25),
+            "too_dim": (0.0, 0.25),
+        }
+        motion_delta, intensity_delta = effects.get(label, (0.0, 0.0))
+        motion_delta *= abs(value) if value else 1.0
+        intensity_delta *= abs(value) if value else 1.0
+        bias_key = fixture_id if scope == "fixture" else "overall"
         with self._lock:
+            bias = self._feedback_biases.setdefault(
+                bias_key, {"motion": 0.0, "intensity": 0.0}
+            )
+            bias["motion"] = clamp(
+                bias["motion"] + motion_delta, -1.0, 1.0
+            )
+            bias["intensity"] = clamp(
+                bias["intensity"] + intensity_delta, -1.0, 1.0
+            )
+            if self._runtime is not None:
+                self._runtime.apply_feedback(
+                    scope=scope,
+                    fixture_id=fixture_id,
+                    motion_delta=motion_delta,
+                    intensity_delta=intensity_delta,
+                )
             if self.song_id is None:
                 media = self.media or MediaIdentity(
                     provider="line-in",
@@ -985,6 +1035,8 @@ class LumenApplication:
                     label=label[:64],
                     value=clamp(value, -1.0, 1.0),
                     note=note,
+                    scope=scope,
+                    fixture_id=fixture_id,
                 )
             )
             self._add_event("feedback", f"Recorded feedback: {label.replace('_', ' ')}")

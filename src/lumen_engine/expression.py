@@ -44,10 +44,10 @@ class ExpressionEngine:
 
     def update_state(self, observation: MusicalObservation) -> ExpressionState:
         raw_energy = clamp(
-            0.48 * observation.loudness
-            + 0.20 * observation.onset_strength
-            + 0.20 * observation.low_energy
-            + 0.12 * observation.beat_pulse,
+            0.62 * observation.loudness
+            + 0.14 * observation.onset_strength
+            + 0.08 * observation.low_energy
+            + 0.16 * observation.beat_pulse,
             0.0,
             1.0,
         )
@@ -61,10 +61,10 @@ class ExpressionEngine:
             1.0,
         )
         raw_motion = clamp(
-            0.30 * observation.onset_strength
-            + 0.25 * observation.beat_confidence
-            + 0.20 * observation.mid_energy
-            + 0.25 * observation.beat_pulse,
+            0.42 * observation.onset_strength
+            + 0.24 * observation.beat_confidence
+            + 0.10 * observation.mid_energy
+            + 0.24 * observation.beat_pulse,
             0.0,
             1.0,
         )

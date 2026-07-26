@@ -68,6 +68,8 @@ class SongMemoryStore:
                     label TEXT NOT NULL,
                     value REAL NOT NULL,
                     note TEXT,
+                    scope TEXT NOT NULL DEFAULT 'overall',
+                    fixture_id TEXT,
                     created_unix_ms INTEGER NOT NULL
                 );
 
@@ -96,6 +98,18 @@ class SongMemoryStore:
                     ON decisions(song_id, position_ms);
                 """
             )
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(feedback)")
+            }
+            if "scope" not in columns:
+                connection.execute(
+                    "ALTER TABLE feedback ADD COLUMN scope TEXT NOT NULL DEFAULT 'overall'"
+                )
+            if "fixture_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE feedback ADD COLUMN fixture_id TEXT"
+                )
             connection.execute(
                 """
                 INSERT INTO metadata(key, value) VALUES('schema_version', ?)
@@ -196,8 +210,9 @@ class SongMemoryStore:
             cursor = connection.execute(
                 """
                 INSERT INTO feedback(
-                    song_id, position_ms, label, value, note, created_unix_ms
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    song_id, position_ms, label, value, note, scope,
+                    fixture_id, created_unix_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feedback.song_id,
@@ -205,6 +220,8 @@ class SongMemoryStore:
                     feedback.label,
                     feedback.value,
                     feedback.note,
+                    feedback.scope,
+                    feedback.fixture_id,
                     int(time.time() * 1000),
                 ),
             )
@@ -214,7 +231,7 @@ class SongMemoryStore:
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT id, position_ms, label, value, note, created_unix_ms
+                SELECT id, position_ms, label, value, note, scope, fixture_id, created_unix_ms
                 FROM feedback WHERE song_id=?
                 ORDER BY COALESCE(position_ms, -1), created_unix_ms
                 """,
@@ -262,6 +279,8 @@ class SongMemoryStore:
                     feedback.label,
                     feedback.value,
                     feedback.note,
+                    feedback.scope,
+                    feedback.fixture_id,
                     feedback.created_unix_ms
                 FROM feedback
                 JOIN songs ON songs.id = feedback.song_id

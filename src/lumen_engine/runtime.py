@@ -59,6 +59,38 @@ class PerformanceRuntime:
         self._last_timestamp_s: float | None = None
         self._audio_quiet_since_s: float | None = None
         self._audio_idle_amount = 0.0
+        self._feedback_motion: dict[str, float] = {}
+        self._feedback_intensity: dict[str, float] = {}
+        self._motion_phase = 0.0
+        self._motion_clock_s: float | None = None
+
+    def apply_feedback(
+        self,
+        *,
+        scope: str,
+        fixture_id: str | None,
+        motion_delta: float = 0.0,
+        intensity_delta: float = 0.0,
+    ) -> None:
+        key = fixture_id if scope == "fixture" and fixture_id else "overall"
+        self._feedback_motion[key] = clamp(
+            self._feedback_motion.get(key, 0.0) + motion_delta,
+            -1.0,
+            1.0,
+        )
+        self._feedback_intensity[key] = clamp(
+            self._feedback_intensity.get(key, 0.0) + intensity_delta,
+            -1.0,
+            1.0,
+        )
+
+    def _feedback_for(self, fixture_id: str) -> tuple[float, float]:
+        return (
+            self._feedback_motion.get("overall", 0.0)
+            + self._feedback_motion.get(fixture_id, 0.0),
+            self._feedback_intensity.get("overall", 0.0)
+            + self._feedback_intensity.get(fixture_id, 0.0),
+        )
 
     def step(self, observation: MusicalObservation) -> RuntimeFrame:
         decision = self.expression.decide(observation)
@@ -85,6 +117,17 @@ class PerformanceRuntime:
                 observation,
             )
             previous = self._previous.get(fixture.fixture_id)
+            motion_feedback, intensity_feedback = self._feedback_for(
+                fixture.fixture_id
+            )
+            fixture_decision = replace(
+                output_decision,
+                brightness=clamp(
+                    output_decision.brightness + intensity_feedback * 0.30,
+                    0.0,
+                    1.0,
+                ),
+            )
             try:
                 if observation.loudness < 0.02 and previous is not None:
                     direction = self.targeting.direction_for_angles(
@@ -118,6 +161,7 @@ class PerformanceRuntime:
                         observation,
                         decision,
                         solution,
+                        motion_feedback,
                     )
                 if previous is not None and elapsed is not None:
                     solution = self._rate_limit(fixture, solution, previous, elapsed)
@@ -127,12 +171,12 @@ class PerformanceRuntime:
                 )
                 solutions.append(solution)
                 apply_moving_head_solution(
-                    frame, fixture, solution, output_decision.brightness
+                    frame, fixture, solution, fixture_decision.brightness
                 )
                 apply_moving_head_profile(
                     frame,
                     fixture,
-                    output_decision,
+                    fixture_decision,
                     observation,
                     idle_amount=idle_amount,
                 )
@@ -140,12 +184,24 @@ class PerformanceRuntime:
                 warnings.append(str(error))
 
         for fixture in self.auxiliary_fixtures:
+            motion_feedback, intensity_feedback = self._feedback_for(
+                fixture.fixture_id
+            )
+            fixture_decision = replace(
+                output_decision,
+                brightness=clamp(
+                    output_decision.brightness + intensity_feedback * 0.30,
+                    0.0,
+                    1.0,
+                ),
+            )
             apply_auxiliary_fixture(
                 frame,
                 fixture,
-                output_decision,
+                fixture_decision,
                 observation,
                 idle_amount=idle_amount,
+                motion_feedback=motion_feedback,
             )
 
         self.output.send(frame)
@@ -259,6 +315,7 @@ class PerformanceRuntime:
         observation: MusicalObservation,
         decision: PerformanceDecision,
         spatial_solution: TargetingSolution,
+        motion_feedback: float = 0.0,
     ) -> TargetingSolution:
         """Use the calibrated fixture envelope as a choreographic instrument.
 
@@ -285,34 +342,39 @@ class PerformanceRuntime:
         travel = clamp(local_phase / 0.68, 0.0, 1.0)
         travel = travel * travel * (3.0 - 2.0 * travel)
 
-        pan_patterns = (
-            (0.08, 0.90, 0.68, 0.18),
-            (0.92, 0.10, 0.32, 0.82),
-        )
-        tilt_patterns = (
-            (0.16, 0.72, 0.90, 0.34),
-            (0.78, 0.20, 0.40, 0.88),
-        )
-        pan_pattern = pan_patterns[index % len(pan_patterns)]
-        tilt_pattern = tilt_patterns[index % len(tilt_patterns)]
-        next_beat = (beat_index + 1) % 4
-        pan_normalized = (
-            pan_pattern[beat_index]
-            + (pan_pattern[next_beat] - pan_pattern[beat_index]) * travel
-        )
-        tilt_normalized = (
-            tilt_pattern[beat_index]
-            + (tilt_pattern[next_beat] - tilt_pattern[beat_index]) * travel
-        )
-
         state = decision.expression
-        envelope = clamp(0.76 + 0.30 * state.motion, 0.76, 1.0)
+        if self._motion_clock_s is None:
+            elapsed = 1.0 / 24.0
+        else:
+            elapsed = clamp(observation.timestamp_s - self._motion_clock_s, 0.0, 0.20)
+        self._motion_clock_s = observation.timestamp_s
+        bpm = observation.bpm or 120.0
+        self._motion_phase = (
+            self._motion_phase + elapsed * math.tau * (bpm / 60.0) / 4.0
+        ) % math.tau
+        phase = self._motion_phase + index * 1.73
+        envelope = clamp(
+            0.16 + 0.72 * state.energy + 0.22 * state.motion
+            + 0.38 * motion_feedback,
+            0.12,
+            1.0,
+        )
         if decision.gesture is Gesture.CONVERGE:
             envelope *= 0.66
         elif decision.gesture is Gesture.BREATHE:
             envelope *= 0.58
-        pan_normalized = 0.5 + (pan_normalized - 0.5) * envelope
-        tilt_normalized = 0.5 + (tilt_normalized - 0.5) * envelope
+        pan_normalized = 0.5 + envelope * (
+            0.43 * math.sin(phase) + 0.10 * math.sin(phase * 2.0 + index)
+        )
+        tilt_normalized = 0.5 + envelope * (
+            0.38 * math.sin(phase * 1.31 + index * 0.8)
+            + 0.10 * math.cos(phase * 0.63 + index)
+        )
+        if observation.beat_pulse > 0.02:
+            pan_normalized += (
+                1.0 if (beat_index + index) % 2 else -1.0
+            ) * 0.08 * observation.beat_pulse * envelope
+            tilt_normalized += 0.07 * observation.beat_pulse * envelope
 
         calibration = fixture.calibration
         pan = calibration.pan_min_deg + pan_normalized * (

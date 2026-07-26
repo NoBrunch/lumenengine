@@ -193,6 +193,7 @@
                   <h3>Room composition</h3>
                   <div class="panel-tools">
                     <button class="mini-tool active" data-room-view="plan">Plan</button>
+                    <button class="mini-tool" data-room-view="3d">3D</button>
                     <button class="mini-tool" data-room-view="front">Front</button>
                     <button class="mini-tool" data-nav="rig">Edit</button>
                   </div>
@@ -287,11 +288,20 @@
                 </div>
                 <div class="feedback-buttons">
                   <button data-feedback="liked_this" data-value="1"><span>✓</span>I liked that</button>
+                  <button data-feedback="increase_movement" data-value="1"><span>↗</span>More movement</button>
+                  <button data-feedback="decrease_movement" data-value="-1"><span>↘</span>Less movement</button>
                   <button data-feedback="too_busy" data-value="-1"><span>≋</span>Too busy</button>
+                  <button data-feedback="not_busy_enough" data-value="1"><span>＋</span>Not busy enough</button>
+                  <button data-feedback="calm_down" data-value="-1"><span>◌</span>Calm down</button>
+                  <button data-feedback="pick_it_up" data-value="1"><span>⚡</span>Pick it up</button>
                   <button data-feedback="too_bright" data-value="-1"><span>☀</span>Too bright</button>
+                  <button data-feedback="too_dim" data-value="1"><span>◐</span>Too dim</button>
                   <button data-feedback="bad_timing" data-value="-1"><span>◷</span>Bad timing</button>
                   <button data-feedback="hold_this" data-value="1"><span>◇</span>Hold this idea</button>
                 </div>
+                <label class="feedback-target">Applies to
+                  <select id="feedback-scope"><option value="overall">Overall performance</option></select>
+                </label>
                 <div class="feedback-note">
                   <input id="feedback-note" type="text" placeholder="Optional note in your own words…">
                   <button id="feedback-note-button">Save note</button>
@@ -335,6 +345,7 @@
                   <h3>Spatial resolver</h3>
                   <div class="panel-tools">
                     <button class="mini-tool active" data-rig-view="plan">Top</button>
+                    <button class="mini-tool" data-rig-view="3d">3D</button>
                     <button class="mini-tool" data-rig-view="front">Front</button>
                     <button class="mini-tool" data-rig-view="side">Side</button>
                     <button class="mini-tool" id="center-room-button">Center</button>
@@ -822,12 +833,21 @@
           <div class="remote-section-heading"><h2>Teach this moment</h2><span id="remote-feedback-time">Now</span></div>
           <div class="remote-feedback">
             <button data-feedback="liked_this" data-value="1"><span>✓</span><b>I liked that</b></button>
+            <button data-feedback="increase_movement" data-value="1"><span>↗</span><b>More movement</b></button>
+            <button data-feedback="decrease_movement" data-value="-1"><span>↘</span><b>Less movement</b></button>
             <button data-feedback="too_busy" data-value="-1"><span>≋</span><b>Too busy</b></button>
+            <button data-feedback="not_busy_enough" data-value="1"><span>＋</span><b>Not busy enough</b></button>
+            <button data-feedback="calm_down" data-value="-1"><span>◌</span><b>Calm down</b></button>
+            <button data-feedback="pick_it_up" data-value="1"><span>⚡</span><b>Pick it up</b></button>
             <button data-feedback="too_bright" data-value="-1"><span>☀</span><b>Too bright</b></button>
+            <button data-feedback="too_dim" data-value="1"><span>◐</span><b>Too dim</b></button>
             <button data-feedback="bad_timing" data-value="-1"><span>◷</span><b>Bad timing</b></button>
             <button data-feedback="hold_this" data-value="1"><span>◇</span><b>Hold this idea</b></button>
             <button id="remote-note-open"><span>+</span><b>Add a note</b></button>
           </div>
+          <label class="feedback-target">Applies to
+            <select id="remote-feedback-scope"><option value="overall">Overall performance</option></select>
+          </label>
           <div id="remote-note-box" class="remote-note-box hidden">
             <textarea id="remote-feedback-note" rows="3" placeholder="Say what you noticed in your own words…"></textarea>
             <button id="remote-feedback-note-button">Save this note</button>

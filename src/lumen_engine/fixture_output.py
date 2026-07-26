@@ -45,6 +45,7 @@ def apply_moving_head_profile(
     decision: PerformanceDecision,
     observation: MusicalObservation | None = None,
     idle_amount: float = 0.0,
+    motion_feedback: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -85,6 +86,7 @@ def apply_auxiliary_fixture(
     decision: PerformanceDecision,
     observation: MusicalObservation | None = None,
     idle_amount: float = 0.0,
+    motion_feedback: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -96,6 +98,7 @@ def apply_auxiliary_fixture(
             decision,
             observation,
             idle_amount,
+            motion_feedback,
         )
         return
     dimmer = profile.channels.get("dimmer")
@@ -115,6 +118,7 @@ def _apply_generic_multi_effect(
     decision: PerformanceDecision,
     observation: MusicalObservation | None = None,
     idle_amount: float = 0.0,
+    motion_feedback: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     assert profile is not None
@@ -155,7 +159,7 @@ def _apply_generic_multi_effect(
         0.0 if observation is None else observation.beat_confidence
     )
     activity = clamp(
-        0.20 + 0.48 * energy + 0.42 * motion,
+        0.20 + 0.48 * energy + 0.42 * motion + 0.55 * motion_feedback,
         0.0,
         1.0,
     )

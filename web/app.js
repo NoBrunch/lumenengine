@@ -197,6 +197,7 @@ function renderBootstrap() {
   const footprint = fixtures().reduce((total, fixture) => total + (profileFor(fixture.profile_key)?.dmx_footprint || 1), 0);
   setText("patch-channel-count", footprint);
   renderFixtureList();
+  renderFeedbackTargets();
   renderSystem(app.system);
   renderOperatorSettings(app.bootstrap.settings || {});
   renderMemory(app.memory);
@@ -205,6 +206,17 @@ function renderBootstrap() {
   drawPerformanceRoom();
   drawRig();
   drawScope();
+}
+
+function renderFeedbackTargets() {
+  const options = ['<option value="overall">Overall performance</option>'];
+  for (const fixture of fixtures()) {
+    options.push(`<option value="fixture:${escapeHtml(fixture.id)}">${escapeHtml(fixture.name || fixture.id)} · ${fixture.kind === "moving" ? "Mover" : "Effect"}</option>`);
+  }
+  ["feedback-scope", "remote-feedback-scope"].forEach((id) => {
+    const select = $(id);
+    if (select) select.innerHTML = options.join("");
+  });
 }
 
 function renderStatus() {
@@ -918,7 +930,14 @@ function roomProjection(canvasSize, view, position) {
   let bRange;
   let a;
   let b;
-  if (view === "front") {
+  if (view === "3d") {
+    const scale = Math.min(availableWidth / room.width_m, availableHeight / room.height_m) * 0.78;
+    const cx = canvasSize.width / 2;
+    const floor = canvasSize.height * 0.80;
+    const x = cx + position[0] * scale - position[1] * scale * 0.42;
+    const y = floor - position[2] * scale + position[1] * scale * 0.22;
+    return { x, y, scale, rect: { x: pad, y: pad, width: availableWidth, height: availableHeight } };
+  } else if (view === "front") {
     aRange = room.width_m;
     bRange = room.height_m;
     a = position[0] + room.width_m / 2;
@@ -963,6 +982,11 @@ function drawRoom(canvas, view, interactive = false) {
   if (!configured || !app.bootstrap || !app.status) return;
   const { context: ctx, width, height } = configured;
   ctx.clearRect(0, 0, width, height);
+  if (view === "3d") drawRoom3d(ctx, width, height, interactive);
+  else drawRoomOrthographic(ctx, width, height, view, interactive);
+}
+
+function drawRoomOrthographic(ctx, width, height, view, interactive = false) {
   const boundary = roomProjection({ width, height }, view, [0, 0, 0]);
   ctx.save();
   ctx.strokeStyle = "rgba(102, 163, 160, .35)";
@@ -1054,6 +1078,40 @@ function drawRoom(canvas, view, interactive = false) {
       : `${room.depth_m.toFixed(2)} m × ${room.height_m.toFixed(2)} m`;
   ctx.fillText(`${view.toUpperCase()} · ${dimensions}`, boundary.rect.x + 5, boundary.rect.y + 13);
   ctx.restore();
+}
+
+function drawRoom3d(ctx, width, height, interactive = false) {
+  const room = app.bootstrap.rig.room;
+  const project = (p) => roomProjection({ width, height }, "3d", [p.x ?? p[0], p.y ?? p[1], p.z ?? p[2]]);
+  const corner = (x, y, z) => project([x, y, z]);
+  const w = room.width_m / 2, d = room.depth_m / 2, h = room.height_m;
+  const floor = [corner(-w, -d, 0), corner(w, -d, 0), corner(w, d, 0), corner(-w, d, 0)];
+  const ceiling = [corner(-w, -d, h), corner(w, -d, h), corner(w, d, h), corner(-w, d, h)];
+  const line = (a, b, color = "rgba(102,163,160,.30)", dash = []) => {
+    ctx.save(); ctx.strokeStyle = color; ctx.setLineDash(dash); ctx.beginPath();
+    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); ctx.restore();
+  };
+  ctx.fillStyle = "rgba(25,48,51,.45)"; ctx.beginPath(); ctx.moveTo(floor[0].x, floor[0].y);
+  floor.slice(1).forEach((p) => ctx.lineTo(p.x, p.y)); ctx.closePath(); ctx.fill();
+  for (let i = 0; i < 4; i += 1) { line(floor[i], floor[(i + 1) % 4]); line(ceiling[i], ceiling[(i + 1) % 4], "rgba(102,163,160,.16)"); line(floor[i], ceiling[i], "rgba(102,163,160,.22)"); }
+  for (let i = 1; i < 6; i += 1) {
+    const x = -w + (2 * w * i / 6); line(corner(x, -d, 0), corner(x, d, 0), "rgba(102,163,160,.12)", [3, 5]);
+    const y = -d + (2 * d * i / 6); line(corner(-w, y, 0), corner(w, y, 0), "rgba(102,163,160,.12)", [3, 5]);
+  }
+  const live = new Map((app.status.solutions || []).map((s) => [s.fixture_id, s]));
+  for (const fixture of fixtures()) {
+    if (fixture.kind !== "moving") continue;
+    const fp = project(fixture.position_m); const target = live.get(fixture.id)?.target || app.status.selected_target || { x: 0, y: 0, z: 1.2 }; const tp = project(target);
+    line(fp, tp, "rgba(102,220,211,.55)");
+  }
+  const target = project(app.status.selected_target || { x: 0, y: 0, z: 1.2 });
+  ctx.strokeStyle = "#e2b464"; ctx.beginPath(); ctx.arc(target.x, target.y, 7, 0, Math.PI * 2); ctx.stroke();
+  for (const fixture of fixtures()) {
+    const p = project(fixture.position_m); const selected = fixture.id === app.selectedFixtureId;
+    ctx.fillStyle = fixture.kind === "moving" ? "#68d7cf" : "#d8a35e"; ctx.beginPath(); ctx.arc(p.x, p.y, selected ? 6 : 4, 0, Math.PI * 2); ctx.fill();
+    if (interactive || selected) { ctx.fillStyle = selected ? "#fff1b0" : "#829793"; ctx.font = "8px DejaVu Sans"; ctx.fillText(`${fixture.name.slice(0, 18)} · ${fixture.address}`, p.x + 9, p.y + 3); }
+  }
+  ctx.fillStyle = "rgba(125,153,150,.72)"; ctx.font = "8px DejaVu Sans Mono"; ctx.fillText(`3D · ${room.width_m.toFixed(2)} × ${room.depth_m.toFixed(2)} × ${room.height_m.toFixed(2)} m`, 43, 51);
 }
 
 function drawPerformanceRoom() {
@@ -1304,9 +1362,12 @@ async function applyPreset(preset) {
   }
 }
 
-async function sendFeedback(labelValue, value, note = null) {
+async function sendFeedback(labelValue, value, note = null, surface = "desktop") {
+  const selector = $(surface === "remote" ? "remote-feedback-scope" : "feedback-scope");
+  const selected = selector?.value || "overall";
+  const [scope, fixtureId] = selected.startsWith("fixture:") ? ["fixture", selected.slice(8)] : ["overall", null];
   try {
-    await api("/api/feedback", { method: "POST", body: { label: labelValue, value: Number(value), note } });
+    await api("/api/feedback", { method: "POST", body: { label: labelValue, value: Number(value), note, scope, fixture_id: fixtureId } });
     toast("Feedback remembered", note || label(labelValue), "success");
     app.memory = await api("/api/memory");
     renderMemory(app.memory);
@@ -1375,15 +1436,15 @@ function installHandlers() {
   });
   $$("[data-preset]").forEach((button) => button.addEventListener("click", () => applyPreset(button.dataset.preset)));
   $$("[data-feedback]").forEach((button) => {
-    button.addEventListener("click", () => sendFeedback(button.dataset.feedback, button.dataset.value));
+    button.addEventListener("click", () => sendFeedback(button.dataset.feedback, button.dataset.value, null, button.closest(".remote-section") ? "remote" : "desktop"));
   });
   $("feedback-note-button")?.addEventListener("click", () => {
     const note = $("feedback-note").value.trim();
-    if (note) sendFeedback("operator_note", 0, note);
+    if (note) sendFeedback("operator_note", 0, note, "desktop");
   });
   $("remote-feedback-note-button")?.addEventListener("click", () => {
     const note = $("remote-feedback-note").value.trim();
-    if (note) sendFeedback("operator_note", 0, note);
+    if (note) sendFeedback("operator_note", 0, note, "remote");
   });
   $("remote-note-open")?.addEventListener("click", () => {
     $("remote-note-box").classList.toggle("hidden");

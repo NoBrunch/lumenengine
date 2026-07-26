@@ -270,3 +270,5 @@ class Feedback:
     label: str
     value: float
     note: str | None = None
+    scope: str = "overall"
+    fixture_id: str | None = None
