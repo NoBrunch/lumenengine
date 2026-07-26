@@ -908,6 +908,35 @@ function calibrationJog() {
   });
 }
 
+function installFeedbackButton(button) {
+  let start = null;
+  let cancelled = false;
+  let touchArmed = false;
+  button.addEventListener("pointerdown", (event) => {
+    start = { x: event.clientX, y: event.clientY, pointerType: event.pointerType };
+    cancelled = false;
+    touchArmed = false;
+  });
+  button.addEventListener("pointermove", (event) => {
+    if (!start) return;
+    const distance = Math.hypot(event.clientX - start.x, event.clientY - start.y);
+    if (distance > 12) cancelled = true;
+  });
+  button.addEventListener("pointercancel", () => { cancelled = true; touchArmed = false; });
+  button.addEventListener("pointerup", () => {
+    if (start?.pointerType === "touch") touchArmed = !cancelled;
+  });
+  button.addEventListener("click", () => {
+    // Mobile browsers can synthesize a click after a scroll/wake gesture.
+    // A touch feedback click is accepted only when its pointer stayed on the
+    // button; mouse/keyboard clicks remain immediate on the desktop.
+    if (start?.pointerType === "touch" && !touchArmed) return;
+    touchArmed = false;
+    const surface = button.closest(".remote-section") ? "remote" : "desktop";
+    sendFeedback(button.dataset.feedback, button.dataset.value, null, surface);
+  });
+}
+
 async function saveSelectedFixture() {
   const fixture = selectedFixture();
   if (!fixture) {
@@ -1554,7 +1583,7 @@ function installHandlers() {
   });
   $$("[data-preset]").forEach((button) => button.addEventListener("click", () => applyPreset(button.dataset.preset)));
   $$("[data-feedback]").forEach((button) => {
-    button.addEventListener("click", () => sendFeedback(button.dataset.feedback, button.dataset.value, null, button.closest(".remote-section") ? "remote" : "desktop"));
+    installFeedbackButton(button);
   });
   $("feedback-note-button")?.addEventListener("click", () => {
     const note = $("feedback-note").value.trim();
