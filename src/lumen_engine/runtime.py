@@ -53,9 +53,9 @@ class PerformanceRuntime:
         self.output = output
         self.auxiliary_fixtures = auxiliary_fixtures
         self.expression = expression or ExpressionEngine()
-        # Calibration defines the preferred software envelope; it is not a
-        # second hidden mechanical clamp on live choreography.
-        self.targeting = targeting or SpatialTargetingEngine(enforce_limits=False)
+        # The saved Party Parrot-style envelope is the software movement
+        # definition. There are no additional hidden limits beyond it.
+        self.targeting = targeting or SpatialTargetingEngine()
         self.motion_extents = motion_extents
         self._previous: dict[str, tuple[float, float]] = {}
         self._last_timestamp_s: float | None = None
@@ -228,7 +228,7 @@ class PerformanceRuntime:
                 solutions.append(solution)
                 apply_moving_head_solution(
                     frame, fixture, solution, fixture_decision.brightness,
-                    unrestricted=calibration_override is None,
+                    unrestricted=False,
                 )
                 if calibration_override is not None:
                     # Calibration jog is direct-DMX, matching Party Parrot.
@@ -472,11 +472,9 @@ class PerformanceRuntime:
             ) * 0.08 * observation.beat_pulse * envelope
             tilt_normalized += 0.07 * observation.beat_pulse * envelope
 
-        # Live choreography uses the full software-defined fixture range. The
-        # calibration screen remains the place to choose the preferred room
-        # envelope; it is not an invisible clamp on generated motion.
-        pan = pan_normalized * 540.0
-        tilt = tilt_normalized * 270.0
+        calibration = fixture.calibration
+        pan = calibration.pan_min_deg + pan_normalized * (calibration.pan_max_deg - calibration.pan_min_deg)
+        tilt = calibration.tilt_min_deg + tilt_normalized * (calibration.tilt_max_deg - calibration.tilt_min_deg)
         direction = self.targeting.direction_for_angles(fixture, pan, tilt)
         distance = max(4.0, spatial_solution.distance_m)
         target = fixture.position_m + direction * distance

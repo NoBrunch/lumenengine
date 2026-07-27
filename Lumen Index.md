@@ -447,8 +447,9 @@ commit. At minimum update:
 - Live calibration now holds a selected mover at visible low brightness while
   pan, tilt, and speed are jogged. Captured boundaries and home are saved back
   to the rig.
-- Generated live choreography uses the full software-defined pan/tilt range;
-  the spatial preview no longer acts as an invisible runtime clamp.
+- Generated live choreography uses the saved Party Parrot-style calibration
+  envelope as its software-defined pan/tilt range; there are no additional
+  hidden runtime clamps.
 - Spotify console responses tolerate temporary `/me` rate limits and can show
   the last cached player state.
 - The 3D rig camera uses normal drag for pan, Ctrl-drag for orbit rotation, and

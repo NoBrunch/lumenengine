@@ -986,7 +986,7 @@ class LumenApplication:
             self._add_event("media", f"Now playing {media.display_name}")
 
     def solve_target(self, target: Vec3) -> list[dict[str, Any]]:
-        solver = SpatialTargetingEngine(enforce_limits=False)
+        solver = SpatialTargetingEngine()
         solutions: list[dict[str, Any]] = []
         for fixture in self.rig.fixtures:
             try:
