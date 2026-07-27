@@ -1165,6 +1165,14 @@ class LumenApplication:
             self._rebuild_feedback_biases()
             if self._runtime is not None:
                 self._runtime.replace_feedback(self._feedback_biases)
+                # The current instruction should be obvious immediately;
+                # confidence/decay governs historical influence, not the
+                # operator's just-submitted correction.
+                if not target_ids:
+                    self._runtime.apply_feedback(scope="overall", fixture_id=None, motion_delta=motion_delta, intensity_delta=intensity_delta, strobe_delta=strobe_delta, palette_delta=palette_delta)
+                else:
+                    for target_id in target_ids:
+                        self._runtime.apply_feedback(scope="fixture", fixture_id=target_id, motion_delta=motion_delta, intensity_delta=intensity_delta, strobe_delta=strobe_delta, palette_delta=palette_delta)
             self._add_event("feedback", f"Recorded feedback: {label.replace('_', ' ')}")
             self._status_sequence += 1
         return {"feedback_id": feedback_id, "song_id": self.song_id}

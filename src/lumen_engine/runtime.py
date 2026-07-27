@@ -247,7 +247,6 @@ class PerformanceRuntime:
                     fixture_decision,
                     observation,
                     idle_amount=idle_amount,
-                    movement_cost_deg=solution.movement_cost_deg,
                     strobe_feedback=strobe_feedback,
                     palette_bias=palette_feedback,
                 )

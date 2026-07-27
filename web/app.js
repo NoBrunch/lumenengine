@@ -238,6 +238,14 @@ function renderStatus() {
   const expression = decision?.expression || { energy: 0, tension: 0, motion: 0, intimacy: 0.5, confidence: 0 };
   const running = Boolean(engine.running);
   const fault = engine.phase === "fault";
+  const mood = `${label(decision?.gesture || "standing_by")} · ${label(observation?.section || "waiting")}`;
+  setText("analysis-mood", mood);
+  setText("analysis-mood-detail", decision?.reason || "Waiting for a musical observation.");
+  setText("analysis-energy", percent(expression.energy));
+  setText("analysis-motion", percent(expression.motion));
+  setText("analysis-timing", observation?.bpm ? `${Number(observation.bpm).toFixed(1)} BPM · ${percent(observation.beat_confidence)} lock` : "Searching for tempo");
+  const branch = status.solutions?.[0]?.branch || "No fixture solution";
+  setText("analysis-resolution", branch.replaceAll("/", " → "));
 
   setText("engine-status", "");
   const engineStatus = $("engine-status");

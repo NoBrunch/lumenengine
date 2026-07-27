@@ -60,7 +60,6 @@ def apply_moving_head_profile(
     observation: MusicalObservation | None = None,
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
-    movement_cost_deg: float = 0.0,
     strobe_feedback: float = 0.0,
     palette_bias: float = 0.0,
 ) -> None:
@@ -71,13 +70,6 @@ def apply_moving_head_profile(
         channels = profile.channels
         speed = round(200.0 * clamp(idle_amount, 0.0, 1.0))
         _set_relative(frame, fixture.universe, fixture.address, channels["movement_speed"], speed)
-        # Move-then-flash: the beam is hidden while the head is travelling and
-        # only becomes visible when it settles on the next musical accent.
-        if idle_amount < 1.0:
-            _set_relative(
-                frame, fixture.universe, fixture.address, channels["dimmer"],
-                0 if movement_cost_deg > 1.2 else round(decision.brightness * 255),
-            )
         beat_pulse = 0.0 if observation is None else observation.beat_pulse
         strobe = (
             round(70 + 150 * beat_pulse)

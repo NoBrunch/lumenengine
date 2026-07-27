@@ -172,11 +172,11 @@ at the same time. Available motion families include figure-eight paths, circles,
 pan sweeps, tilt/nod patterns, beat alternation, convergence, expansion, and
 release gestures.
 
-### Move-then-flash
+### Strobe behavior
 
-Moving heads can hide their beam while travelling and reveal it after settling
-on a musical accent. This creates a movement-then-flash/strobe-like gesture:
-the light appears when the head is not moving.
+Moving heads remain visible while moving. Strobe is reserved for high-energy,
+high-confidence accents and can be disabled with **No strobes** or a note such
+as “no strobe.”
 
 ### Center multi-effect
 
@@ -423,7 +423,8 @@ commit. At minimum update:
 - **Expand**: Fixtures widen the spatial focus.
 - **Figure eight**: Pan and tilt use different harmonics to trace a crossing
   path.
-- **Move-then-flash**: Beam is hidden during travel and revealed after settling.
+- **Strobe**: High-energy rapid modulation of light output; disabled for soft
+  passages or by explicit feedback.
 - **Nod**: Short tilt accent, usually synchronized to a beat.
 - **Phase offset**: Timing difference between fixtures so they do not duplicate
   one another exactly.
