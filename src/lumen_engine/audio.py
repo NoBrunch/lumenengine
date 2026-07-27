@@ -233,7 +233,7 @@ class RealtimeAudioAnalyzer:
             peak=max(abs(sample) for sample in samples) / 32768.0,
             channel_rms=tuple(channel_rms),
             channel_peak=tuple(channel_peak),
-            clipped_samples=sum(1 for sample in samples if abs(sample) >= 32760),
+            clipped_samples=sum(1 for sample in samples if abs(sample) >= 32767),
             waveform=waveform,
         )
 

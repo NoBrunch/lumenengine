@@ -884,8 +884,8 @@ function selectFixture(id) {
     updateCalibrationSliderReadouts();
   }
   if (fixture.kind === "moving") {
-    const pan = fixture.calibration?.home_pan_dmx ?? 32768;
-    const tilt = fixture.calibration?.home_tilt_dmx ?? 32768;
+    const pan = Math.max(0, Math.min(255, Number(fixture.calibration?.home_pan_dmx ?? 128)));
+    const tilt = Math.max(0, Math.min(255, Number(fixture.calibration?.home_tilt_dmx ?? 128)));
     if ($("calibration-pan")) $("calibration-pan").value = pan;
     if ($("calibration-tilt")) $("calibration-tilt").value = tilt;
     setText("calibration-pan-value", pan);
@@ -901,7 +901,7 @@ function selectFixture(id) {
 }
 
 function updateCalibrationSliderReadouts() {
-  const value = (key) => Number($(`[data-calibration="${key}"]`)?.value || 0).toFixed(1);
+  const value = (key) => Math.round(Number($(`[data-calibration="${key}"]`)?.value || 0));
   setText("pan-range-readout", `${value("pan_min_deg")}° – ${value("pan_max_deg")}°`);
   setText("tilt-range-readout", `${value("tilt_min_deg")}° – ${value("tilt_max_deg")}°`);
 }
@@ -1632,16 +1632,16 @@ function installHandlers() {
       const pan = Number($("calibration-pan").value);
       const tilt = Number($("calibration-tilt").value);
       app.calibrationCaptures[kind] = { pan, tilt };
-      if (kind === "left") $("[data-calibration=pan_dmx_min_u16]").value = pan;
-      if (kind === "right") $("[data-calibration=pan_dmx_max_u16]").value = pan;
+      if (kind === "left") $("[data-calibration=pan_dmx_min_u16]").value = pan * 257;
+      if (kind === "right") $("[data-calibration=pan_dmx_max_u16]").value = pan * 257;
       if (kind === "home") {
         $("[data-calibration=home_pan_dmx]").value = pan;
         $("[data-calibration=home_tilt_dmx]").value = tilt;
       }
       if (kind === "left" || kind === "right") {
         // Tilt captures are taken independently with the same jog controls.
-        $("[data-calibration=tilt_dmx_min_u16]").value = kind === "left" ? tilt : $("[data-calibration=tilt_dmx_min_u16]").value;
-        $("[data-calibration=tilt_dmx_max_u16]").value = kind === "right" ? tilt : $("[data-calibration=tilt_dmx_max_u16]").value;
+        $("[data-calibration=tilt_dmx_min_u16]").value = kind === "left" ? tilt * 257 : $("[data-calibration=tilt_dmx_min_u16]").value;
+        $("[data-calibration=tilt_dmx_max_u16]").value = kind === "right" ? tilt * 257 : $("[data-calibration=tilt_dmx_max_u16]").value;
       }
     });
   });

@@ -311,7 +311,9 @@
                   <button data-feedback="brighter" data-value="1"><span>☀</span>Brighter</button>
                   <button data-feedback="dimmer" data-value="1"><span>◐</span>Dimmer</button>
                   <button data-feedback="slower_side_arms" data-value="1"><span>◌</span>Slower side arms</button>
+                  <button data-feedback="faster_side_arms" data-value="1"><span>◌</span>Faster side arms</button>
                   <button data-feedback="cool_blue_purple" data-value="1"><span>◈</span>Blue / purple</button>
+                  <button data-feedback="warmer_color" data-value="1"><span>◈</span>Warmer palette</button>
                 </div>
                 <label class="feedback-target">Applies to
                   <select id="feedback-scope"><option value="overall">Overall performance</option></select>
@@ -427,19 +429,19 @@
                   </fieldset>
                   <fieldset id="calibration-fieldset">
                     <legend>Mechanical calibration <small>Party Parrot-style live envelope</small></legend>
-                    <p class="calibration-guide">Set the safe pan/tilt travel first. Lumen maps musical motion inside these limits; the live resolver and 3D view update after saving.</p>
+                    <p class="calibration-guide">These whole-degree sliders define the usable software movement envelope. They are the room limits used by Lumen’s resolver, not hidden hardware limits. Start calibration to light and jog the mover, capture left/home/right, then save the fixture.</p>
                     <div class="calibration-slider-panel">
-                      <label>Pan minimum <output id="pan-range-readout">—</output><input data-calibration-slider="pan_min_deg" type="range" min="0" max="540" step="0.1" value="0"></label>
-                      <label>Pan maximum <input data-calibration-slider="pan_max_deg" type="range" min="0" max="540" step="0.1" value="540"></label>
-                      <label>Tilt minimum <output id="tilt-range-readout">—</output><input data-calibration-slider="tilt_min_deg" type="range" min="0" max="270" step="0.1" value="0"></label>
-                      <label>Tilt maximum <input data-calibration-slider="tilt_max_deg" type="range" min="0" max="270" step="0.1" value="270"></label>
+                      <label>Pan minimum <output id="pan-range-readout">—</output><input data-calibration-slider="pan_min_deg" type="range" min="0" max="540" step="1" value="0"></label>
+                      <label>Pan maximum <input data-calibration-slider="pan_max_deg" type="range" min="0" max="540" step="1" value="540"></label>
+                      <label>Tilt minimum <output id="tilt-range-readout">—</output><input data-calibration-slider="tilt_min_deg" type="range" min="0" max="270" step="1" value="0"></label>
+                      <label>Tilt maximum <input data-calibration-slider="tilt_max_deg" type="range" min="0" max="270" step="1" value="270"></label>
                       <div class="calibration-presets"><button type="button" data-calibration-preset="wide">Wide</button><button type="button" data-calibration-preset="center">Center</button><button type="button" data-calibration-preset="reset">Loaded</button></div>
                     </div>
                     <div class="live-calibration-panel">
                       <div class="live-calibration-heading"><b>Live mover calibration</b><button type="button" id="calibration-toggle">Start calibration</button></div>
                       <p>Jog the selected mover at low output, capture left/home/right and save the room envelope.</p>
-                      <label>Pan jog <output id="calibration-pan-value">32768</output><input id="calibration-pan" type="range" min="0" max="65535" value="32768" disabled></label>
-                      <label>Tilt jog <output id="calibration-tilt-value">32768</output><input id="calibration-tilt" type="range" min="0" max="65535" value="32768" disabled></label>
+                      <label>Pan jog <output id="calibration-pan-value">128</output><input id="calibration-pan" type="range" min="0" max="255" step="1" value="128" disabled></label>
+                      <label>Tilt jog <output id="calibration-tilt-value">128</output><input id="calibration-tilt" type="range" min="0" max="255" step="1" value="128" disabled></label>
                       <label>Jog speed <output id="calibration-speed-value">192</output><input id="calibration-speed" type="range" min="0" max="255" value="192" disabled></label>
                       <div class="calibration-captures"><button type="button" data-calibration-capture="left" disabled>Capture left</button><button type="button" data-calibration-capture="home" disabled>Capture home</button><button type="button" data-calibration-capture="right" disabled>Capture right</button></div>
                     </div>
@@ -911,7 +913,9 @@
             <button data-feedback="brighter" data-value="1"><span>☀</span><b>Brighter</b></button>
             <button data-feedback="dimmer" data-value="1"><span>◐</span><b>Dimmer</b></button>
             <button data-feedback="slower_side_arms" data-value="1"><span>◌</span><b>Slower side arms</b></button>
+            <button data-feedback="faster_side_arms" data-value="1"><span>◌</span><b>Faster side arms</b></button>
             <button data-feedback="cool_blue_purple" data-value="1"><span>◈</span><b>Blue / purple</b></button>
+            <button data-feedback="warmer_color" data-value="1"><span>◈</span><b>Warmer palette</b></button>
             <button id="remote-note-open"><span>+</span><b>Add a note</b></button>
           </div>
           <label class="feedback-target">Applies to

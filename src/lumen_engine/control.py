@@ -693,8 +693,8 @@ class LumenApplication:
         active = bool(payload.get("active", True))
         if active:
             override = {
-                "pan_dmx": clamp(float(payload.get("pan_dmx", 32768)), 0, 65535),
-                "tilt_dmx": clamp(float(payload.get("tilt_dmx", 32768)), 0, 65535),
+                "pan_dmx": clamp(float(payload.get("pan_dmx", 128)), 0, 255) * 257.0,
+                "tilt_dmx": clamp(float(payload.get("tilt_dmx", 128)), 0, 255) * 257.0,
                 "speed": clamp(float(payload.get("speed", 192)), 0, 255),
             }
             self._calibration_overrides[fixture_id] = override

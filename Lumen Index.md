@@ -255,21 +255,39 @@ Open Room & rig on the desktop PC and select a moving head.
 6. Press **Stop calibration**.
 7. Save the selected fixture.
 
-Calibration uses direct DMX-style pan and tilt values while the mover is in the
-calibration state. The selected mover is held at low brightness during jogging.
+Calibration uses direct 8-bit DMX-style pan and tilt jog values (0–255) while
+the mover is in the calibration state. The selected mover is visibly lit at
+low brightness during jogging. The jog controls are deliberately whole-number
+controls because these fixtures do not benefit from a 16-bit keyboard-sized
+calibration interface.
 
 ### Envelope controls
 
-- **Pan minimum/maximum**: useful horizontal travel limits.
-- **Tilt minimum/maximum**: useful vertical travel limits.
+- **Pan minimum/maximum**: whole-degree software limits for horizontal travel.
+- **Tilt minimum/maximum**: whole-degree software limits for vertical travel.
 - **Home pan/tilt DMX**: parked/home position values.
 - **Wide**: broad starting envelope.
 - **Center**: conservative centered envelope.
 - **Loaded**: restore the saved values currently in the rig.
 
-Calibration values are used by the spatial resolver and by generated motion.
-They should describe the fixture's useful physical range, not blindly assume
-the manufacturer's full theoretical range.
+Calibration values are the software movement envelope used by the resolver and
+generated motion. They are room-use limits, not an additional hardware safety
+system. Lumen maps musical gestures inside this envelope so motion is spent in
+the visible part of the room.
+
+## Input level and clipping
+
+The audio page reports clipping only when PCM16 samples reach actual digital
+full scale. If that count rises, reduce the Ubuntu ALSA Line input level a
+small amount (for example 3–6 dB) and leave the Chromecast output where it is.
+The goal is headroom below 0 dBFS, not a quieter listening system.
+
+## Desktop workspace sizing
+
+Desktop dashboard panels can be resized from their lower-right corner and
+scroll internally when text or diagnostics exceed the panel. The layout is
+saved by the browser where supported; resizing is a view preference and does
+not change the rig or DMX behavior.
 
 ## Spotify
 

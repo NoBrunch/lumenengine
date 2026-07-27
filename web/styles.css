@@ -992,7 +992,8 @@ kbd {
 }
 .performance-grid > .panel,
 .audio-layout > .panel,
-.desktop-workspace > .panel { min-height: 0; overflow: auto; }
+.desktop-workspace > .panel,
+.rig-layout > .panel { min-height: 0; min-width: 0; overflow: auto; resize: both; }
 .control-help { margin: 0 10px 8px; color: #6f8581; font-size: 7px; line-height: 1.45; }
 
 .live-calibration-panel { margin-top: 9px; border: 1px solid #385457; border-radius: 3px; padding: 8px; background: #0b1416; }
@@ -1758,12 +1759,14 @@ textarea::placeholder { color: #536360; }
 .fixture-form legend small { margin-left: 4px; color: #5d706d; }
 .calibration-guide { margin: 0 0 9px; color: #738884; font-size: 7px; line-height: 1.45; }
 #calibration-fieldset > .form-grid.two { display: none; }
+#calibration-fieldset details { display: none; }
 #calibration-fieldset { font-size: 12px; }
 #calibration-fieldset legend { font-size: 12px; }
 #calibration-fieldset .calibration-guide { font-size: 11px; }
 .calibration-slider-panel { border: 1px solid #2b4144; border-radius: 3px; padding: 8px; background: #0b1315; }
 .calibration-slider-panel label { display: grid; grid-template-columns: 78px 1fr; align-items: center; gap: 6px; margin: 5px 0; }
 .calibration-slider-panel output { grid-column: 2; color: var(--cyan); font: 7px var(--font-mono); }
+.calibration-slider-panel output { font-size: 12px; }
 .calibration-slider-panel input[type="range"] { grid-column: 2; width: 100%; accent-color: var(--cyan); }
 .calibration-presets { display: flex; gap: 5px; margin-top: 7px; }
 .calibration-presets button { flex: 1; border: 1px solid #3a5555; border-radius: 2px; padding: 5px; background: #17272a; color: #9bb1ae; font: 7px var(--font-mono); }

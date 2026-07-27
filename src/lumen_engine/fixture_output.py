@@ -201,17 +201,19 @@ def _apply_generic_multi_effect(
     # visibly settles with the music instead of racing through quiet parts.
     bar_number = int(timestamp * (observation.bpm or 120.0) / 60.0 / 4.0)
     pattern = bar_number % 4
-    motion_scale = clamp(0.22 + 0.78 * activity, 0.16, 1.0)
+    # Give the side arms the full 8-bit travel at performance energy; the
+    # resolver no longer compresses them into a small nod.
+    motion_scale = clamp(0.35 + 0.90 * activity, 0.30, 1.0)
     if decision.gesture is Gesture.BREATHE:
         motion_scale *= 0.56
     motion_phase = timestamp * (observation.bpm or 120.0) / 60.0 * math.tau / 4.0
-    if pattern == 0:
-        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase * 2), math.cos(motion_phase * 2)
-    elif pattern == 1:
-        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.cos(motion_phase), math.sin(motion_phase)
-    elif pattern == 2:
+    if pattern == 0:  # chase: each arm follows the other by a quarter cycle
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase), math.sin(motion_phase + math.pi / 2)
+    elif pattern == 1:  # true opposing sweep
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * .5), math.sin(motion_phase), -math.sin(motion_phase)
-    else:
+    elif pattern == 2:  # figure-eight style independent phases
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * 2), math.sin(motion_phase * 2), -math.cos(motion_phase * 2)
+    else:  # beat alternation, reaching endpoints on every other beat
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * 2), (1 if beat_index % 2 == 0 else -1), (-1 if beat_index % 2 == 0 else 1)
     body = round(128.0 + 127.0 * motion_scale * body_motion)
     arm_1 = round(128.0 + 127.0 * motion_scale * arm_1_motion)
