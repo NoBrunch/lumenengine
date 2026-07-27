@@ -262,6 +262,8 @@ class LumenApplication:
         self._last_media_poll = 0.0
         self._spotify_error: str | None = None
         self._spotify_last_command: dict[str, Any] | None = None
+        self._spotify_console_cache: dict[str, Any] = {}
+        self._spotify_rate_limited_until = 0.0
         self._feedback_biases: dict[str, dict[str, float]] = {}
         self._calibration_overrides: dict[str, dict[str, float]] = {}
         self._audio_metrics = AudioInputMetrics.silence()
@@ -871,6 +873,12 @@ class LumenApplication:
                     "activate this console."
                 ),
             }
+        cache_key = f"{query[:200]}|{playlist_id[:128]}"
+        if time.time() < self._spotify_rate_limited_until and cache_key in self._spotify_console_cache:
+            cached = dict(self._spotify_console_cache[cache_key])
+            cached["stale"] = True
+            cached["message"] = "Spotify is rate limited; showing the last known player state."
+            return cached
         try:
             oauth = SpotifyOAuthPKCE(
                 client_id=self.spotify_client_id,
@@ -903,8 +911,15 @@ class LumenApplication:
                         "Lumen will follow that active route."
                     ),
                 }
+            self._spotify_console_cache[cache_key] = dict(console)
             return console
         except Exception as error:
+            if "rate limited" in str(error).lower() and cache_key in self._spotify_console_cache:
+                self._spotify_rate_limited_until = time.time() + 15.0
+                cached = dict(self._spotify_console_cache[cache_key])
+                cached["stale"] = True
+                cached["message"] = "Spotify API rate limited; showing cached player state for 15 seconds."
+                return cached
             with self._lock:
                 self._spotify_error = str(error)
                 self._status_sequence += 1
@@ -962,7 +977,7 @@ class LumenApplication:
             self._add_event("media", f"Now playing {media.display_name}")
 
     def solve_target(self, target: Vec3) -> list[dict[str, Any]]:
-        solver = SpatialTargetingEngine()
+        solver = SpatialTargetingEngine(enforce_limits=False)
         solutions: list[dict[str, Any]] = []
         for fixture in self.rig.fixtures:
             try:

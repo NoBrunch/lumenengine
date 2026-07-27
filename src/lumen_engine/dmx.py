@@ -81,22 +81,21 @@ def apply_moving_head_solution(
     fixture: FixturePatch,
     solution: TargetingSolution,
     brightness: float,
+    unrestricted: bool = False,
 ) -> None:
     calibration = fixture.calibration
+    pan_min, pan_max = (0.0, 540.0) if unrestricted else (calibration.pan_min_deg, calibration.pan_max_deg)
+    tilt_min, tilt_max = (0.0, 270.0) if unrestricted else (calibration.tilt_min_deg, calibration.tilt_max_deg)
+    pan_dmx_min, pan_dmx_max = (0, 65535) if unrestricted else (calibration.pan_dmx_min_u16, calibration.pan_dmx_max_u16)
+    tilt_dmx_min, tilt_dmx_max = (0, 65535) if unrestricted else (calibration.tilt_dmx_min_u16, calibration.tilt_dmx_max_u16)
     pan = _angle_to_u16(
         solution.pan_deg,
-        calibration.pan_min_deg,
-        calibration.pan_max_deg,
-        calibration.pan_dmx_min_u16,
-        calibration.pan_dmx_max_u16,
+        pan_min, pan_max, pan_dmx_min, pan_dmx_max,
         calibration.pan_invert_dmx,
     )
     tilt = _angle_to_u16(
         solution.tilt_deg,
-        calibration.tilt_min_deg,
-        calibration.tilt_max_deg,
-        calibration.tilt_dmx_min_u16,
-        calibration.tilt_dmx_max_u16,
+        tilt_min, tilt_max, tilt_dmx_min, tilt_dmx_max,
         calibration.tilt_invert_dmx,
     )
     _set_u16(

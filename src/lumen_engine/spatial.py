@@ -33,6 +33,9 @@ class UnreachableTargetError(ValueError):
 class SpatialTargetingEngine:
     """Resolve world-space targets into calibrated mechanical pan and tilt."""
 
+    def __init__(self, enforce_limits: bool = True) -> None:
+        self.enforce_limits = enforce_limits
+
     def solve(
         self,
         fixture: FixturePatch,
@@ -82,6 +85,8 @@ class SpatialTargetingEngine:
             for candidate in candidates
             if self._within_limits(calibration, candidate[0], candidate[1])
         ]
+        if not self.enforce_limits:
+            valid = candidates
         if not valid:
             raise UnreachableTargetError(
                 f"{fixture.name} cannot reach target {target.as_tuple()} within "
@@ -173,4 +178,3 @@ class SpatialTargetingEngine:
             <= tilt
             <= calibration.tilt_max_deg + epsilon
         )
-

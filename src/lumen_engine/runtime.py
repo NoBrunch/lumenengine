@@ -53,7 +53,9 @@ class PerformanceRuntime:
         self.output = output
         self.auxiliary_fixtures = auxiliary_fixtures
         self.expression = expression or ExpressionEngine()
-        self.targeting = targeting or SpatialTargetingEngine()
+        # Calibration defines the preferred software envelope; it is not a
+        # second hidden mechanical clamp on live choreography.
+        self.targeting = targeting or SpatialTargetingEngine(enforce_limits=False)
         self.motion_extents = motion_extents
         self._previous: dict[str, tuple[float, float]] = {}
         self._last_timestamp_s: float | None = None
@@ -153,6 +155,8 @@ class PerformanceRuntime:
                     1.0,
                 ),
             )
+            if self._calibration_overrides.get(fixture.fixture_id) is not None:
+                fixture_decision = replace(fixture_decision, brightness=0.35)
             try:
                 calibration_override = self._calibration_overrides.get(fixture.fixture_id)
                 if calibration_override is not None:
@@ -194,7 +198,7 @@ class PerformanceRuntime:
                         if previous is None
                         else previous[1],
                     )
-                if observation.loudness >= 0.02:
+                if observation.loudness >= 0.02 and calibration_override is None:
                     solution = self._performance_solution(
                         fixture,
                         index,
@@ -211,7 +215,8 @@ class PerformanceRuntime:
                 )
                 solutions.append(solution)
                 apply_moving_head_solution(
-                    frame, fixture, solution, fixture_decision.brightness
+                    frame, fixture, solution, fixture_decision.brightness,
+                    unrestricted=calibration_override is None,
                 )
                 apply_moving_head_profile(
                     frame,
@@ -440,13 +445,11 @@ class PerformanceRuntime:
             ) * 0.08 * observation.beat_pulse * envelope
             tilt_normalized += 0.07 * observation.beat_pulse * envelope
 
-        calibration = fixture.calibration
-        pan = calibration.pan_min_deg + pan_normalized * (
-            calibration.pan_max_deg - calibration.pan_min_deg
-        )
-        tilt = calibration.tilt_min_deg + tilt_normalized * (
-            calibration.tilt_max_deg - calibration.tilt_min_deg
-        )
+        # Live choreography uses the full software-defined fixture range. The
+        # calibration screen remains the place to choose the preferred room
+        # envelope; it is not an invisible clamp on generated motion.
+        pan = pan_normalized * 540.0
+        tilt = tilt_normalized * 270.0
         direction = self.targeting.direction_for_angles(fixture, pan, tilt)
         distance = max(4.0, spatial_solution.distance_m)
         target = fixture.position_m + direction * distance

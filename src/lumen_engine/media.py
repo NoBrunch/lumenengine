@@ -270,7 +270,15 @@ class SpotifyWebAPI:
             playback if isinstance(playback, dict) else None
         )
         devices_payload = self._request("/me/player/devices") or {}
-        profile_payload = self._request("/me") or {}
+        try:
+            profile_payload = self._request("/me") or {}
+        except RuntimeError as error:
+            # Profile identity is decorative; do not make a temporary /me
+            # rate limit prevent playback metadata and device controls from
+            # appearing in the console.
+            if "rate limited" not in str(error).lower():
+                raise
+            profile_payload = {}
         token = self.token_supplier()
         granted = set(token.scope.split())
         library_scopes = {
