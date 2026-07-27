@@ -251,6 +251,8 @@ class SpotifyNowPlayingProvider:
 class SpotifyWebAPI:
     """Small Web API client for Lumen's private Spotify Connect console."""
 
+    _playlist_cache: dict[str, tuple[float, Any]] = {}
+
     def __init__(
         self,
         token_supplier: Callable[[], SpotifyToken],
@@ -308,10 +310,23 @@ class SpotifyWebAPI:
             "observed_at_unix_ms": round(time.time() * 1000),
         }
         if library_authorized:
-            playlists_payload = self._request(
-                "/me/playlists",
-                query={"limit": 50, "offset": 0},
-            ) or {}
+            token_key = self.token_supplier().access_token[-16:]
+            cached_playlists = self._playlist_cache.get(token_key)
+            if cached_playlists and time.time() - cached_playlists[0] < 120.0:
+                playlists_payload = cached_playlists[1]
+            else:
+                try:
+                    playlists_payload = self._request(
+                        "/me/playlists", query={"limit": 50, "offset": 0},
+                    ) or {}
+                    self._playlist_cache[token_key] = (time.time(), playlists_payload)
+                except RuntimeError as error:
+                    if cached_playlists and "rate limited" in str(error).lower():
+                        playlists_payload = cached_playlists[1]
+                    elif "rate limited" in str(error).lower():
+                        playlists_payload = {"items": []}
+                    else:
+                        raise
             result["playlists"] = [
                 spotify_playlist_summary(playlist)
                 for playlist in playlists_payload.get("items", [])

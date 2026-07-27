@@ -278,15 +278,18 @@ class LumenApplication:
         self.solve_target(self.selected_target)
 
     @staticmethod
-    def _feedback_effect(label: str) -> tuple[float, float]:
+    def _feedback_effect(label: str) -> tuple[float, float, float, float]:
         return {
-            "increase_movement": (0.28, 0.0), "decrease_movement": (-0.28, 0.0),
-            "too_busy": (-0.28, 0.0), "not_busy_enough": (0.28, 0.0),
-            "calm_down": (-0.35, -0.08), "pick_it_up": (0.35, 0.10),
-            "too_bright": (0.0, -0.25), "too_dim": (0.0, 0.25),
-            "great_timing": (0.16, 0.06), "perfect_motion": (0.14, 0.0),
-            "more_like_this": (0.12, 0.08), "great_transition": (0.10, 0.06),
-        }.get(label, (0.0, 0.0))
+            "increase_movement": (0.28, 0.0, 0.0, 0.0), "decrease_movement": (-0.28, 0.0, 0.0, 0.0),
+            "too_busy": (-0.28, 0.0, 0.0, 0.0), "not_busy_enough": (0.28, 0.0, 0.0, 0.0),
+            "calm_down": (-0.35, -0.08, -0.6, 0.0), "pick_it_up": (0.35, 0.10, 0.0, 0.0),
+            "too_bright": (0.0, -0.25, 0.0, 0.0), "too_dim": (0.0, 0.25, 0.0, 0.0),
+            "great_timing": (0.16, 0.06, 0.05, 0.0), "perfect_motion": (0.14, 0.0, 0.0, 0.0),
+            "more_like_this": (0.12, 0.08, 0.0, 0.0), "great_transition": (0.10, 0.06, 0.0, 0.0),
+            "no_strobes": (0.0, 0.0, -0.8, 0.0), "less_flashing": (0.0, 0.0, -0.6, 0.0),
+            "slower_side_arms": (-0.18, 0.0, 0.0, 0.0), "faster_side_arms": (0.18, 0.0, 0.0, 0.0),
+            "cool_blue_purple": (0.0, 0.0, 0.0, -0.7), "warmer_color": (0.0, 0.0, 0.0, 0.7),
+        }.get(label, (0.0, 0.0, 0.0, 0.0))
 
     def _rebuild_feedback_biases(self) -> None:
         """Reconstruct preferences with recency decay and agreement confidence."""
@@ -305,12 +308,14 @@ class LumenApplication:
                 continue
             age_days = max(0.0, (now - float(row.get("created_unix_ms") or now)) / 86_400_000.0)
             decay = math.exp(-age_days / 21.0)
-            motion, intensity = self._feedback_effect(str(row.get("label", "")))
+            motion, intensity, strobe, palette = self._feedback_effect(str(row.get("label", "")))
             weight = decay * min(1.0, abs(float(row.get("value") or 1.0)))
             for key in keys_for_row:
                 bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0})
                 bucket["motion"] += motion * weight
                 bucket["intensity"] += intensity * weight
+                bucket["strobe"] = bucket.get("strobe", 0.0) + strobe * weight
+                bucket["palette"] = bucket.get("palette", 0.0) + palette * weight
                 bucket["weight"] += weight
                 counts[key] = counts.get(key, 0) + 1
         self._feedback_biases = {}
@@ -319,6 +324,8 @@ class LumenApplication:
             self._feedback_biases[key] = {
                 "motion": clamp(bucket["motion"] * confidence, -1.0, 1.0),
                 "intensity": clamp(bucket["intensity"] * confidence, -1.0, 1.0),
+                "strobe": clamp(bucket.get("strobe", 0.0) * confidence, -1.0, 1.0),
+                "palette": clamp(bucket.get("palette", 0.0) * confidence, -1.0, 1.0),
             }
 
     def _read_settings(self) -> dict[str, Any]:
@@ -668,6 +675,8 @@ class LumenApplication:
                 fixture_id=None if key == "overall" else key,
                 motion_delta=bias.get("motion", 0.0),
                 intensity_delta=bias.get("intensity", 0.0),
+                strobe_delta=bias.get("strobe", 0.0),
+                palette_delta=bias.get("palette", 0.0),
             )
         for fixture_id, override in self._calibration_overrides.items():
             runtime.set_calibration_override(fixture_id, active=True, **override)
@@ -1091,23 +1100,21 @@ class LumenApplication:
             for fixture in (*self.rig.fixtures, *self.rig.auxiliary_fixtures)
         ):
             raise ValueError("feedback fixture_id is not in the active rig")
-        effects = {
-            "increase_movement": (0.28, 0.0),
-            "decrease_movement": (-0.28, 0.0),
-            "too_busy": (-0.28, 0.0),
-            "not_busy_enough": (0.28, 0.0),
-            "calm_down": (-0.35, -0.08),
-            "pick_it_up": (0.35, 0.10),
-            "too_bright": (0.0, -0.25),
-            "too_dim": (0.0, 0.25),
-            "great_timing": (0.16, 0.06),
-            "perfect_motion": (0.14, 0.0),
-            "more_like_this": (0.12, 0.08),
-            "great_transition": (0.10, 0.06),
-        }
-        motion_delta, intensity_delta = effects.get(label, (0.0, 0.0))
+        motion_delta, intensity_delta, strobe_delta, palette_delta = self._feedback_effect(label)
+        note_lower = (note or "").lower()
+        if label == "operator_note":
+            if any(term in note_lower for term in ("no strobe", "stop flashing", "less flash")):
+                strobe_delta -= 0.6
+            if any(term in note_lower for term in ("slow", "calm", "too fast")):
+                motion_delta -= 0.18
+            if any(term in note_lower for term in ("blue", "purple", "cool")):
+                palette_delta -= 0.7
+            if any(term in note_lower for term in ("warm", "red", "amber")):
+                palette_delta += 0.7
         motion_delta *= abs(value) if value else 1.0
         intensity_delta *= abs(value) if value else 1.0
+        strobe_delta *= abs(value) if value else 1.0
+        palette_delta *= abs(value) if value else 1.0
         target_ids = [fixture_id] if scope == "fixture" else []
         if scope == "group" and group_id == "movers":
             target_ids = [fixture.fixture_id for fixture in self.rig.fixtures]
@@ -1119,17 +1126,21 @@ class LumenApplication:
                 )
                 bias["motion"] = clamp(bias["motion"] + motion_delta, -1.0, 1.0)
                 bias["intensity"] = clamp(bias["intensity"] + intensity_delta, -1.0, 1.0)
+                bias["strobe"] = clamp(bias.get("strobe", 0.0) + strobe_delta, -1.0, 1.0)
+                bias["palette"] = clamp(bias.get("palette", 0.0) + palette_delta, -1.0, 1.0)
             if self._runtime is not None:
                 if not target_ids:
                     self._runtime.apply_feedback(
                         scope="overall", fixture_id=None,
                         motion_delta=motion_delta, intensity_delta=intensity_delta,
+                        strobe_delta=strobe_delta, palette_delta=palette_delta,
                     )
                 else:
                     for target_id in target_ids:
                         self._runtime.apply_feedback(
                             scope="fixture", fixture_id=target_id,
                             motion_delta=motion_delta, intensity_delta=intensity_delta,
+                            strobe_delta=strobe_delta, palette_delta=palette_delta,
                         )
             if self.song_id is None:
                 media = self.media or MediaIdentity(

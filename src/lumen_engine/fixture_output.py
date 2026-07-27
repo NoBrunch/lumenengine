@@ -16,7 +16,7 @@ from lumen_engine.models import (
 from lumen_engine.profiles import party_parrot_profile
 
 
-def expression_rgb(decision: PerformanceDecision) -> tuple[float, float, float]:
+def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> tuple[float, float, float]:
     """A small baseline palette that can later be replaced by learned choices."""
 
     energy = decision.expression.energy
@@ -27,6 +27,18 @@ def expression_rgb(decision: PerformanceDecision) -> tuple[float, float, float]:
     blue = clamp(0.30 + 0.62 * (1.0 - tension) + 0.10 * energy, 0.0, 1.0)
     if decision.gesture is Gesture.RELEASE:
         return 1.0, clamp(green + 0.28, 0, 1), clamp(blue + 0.18, 0, 1)
+    if energy < 0.46:
+        # Soft acoustic/jazz material defaults to cool, low-saturation color.
+        red = 0.18
+        green = 0.08
+        blue = 0.62
+    if palette_bias < -0.05:
+        red = clamp(red * 0.55, 0.0, 1.0)
+        green = clamp(green * 0.75, 0.0, 1.0)
+        blue = clamp(blue + 0.22, 0.0, 1.0)
+    elif palette_bias > 0.05:
+        red = clamp(red + 0.20, 0.0, 1.0)
+        green = clamp(green + 0.08, 0.0, 1.0)
     return red, green, blue
 
 
@@ -49,6 +61,8 @@ def apply_moving_head_profile(
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
     movement_cost_deg: float = 0.0,
+    strobe_feedback: float = 0.0,
+    palette_bias: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -69,8 +83,9 @@ def apply_moving_head_profile(
             round(70 + 150 * beat_pulse)
             if (
                 idle_amount < 1.0
-                and beat_pulse >= 0.52
-                and decision.expression.energy >= 0.42
+                and strobe_feedback > -0.2
+                and beat_pulse >= 0.78
+                and decision.expression.energy >= 0.70
             )
             else 0
         )
@@ -83,7 +98,7 @@ def apply_moving_head_profile(
         )
         for name, value in zip(
             ("red", "green", "blue", "white"),
-            rgb_to_rgbw(expression_rgb(decision)),
+            rgb_to_rgbw(expression_rgb(decision, palette_bias)),
         ):
             _set_relative(
                 frame, fixture.universe, fixture.address, channels[name], value
@@ -97,6 +112,8 @@ def apply_auxiliary_fixture(
     observation: MusicalObservation | None = None,
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
+    strobe_feedback: float = 0.0,
+    palette_bias: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -109,6 +126,8 @@ def apply_auxiliary_fixture(
             observation,
             idle_amount,
             motion_feedback,
+            strobe_feedback,
+            palette_bias,
         )
         return
     dimmer = profile.channels.get("dimmer")
@@ -129,12 +148,14 @@ def _apply_generic_multi_effect(
     observation: MusicalObservation | None = None,
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
+    strobe_feedback: float = 0.0,
+    palette_bias: float = 0.0,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     assert profile is not None
     channels = profile.channels
     if idle_amount >= 1.0:
-        rgbw = rgb_to_rgbw(expression_rgb(decision))
+        rgbw = rgb_to_rgbw(expression_rgb(decision, palette_bias))
         values = {
             "body_rotation": 128,
             "body_rotation_speed": 200,
@@ -206,7 +227,7 @@ def _apply_generic_multi_effect(
     # This fixture's CH2 is inverted: zero is fastest and 255 is slowest.
     body_speed = round(235.0 - 210.0 * activity)
     strobe = 0
-    if beat_pulse >= 0.52 and energy >= 0.38:
+    if beat_pulse >= 0.78 and energy >= 0.70 and strobe_feedback > -0.2:
         strobe = round(70.0 + 150.0 * beat_pulse * activity)
 
     values = {
@@ -227,7 +248,7 @@ def _apply_generic_multi_effect(
         "strip_speed": 0,
         "macro": 0,
     }
-    rgbw = rgb_to_rgbw(expression_rgb(decision))
+    rgbw = rgb_to_rgbw(expression_rgb(decision, palette_bias))
     even_beat = beat_index % 2 == 0
     contrast = beat_pulse * (0.45 + 0.45 * activity)
     ball_scale = clamp(
@@ -265,7 +286,7 @@ def _apply_generic_multi_effect(
         values["strip_speed"] = round(58 + 186 * activity)
     else:
         values["strip_program"] = _strip_color_value(
-            expression_rgb(decision)
+            expression_rgb(decision, palette_bias)
         )
 
     for channel_name, value in values.items():

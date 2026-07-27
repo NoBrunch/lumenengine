@@ -63,6 +63,8 @@ class PerformanceRuntime:
         self._audio_idle_amount = 0.0
         self._feedback_motion: dict[str, float] = {}
         self._feedback_intensity: dict[str, float] = {}
+        self._feedback_strobe: dict[str, float] = {}
+        self._feedback_palette: dict[str, float] = {}
         self._motion_phase = 0.0
         self._motion_clock_s: float | None = None
         self._calibration_overrides: dict[str, dict[str, float]] = {}
@@ -87,6 +89,8 @@ class PerformanceRuntime:
         fixture_id: str | None,
         motion_delta: float = 0.0,
         intensity_delta: float = 0.0,
+        strobe_delta: float = 0.0,
+        palette_delta: float = 0.0,
     ) -> None:
         key = fixture_id if scope == "fixture" and fixture_id else "overall"
         self._feedback_motion[key] = clamp(
@@ -99,16 +103,22 @@ class PerformanceRuntime:
             -1.0,
             1.0,
         )
+        self._feedback_strobe[key] = clamp(self._feedback_strobe.get(key, 0.0) + strobe_delta, -1.0, 1.0)
+        self._feedback_palette[key] = clamp(self._feedback_palette.get(key, 0.0) + palette_delta, -1.0, 1.0)
 
     def replace_feedback(self, biases: dict[str, dict[str, float]]) -> None:
         self._feedback_motion.clear()
         self._feedback_intensity.clear()
+        self._feedback_strobe.clear()
+        self._feedback_palette.clear()
         for key, bias in biases.items():
             self.apply_feedback(
                 scope="fixture" if key != "overall" else "overall",
                 fixture_id=None if key == "overall" else key,
                 motion_delta=bias.get("motion", 0.0),
                 intensity_delta=bias.get("intensity", 0.0),
+                strobe_delta=bias.get("strobe", 0.0),
+                palette_delta=bias.get("palette", 0.0),
             )
 
     def _feedback_for(self, fixture_id: str) -> tuple[float, float]:
@@ -117,6 +127,8 @@ class PerformanceRuntime:
             + self._feedback_motion.get(fixture_id, 0.0),
             self._feedback_intensity.get("overall", 0.0)
             + self._feedback_intensity.get(fixture_id, 0.0),
+            self._feedback_strobe.get("overall", 0.0) + self._feedback_strobe.get(fixture_id, 0.0),
+            self._feedback_palette.get("overall", 0.0) + self._feedback_palette.get(fixture_id, 0.0),
         )
 
     def step(self, observation: MusicalObservation) -> RuntimeFrame:
@@ -144,7 +156,7 @@ class PerformanceRuntime:
                 observation,
             )
             previous = self._previous.get(fixture.fixture_id)
-            motion_feedback, intensity_feedback = self._feedback_for(
+            motion_feedback, intensity_feedback, strobe_feedback, palette_feedback = self._feedback_for(
                 fixture.fixture_id
             )
             fixture_decision = replace(
@@ -218,6 +230,17 @@ class PerformanceRuntime:
                     frame, fixture, solution, fixture_decision.brightness,
                     unrestricted=calibration_override is None,
                 )
+                if calibration_override is not None:
+                    # Calibration jog is direct-DMX, matching Party Parrot.
+                    # Do not remap the jog value through the saved envelope.
+                    for relative, raw in (
+                        (fixture.pan_coarse_channel, int(calibration_override["pan_dmx"])),
+                        (fixture.tilt_coarse_channel, int(calibration_override["tilt_dmx"])),
+                    ):
+                        frame.set_channel(fixture.universe, fixture.address + relative - 1, (raw >> 8) & 0xFF)
+                        fine = fixture.pan_fine_channel if relative == fixture.pan_coarse_channel else fixture.tilt_fine_channel
+                        if fine is not None:
+                            frame.set_channel(fixture.universe, fixture.address + fine - 1, raw & 0xFF)
                 apply_moving_head_profile(
                     frame,
                     fixture,
@@ -225,6 +248,8 @@ class PerformanceRuntime:
                     observation,
                     idle_amount=idle_amount,
                     movement_cost_deg=solution.movement_cost_deg,
+                    strobe_feedback=strobe_feedback,
+                    palette_bias=palette_feedback,
                 )
                 if calibration_override is not None:
                     # The profile's speed channel is intentionally overridden
@@ -235,7 +260,7 @@ class PerformanceRuntime:
                 warnings.append(str(error))
 
         for fixture in self.auxiliary_fixtures:
-            motion_feedback, intensity_feedback = self._feedback_for(
+            motion_feedback, intensity_feedback, strobe_feedback, palette_feedback = self._feedback_for(
                 fixture.fixture_id
             )
             fixture_decision = replace(
@@ -253,6 +278,8 @@ class PerformanceRuntime:
                 observation,
                 idle_amount=idle_amount,
                 motion_feedback=motion_feedback,
+                strobe_feedback=strobe_feedback,
+                palette_bias=palette_feedback,
             )
 
         self.output.send(frame)

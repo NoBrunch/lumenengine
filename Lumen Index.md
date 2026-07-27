@@ -129,6 +129,9 @@ Current feedback vocabulary includes:
 - Perfect motion
 - More like this
 - Great transition
+- No strobes
+- Slower side arms
+- Blue / purple
 - I liked that
 - Hold this idea
 - Bad timing
@@ -136,6 +139,11 @@ Current feedback vocabulary includes:
 
 The phone interface uses touch-gesture filtering so a scroll or screen-wake
 gesture cannot be interpreted as a feedback click.
+
+Free-form notes are interpreted when they contain direct cues such as “no
+strobe,” “stop flashing,” “slow,” “blue,” “purple,” “warm,” or “amber.” Other
+prose is retained as memory but does not automatically change a runtime
+parameter.
 
 ### Memory
 
@@ -182,8 +190,8 @@ during sustained silence.
 Feedback is both stored and used.
 
 Each feedback event has a label, value, timestamp, song, playback position,
-scope, and optional fixture/group target. The label maps to movement and
-intensity deltas. For example, **Too busy** contributes a negative movement
+scope, and optional fixture/group target. The label maps to movement,
+intensity, strobe, and palette deltas. For example, **Too busy** contributes a negative movement
 bias, while **Timing was right** contributes a smaller positive movement and
 intensity bias.
 
