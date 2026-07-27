@@ -17,14 +17,33 @@ from lumen_engine.profiles import party_parrot_profile
 
 
 def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> tuple[float, float, float]:
-    """A small baseline palette that can later be replaced by learned choices."""
+    """Resolve Lumen expressions through Party Parrot's saturated show palette.
+
+    Party Parrot's useful character came from rotating three-color schemes,
+    not from continuously mixing toward gray.  Keep that behavior here while
+    allowing the learned tension/intimacy values to choose how boldly a scheme
+    is presented.
+    """
 
     energy = decision.expression.energy
     tension = decision.expression.tension
     intimacy = decision.expression.intimacy
-    red = clamp(0.08 + 0.82 * tension + 0.20 * energy, 0.0, 1.0)
-    green = clamp(0.10 + 0.34 * intimacy + 0.18 * energy, 0.0, 1.0)
-    blue = clamp(0.30 + 0.62 * (1.0 - tension) + 0.10 * energy, 0.0, 1.0)
+    palettes = (
+        (1.00, 0.00, 0.42),  # magenta / blue / purple family
+        (0.18, 0.00, 1.00),  # blue / purple
+        (0.05, 0.78, 1.00),  # cyan / blue
+        (1.00, 0.08, 0.02),  # red / blue contrast
+        (1.00, 0.55, 0.02),  # orange / coral
+        (0.55, 0.08, 1.00),  # violet
+        (0.95, 0.95, 1.00),  # white hit
+    )
+    palette_index = int(max(0.0, decision.timestamp_s) / 8.0 + tension * 2.0) % len(palettes)
+    red, green, blue = palettes[palette_index]
+    # Keep lower-energy passages atmospheric without washing out the palette.
+    saturation = clamp(0.62 + 0.38 * energy + 0.10 * intimacy, 0.0, 1.0)
+    red *= saturation
+    green *= saturation
+    blue *= saturation
     if decision.gesture is Gesture.RELEASE:
         return 1.0, clamp(green + 0.28, 0, 1), clamp(blue + 0.18, 0, 1)
     if energy < 0.46:
@@ -200,7 +219,7 @@ def _apply_generic_multi_effect(
     # arms, and a restrained nod. Motor speed follows energy so the effect
     # visibly settles with the music instead of racing through quiet parts.
     bar_number = int(timestamp * (observation.bpm or 120.0) / 60.0 / 4.0)
-    pattern = bar_number % 4
+    pattern = bar_number % 6
     # Give the side arms the full 8-bit travel at performance energy; the
     # resolver no longer compresses them into a small nod.
     motion_scale = clamp(0.35 + 0.90 * activity, 0.30, 1.0)
@@ -213,8 +232,12 @@ def _apply_generic_multi_effect(
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * .5), math.sin(motion_phase), -math.sin(motion_phase)
     elif pattern == 2:  # figure-eight style independent phases
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * 2), math.sin(motion_phase * 2), -math.cos(motion_phase * 2)
-    else:  # beat alternation, reaching endpoints on every other beat
+    elif pattern == 3:  # beat alternation, reaching endpoints on every other beat
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * 2), (1 if beat_index % 2 == 0 else -1), (-1 if beat_index % 2 == 0 else 1)
+    elif pattern == 4:  # broad fan: body and arms use different rates
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * .5), math.sin(motion_phase * 1.5), math.cos(motion_phase * 1.5)
+    else:  # counter-rotating circles
+        body_motion, arm_1_motion, arm_2_motion = math.cos(motion_phase), math.sin(motion_phase * .75), -math.sin(motion_phase * .75)
     body = round(128.0 + 127.0 * motion_scale * body_motion)
     arm_1 = round(128.0 + 127.0 * motion_scale * arm_1_motion)
     arm_2 = round(128.0 + 127.0 * motion_scale * arm_2_motion)
@@ -275,7 +298,9 @@ def _apply_generic_multi_effect(
     values["green_laser"] = round(clamp(green_laser, 0.0, 255.0))
 
     if activity >= 0.45:
-        effect = 1 + beat_index + (4 if energy >= 0.70 else 0)
+        # Party Parrot exposes a larger bank of built-in ring programs; walk
+        # that bank by bar instead of repeating the same four programs.
+        effect = 1 + (bar_number % 20)
         values["strip_program"] = 76 + (effect - 1) * 9 + 4
         values["strip_speed"] = round(58 + 186 * activity)
     else:

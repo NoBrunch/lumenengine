@@ -282,6 +282,15 @@ full scale. If that count rises, reduce the Ubuntu ALSA Line input level a
 small amount (for example 3–6 dB) and leave the Chromecast output where it is.
 The goal is headroom below 0 dBFS, not a quieter listening system.
 
+## Party Parrot-inspired center fixture behavior
+
+The center multi-effect now uses the proven Party Parrot style of saturated
+foreground/background/contrast colors. Its ring walks through the fixture’s
+built-in effect bank by musical bar, while the body and two arms rotate through
+chase, opposing sweep, figure-eight, beat alternation, broad fan, and
+counter-rotating-circle gestures. Energy controls the travel amount and speed,
+so quiet sections settle without removing the routine variety.
+
 ## Desktop workspace sizing
 
 Desktop dashboard panels can be resized from their lower-right corner and
