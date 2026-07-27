@@ -42,6 +42,7 @@ body {
   font-family: var(--font-ui);
   font-size: 13px;
 }
+body { font-size: 15px; }
 
 button,
 input,
@@ -3312,6 +3313,14 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
   font-size: 21px;
 }
 .remote-feedback b { font-size: 9px; }
+.remote-spotify-track b, .remote-spotify-track span { display: block; }
+.remote-spotify-track b { color: #b7cbc7; font-size: 12px; }
+.remote-spotify-track span { margin-top: 4px; color: #718783; font-size: 9px; }
+.remote-spotify-controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin: 9px 0; }
+.remote-spotify-controls button, #remote-spotify-play-playlist { border: 1px solid #3f6667; border-radius: 4px; padding: 9px 6px; background: #172b2e; color: #b3d8d2; font-size: 12px; }
+#remote-spotify-playlist { width: 100%; padding: 9px; }
+#remote-spotify-play-playlist { width: 100%; margin-top: 6px; font-size: 10px; }
+#remote-spotify-message { display: block; margin-top: 7px; color: #718783; font-size: 8px; line-height: 1.4; }
 
 .remote-note-box {
   margin-top: 9px;

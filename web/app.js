@@ -460,6 +460,7 @@ function renderSpotifyConsole() {
   $("spotify-console-setup")?.classList.toggle("hidden", Boolean(spotify.connected));
   $("spotify-console-connected")?.classList.toggle("hidden", !spotify.connected);
   if (!spotify.connected) return;
+  renderRemoteSpotify(spotify);
 
   const playback = spotify.playback || {};
   const track = playback.track || {};
@@ -658,6 +659,21 @@ function renderSpotifyConsole() {
       : "None sent since Lumen started.",
   );
   setText("spotify-diagnostic-note", diagnostics.api_note || "");
+}
+
+function renderRemoteSpotify(spotify) {
+  const playback = spotify.playback || {};
+  const track = playback.track || {};
+  setText("remote-spotify-state", playback.is_playing ? "PLAYING" : track.name ? "PAUSED" : "IDLE");
+  setText("remote-spotify-title", track.name || "No active Spotify track");
+  setText("remote-spotify-artist", track.artists?.join(", ") || "Connect Spotify on the console");
+  if ($("remote-spotify-play")) $("remote-spotify-play").textContent = playback.is_playing ? "❚❚" : "▶";
+  const select = $("remote-spotify-playlist");
+  if (select) {
+    select.innerHTML = `<option value="">Choose playlist…</option>${(spotify.playlists || []).map((playlist) => `<option value="${escapeHtml(playlist.id || "")}" ${playlist.id === app.spotifyPlaylistId ? "selected" : ""}>${escapeHtml(playlist.name || "Untitled playlist")}</option>`).join("")}`;
+    select.disabled = !spotify.library_authorized;
+  }
+  if ($("remote-spotify-message")) $("remote-spotify-message").textContent = spotify.message || (spotify.library_authorized ? "Choose a playlist or use the transport controls." : "Connect Spotify with playlist access on the desktop console.");
 }
 
 function selectedSpotifyDeviceId() {
@@ -1679,6 +1695,18 @@ function installHandlers() {
   $("save-audio-device-button")?.addEventListener("click", saveAudioDevice);
   $("spotify-connect-button")?.addEventListener("click", connectSpotify);
   $("spotify-refresh-button")?.addEventListener("click", () => refreshSpotifyConsole(true));
+  $("remote-spotify-refresh")?.addEventListener("click", () => refreshSpotifyConsole(true));
+  $("remote-spotify-previous")?.addEventListener("click", () => spotifyCommand("previous"));
+  $("remote-spotify-play")?.addEventListener("click", () => spotifyCommand(app.spotify?.playback?.is_playing ? "pause" : "play"));
+  $("remote-spotify-next")?.addEventListener("click", () => spotifyCommand("next"));
+  $("remote-spotify-playlist")?.addEventListener("change", (event) => {
+    app.spotifyPlaylistId = event.target.value || "";
+    refreshSpotifyConsole(true, "");
+  });
+  $("remote-spotify-play-playlist")?.addEventListener("click", () => {
+    const playlist = (app.spotify?.playlists || []).find((item) => item.id === app.spotifyPlaylistId);
+    if (playlist?.uri) spotifyCommand("play", { context_uri: playlist.uri });
+  });
   $("spotify-search-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     app.spotifyPlaylistId = "";
