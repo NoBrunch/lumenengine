@@ -72,7 +72,7 @@ def apply_moving_head_profile(
         _set_relative(frame, fixture.universe, fixture.address, channels["movement_speed"], speed)
         beat_pulse = 0.0 if observation is None else observation.beat_pulse
         strobe = (
-            round(70 + 150 * beat_pulse)
+            round(clamp(70 + 150 * beat_pulse + 80 * strobe_feedback, 0.0, 255.0))
             if (
                 idle_amount < 1.0
                 and strobe_feedback > -0.2
@@ -220,7 +220,7 @@ def _apply_generic_multi_effect(
     body_speed = round(235.0 - 210.0 * activity)
     strobe = 0
     if beat_pulse >= 0.78 and energy >= 0.70 and strobe_feedback > -0.2:
-        strobe = round(70.0 + 150.0 * beat_pulse * activity)
+        strobe = round(clamp(70.0 + 150.0 * beat_pulse * activity + 80.0 * strobe_feedback, 0.0, 255.0))
 
     values = {
         "body_rotation": body,

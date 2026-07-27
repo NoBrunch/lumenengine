@@ -287,6 +287,10 @@ class LumenApplication:
             "great_timing": (0.16, 0.06, 0.05, 0.0), "perfect_motion": (0.14, 0.0, 0.0, 0.0),
             "more_like_this": (0.12, 0.08, 0.0, 0.0), "great_transition": (0.10, 0.06, 0.0, 0.0),
             "no_strobes": (0.0, 0.0, -0.8, 0.0), "less_flashing": (0.0, 0.0, -0.6, 0.0),
+            "strobe": (0.0, 0.0, 0.8, 0.0), "faster_strobe": (0.0, 0.0, 0.35, 0.0),
+            "slower_strobe": (0.0, 0.0, -0.30, 0.0),
+            "faster": (0.28, 0.0, 0.0, 0.0), "slower": (-0.28, 0.0, 0.0, 0.0),
+            "brighter": (0.0, 0.25, 0.0, 0.0), "dimmer": (0.0, -0.25, 0.0, 0.0),
             "slower_side_arms": (-0.18, 0.0, 0.0, 0.0), "faster_side_arms": (0.18, 0.0, 0.0, 0.0),
             "cool_blue_purple": (0.0, 0.0, 0.0, -0.7), "warmer_color": (0.0, 0.0, 0.0, 0.7),
         }.get(label, (0.0, 0.0, 0.0, 0.0))
@@ -1107,6 +1111,10 @@ class LumenApplication:
                 strobe_delta -= 0.6
             if any(term in note_lower for term in ("slow", "calm", "too fast")):
                 motion_delta -= 0.18
+            if any(term in note_lower for term in ("faster", "pick it up", "more movement")):
+                motion_delta += 0.18
+            if any(term in note_lower for term in ("strobe", "flash")) and not any(term in note_lower for term in ("no strobe", "stop flashing", "less flash")):
+                strobe_delta += 0.35
             if any(term in note_lower for term in ("blue", "purple", "cool")):
                 palette_delta -= 0.7
             if any(term in note_lower for term in ("warm", "red", "amber")):

@@ -130,6 +130,10 @@ Current feedback vocabulary includes:
 - More like this
 - Great transition
 - No strobes
+- Strobe
+- Faster/slower strobe
+- Faster/slower
+- Brighter/dimmer
 - Slower side arms
 - Blue / purple
 - I liked that
@@ -141,9 +145,10 @@ The phone interface uses touch-gesture filtering so a scroll or screen-wake
 gesture cannot be interpreted as a feedback click.
 
 Free-form notes are interpreted when they contain direct cues such as “no
-strobe,” “stop flashing,” “slow,” “blue,” “purple,” “warm,” or “amber.” Other
-prose is retained as memory but does not automatically change a runtime
-parameter.
+strobe,” “stop flashing,” “strobe,” “slow,” “faster,” “blue,” “purple,” “warm,”
+or “amber.” Other prose is retained as memory but does not automatically change
+a runtime parameter. This parser is deliberately local and deterministic; it
+does not silently send private listening data to ChatGPT.
 
 ### Memory
 
