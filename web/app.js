@@ -15,6 +15,7 @@ const app = {
   lastBeatPhase: null,
   lastBeatPulse: 0,
   pointer: { dragging: false, moved: false, fixtureId: null },
+  roomCamera: { yaw: -0.55, pitch: 0.62, panX: 0, panY: 0, zoom: 1 },
   polling: null,
   controlTimer: null,
   disconnected: false,
@@ -23,6 +24,8 @@ const app = {
   spotifyFetchedAt: 0,
   spotifyPlaylistId: "",
   spotifyTransferDeviceId: "",
+  spotifyHistory: [],
+  spotifyHistoryIndex: -1,
   calibrationActive: false,
   calibrationCaptures: {},
 };
@@ -416,6 +419,7 @@ async function refreshSpotifyConsole(showErrors = false, query = null) {
     if (app.spotifyPlaylistId) parameters.set("playlist_id", app.spotifyPlaylistId);
     app.spotify = await api(`/api/spotify${parameters.size ? `?${parameters}` : ""}`);
     app.spotifyFetchedAt = Date.now();
+    rememberSpotifyView();
     renderSpotifyConsole();
   } catch (error) {
     if (showErrors) toast("Spotify console unavailable", error.message, "error");
@@ -424,6 +428,25 @@ async function refreshSpotifyConsole(showErrors = false, query = null) {
   } finally {
     app.spotifyRefreshing = false;
   }
+}
+
+function rememberSpotifyView() {
+  const view = { query: app.spotify?.query || "", playlistId: app.spotifyPlaylistId || "" };
+  const current = app.spotifyHistory[app.spotifyHistoryIndex];
+  if (current && current.query === view.query && current.playlistId === view.playlistId) return;
+  app.spotifyHistory = app.spotifyHistory.slice(0, app.spotifyHistoryIndex + 1);
+  app.spotifyHistory.push(view);
+  app.spotifyHistoryIndex = app.spotifyHistory.length - 1;
+}
+
+function navigateSpotifyHistory(delta) {
+  const next = app.spotifyHistoryIndex + delta;
+  if (next < 0 || next >= app.spotifyHistory.length) return;
+  app.spotifyHistoryIndex = next;
+  const view = app.spotifyHistory[next];
+  app.spotifyPlaylistId = view.playlistId;
+  if ($("spotify-search-input")) $("spotify-search-input").value = view.query;
+  refreshSpotifyConsole(true, view.query);
 }
 
 function renderSpotifyConsole() {
@@ -1034,11 +1057,17 @@ function roomProjection(canvasSize, view, position) {
   let a;
   let b;
   if (view === "3d") {
-    const scale = Math.min(availableWidth / room.width_m, availableHeight / room.height_m) * 0.78;
+    const camera = app.roomCamera;
+    const scale = Math.min(availableWidth / room.width_m, availableHeight / room.height_m) * 0.78 * camera.zoom;
+    let [px, py, pz] = position;
+    const cy = Math.cos(camera.yaw), sy = Math.sin(camera.yaw);
+    [px, py] = [px * cy - py * sy, px * sy + py * cy];
+    const cp = Math.cos(camera.pitch), sp = Math.sin(camera.pitch);
+    [py, pz] = [py * cp - pz * sp, py * sp + pz * cp];
     const cx = canvasSize.width / 2;
     const floor = canvasSize.height * 0.80;
-    const x = cx + position[0] * scale - position[1] * scale * 0.42;
-    const y = floor - position[2] * scale + position[1] * scale * 0.22;
+    const x = cx + px * scale + camera.panX;
+    const y = floor - pz * scale + py * scale * 0.32 + camera.panY;
     return { x, y, scale, rect: { x: pad, y: pad, width: availableWidth, height: availableHeight } };
   } else if (view === "front") {
     aRange = room.width_m;
@@ -1300,12 +1329,21 @@ function renderMemory(memory) {
   if (history) {
     history.innerHTML = memory.recent_feedback?.length
       ? memory.recent_feedback.map((item) => `<article class="feedback-history-item">
-          <div><b>${escapeHtml(label(item.label))}</b><time>${escapeHtml(formatElapsed(item.created_unix_ms))}</time></div>
+          <div><b>${escapeHtml(label(item.label))}</b><time>${escapeHtml(formatElapsed(item.created_unix_ms))} <button class="feedback-undo" data-delete-feedback="${item.id}">Undo</button></time></div>
           <span>${escapeHtml(item.song_title || "Unidentified session")} · ${formatTime(item.position_ms)}</span>
           ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
         </article>`).join("")
       : `<div class="empty-selection"><b>No feedback yet</b><p>Use the performance console or phone remote to teach Lumen.</p></div>`;
   }
+}
+
+async function deleteFeedback(feedbackId) {
+  try {
+    await api("/api/feedback/delete", { method: "POST", body: { feedback_id: Number(feedbackId) } });
+    app.memory = await api("/api/memory");
+    renderMemory(app.memory);
+    toast("Feedback removed", "Its preference weight was recomputed.", "success");
+  } catch (error) { toast("Feedback could not be removed", error.message, "error"); }
 }
 
 function renderSongLibrary(filter = "") {
@@ -1540,6 +1578,8 @@ function installHandlers() {
   $("stop-button")?.addEventListener("click", stopEngine);
   $("blackout-button")?.addEventListener("click", toggleBlackout);
   $("remote-blackout-button")?.addEventListener("click", toggleBlackout);
+  $("spotify-back-button")?.addEventListener("click", () => navigateSpotifyHistory(-1));
+  $("spotify-forward-button")?.addEventListener("click", () => navigateSpotifyHistory(1));
   $("fresh-gesture-button")?.addEventListener("click", requestFreshGesture);
 
   $$("[data-control]").forEach((input) => {
@@ -1596,6 +1636,10 @@ function installHandlers() {
   $("remote-note-open")?.addEventListener("click", () => {
     $("remote-note-box").classList.toggle("hidden");
     if (!$("remote-note-box").classList.contains("hidden")) $("remote-feedback-note").focus();
+  });
+  $("feedback-history")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-delete-feedback]");
+    if (button) deleteFeedback(button.dataset.deleteFeedback);
   });
 
   $$("[data-room-view]").forEach((button) => {
@@ -1710,6 +1754,11 @@ function installRigPointerHandlers() {
   if (!canvas) return;
   canvas.addEventListener("pointerdown", (event) => {
     if (!app.bootstrap) return;
+    if (app.rigView === "3d") {
+      app.pointer = { dragging: true, moved: false, fixtureId: null, mode: event.ctrlKey ? "rotate" : "pan", x: event.clientX, y: event.clientY };
+      canvas.setPointerCapture(event.pointerId);
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     let nearest = null;
     let nearestDistance = 14;
@@ -1729,6 +1778,21 @@ function installRigPointerHandlers() {
   });
   canvas.addEventListener("pointermove", (event) => {
     if (!app.bootstrap) return;
+    if (app.rigView === "3d" && app.pointer.dragging) {
+      const dx = event.clientX - (app.pointer.x || event.clientX);
+      const dy = event.clientY - (app.pointer.y || event.clientY);
+      app.pointer.x = event.clientX; app.pointer.y = event.clientY;
+      if (Math.abs(dx) + Math.abs(dy) > 1) app.pointer.moved = true;
+      if (app.pointer.mode === "rotate") {
+        app.roomCamera.yaw += dx * 0.008;
+        app.roomCamera.pitch = clamp(app.roomCamera.pitch + dy * 0.008, -1.2, 1.2);
+      } else {
+        app.roomCamera.panX += dx;
+        app.roomCamera.panY += dy;
+      }
+      drawRig();
+      return;
+    }
     const position = roomPositionFromCanvas(canvas, app.rigView, event.clientX, event.clientY, Number($("target-z")?.value || 1.2));
     setText("cursor-x", position[0].toFixed(2));
     setText("cursor-y", position[1].toFixed(2));
@@ -1746,6 +1810,10 @@ function installRigPointerHandlers() {
     }
   });
   canvas.addEventListener("pointerup", (event) => {
+    if (app.rigView === "3d" && app.pointer.dragging) {
+      app.pointer = { dragging: false, moved: app.pointer.moved, fixtureId: null };
+      return;
+    }
     if (!app.pointer.moved && !app.pointer.fixtureId) {
       const position = roomPositionFromCanvas(canvas, app.rigView, event.clientX, event.clientY, Number($("target-z")?.value || 1.2));
       $("target-x").value = position[0].toFixed(3);
@@ -1755,6 +1823,12 @@ function installRigPointerHandlers() {
     }
     app.pointer = { dragging: false, moved: false, fixtureId: null };
   });
+  canvas.addEventListener("wheel", (event) => {
+    if (app.rigView !== "3d") return;
+    event.preventDefault();
+    app.roomCamera.zoom = clamp(app.roomCamera.zoom - event.deltaY * 0.001, 0.55, 1.8);
+    drawRig();
+  }, { passive: false });
 }
 
 async function requestFreshGesture() {

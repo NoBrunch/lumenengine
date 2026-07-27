@@ -2285,6 +2285,7 @@ textarea::placeholder { color: #536360; }
 .feedback-history-item > div { display: flex; justify-content: space-between; gap: 8px; }
 .feedback-history-item b { font-size: 9px; text-transform: capitalize; }
 .feedback-history-item time { color: #536764; font: 7px var(--font-mono); }
+.feedback-undo { margin-left: 5px; border: 1px solid #6a4a4d; border-radius: 2px; padding: 2px 4px; background: #28191b; color: #d89b9d; font: 7px var(--font-mono); }
 .feedback-history-item span { display: block; margin-top: 4px; color: #7d908d; font-size: 8px; }
 .feedback-history-item p { margin: 5px 0 0; border-left: 2px solid #456965; padding-left: 7px; color: #9eafac; font-size: 8px; line-height: 1.45; }
 

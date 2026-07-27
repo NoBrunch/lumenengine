@@ -239,6 +239,18 @@ class SongMemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def all_feedback(self) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT id, song_id, label, value, scope, fixture_id, created_unix_ms FROM feedback"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_feedback(self, feedback_id: int) -> bool:
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute("DELETE FROM feedback WHERE id=?", (feedback_id,))
+            return cursor.rowcount > 0
+
     def summary(self, limit: int = 30) -> dict[str, Any]:
         """Return compact operator-facing song and feedback history."""
 

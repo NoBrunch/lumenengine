@@ -272,7 +272,52 @@ class LumenApplication:
         self._audio_last_packet_at: float | None = None
         self._audio_packet_times: deque[float] = deque(maxlen=96)
         self._add_event("system", f"Loaded {self.rig.name}")
+        self._rebuild_feedback_biases()
         self.solve_target(self.selected_target)
+
+    @staticmethod
+    def _feedback_effect(label: str) -> tuple[float, float]:
+        return {
+            "increase_movement": (0.28, 0.0), "decrease_movement": (-0.28, 0.0),
+            "too_busy": (-0.28, 0.0), "not_busy_enough": (0.28, 0.0),
+            "calm_down": (-0.35, -0.08), "pick_it_up": (0.35, 0.10),
+            "too_bright": (0.0, -0.25), "too_dim": (0.0, 0.25),
+            "great_timing": (0.16, 0.06), "perfect_motion": (0.14, 0.0),
+            "more_like_this": (0.12, 0.08), "great_transition": (0.10, 0.06),
+        }.get(label, (0.0, 0.0))
+
+    def _rebuild_feedback_biases(self) -> None:
+        """Reconstruct preferences with recency decay and agreement confidence."""
+        rows = self.memory.all_feedback()
+        now = time.time() * 1000.0
+        buckets: dict[str, dict[str, float]] = {}
+        counts: dict[str, int] = {}
+        for row in rows:
+            scope = row.get("scope", "overall")
+            if scope == "group" and row.get("fixture_id") == "movers":
+                keys_for_row = [fixture.fixture_id for fixture in self.rig.fixtures]
+            else:
+                keys_for_row = [row.get("fixture_id")] if scope == "fixture" else ["overall"]
+            keys_for_row = [key for key in keys_for_row if key]
+            if not keys_for_row:
+                continue
+            age_days = max(0.0, (now - float(row.get("created_unix_ms") or now)) / 86_400_000.0)
+            decay = math.exp(-age_days / 21.0)
+            motion, intensity = self._feedback_effect(str(row.get("label", "")))
+            weight = decay * min(1.0, abs(float(row.get("value") or 1.0)))
+            for key in keys_for_row:
+                bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0})
+                bucket["motion"] += motion * weight
+                bucket["intensity"] += intensity * weight
+                bucket["weight"] += weight
+                counts[key] = counts.get(key, 0) + 1
+        self._feedback_biases = {}
+        for key, bucket in buckets.items():
+            confidence = min(1.0, math.sqrt(counts[key]) / 2.0)
+            self._feedback_biases[key] = {
+                "motion": clamp(bucket["motion"] * confidence, -1.0, 1.0),
+                "intensity": clamp(bucket["intensity"] * confidence, -1.0, 1.0),
+            }
 
     def _read_settings(self) -> dict[str, Any]:
         if not self.settings_path.exists():
@@ -1091,9 +1136,27 @@ class LumenApplication:
                     fixture_id=group_id if scope == "group" else fixture_id,
                 )
             )
+            self._rebuild_feedback_biases()
+            if self._runtime is not None:
+                self._runtime.replace_feedback(self._feedback_biases)
             self._add_event("feedback", f"Recorded feedback: {label.replace('_', ' ')}")
             self._status_sequence += 1
         return {"feedback_id": feedback_id, "song_id": self.song_id}
+
+    def delete_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
+        feedback_id = int(payload.get("feedback_id", 0))
+        if feedback_id < 1:
+            raise ValueError("feedback_id is required")
+        with self._lock:
+            deleted = self.memory.delete_feedback(feedback_id)
+            if not deleted:
+                raise ValueError("feedback entry was not found")
+            self._rebuild_feedback_biases()
+            if self._runtime is not None:
+                self._runtime.replace_feedback(self._feedback_biases)
+            self._add_event("feedback", f"Removed feedback #{feedback_id}")
+            self._status_sequence += 1
+        return {"deleted": True, "feedback_id": feedback_id}
 
     def _media_position_ms(self) -> int | None:
         media = self.media
@@ -1358,6 +1421,8 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.apply_preset(str(payload.get("preset", "")))
             elif path == "/api/feedback":
                 result = app.add_feedback(payload)
+            elif path == "/api/feedback/delete":
+                result = app.delete_feedback(payload)
             elif path == "/api/calibration":
                 result = app.calibration_control(payload)
             elif path == "/api/gesture/fresh":

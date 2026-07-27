@@ -98,6 +98,17 @@ class PerformanceRuntime:
             1.0,
         )
 
+    def replace_feedback(self, biases: dict[str, dict[str, float]]) -> None:
+        self._feedback_motion.clear()
+        self._feedback_intensity.clear()
+        for key, bias in biases.items():
+            self.apply_feedback(
+                scope="fixture" if key != "overall" else "overall",
+                fixture_id=None if key == "overall" else key,
+                motion_delta=bias.get("motion", 0.0),
+                intensity_delta=bias.get("intensity", 0.0),
+            )
+
     def _feedback_for(self, fixture_id: str) -> tuple[float, float]:
         return (
             self._feedback_motion.get("overall", 0.0)
@@ -208,6 +219,7 @@ class PerformanceRuntime:
                     fixture_decision,
                     observation,
                     idle_amount=idle_amount,
+                    movement_cost_deg=solution.movement_cost_deg,
                 )
                 if calibration_override is not None:
                     # The profile's speed channel is intentionally overridden
