@@ -70,6 +70,13 @@ class SongMemoryStore:
                     note TEXT,
                     scope TEXT NOT NULL DEFAULT 'overall',
                     fixture_id TEXT,
+                    gesture TEXT,
+                    section TEXT,
+                    energy REAL,
+                    motion REAL,
+                    tension REAL,
+                    confidence REAL,
+                    bpm REAL,
                     created_unix_ms INTEGER NOT NULL
                 );
 
@@ -110,6 +117,14 @@ class SongMemoryStore:
                 connection.execute(
                     "ALTER TABLE feedback ADD COLUMN fixture_id TEXT"
                 )
+            for name, definition in (
+                ("gesture", "TEXT"), ("section", "TEXT"),
+                ("energy", "REAL"), ("motion", "REAL"),
+                ("tension", "REAL"), ("confidence", "REAL"),
+                ("bpm", "REAL"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE feedback ADD COLUMN {name} {definition}")
             connection.execute(
                 """
                 INSERT INTO metadata(key, value) VALUES('schema_version', ?)
@@ -211,8 +226,9 @@ class SongMemoryStore:
                 """
                 INSERT INTO feedback(
                     song_id, position_ms, label, value, note, scope,
-                    fixture_id, created_unix_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    fixture_id, gesture, section, energy, motion, tension,
+                    confidence, bpm, created_unix_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feedback.song_id,
@@ -222,6 +238,13 @@ class SongMemoryStore:
                     feedback.note,
                     feedback.scope,
                     feedback.fixture_id,
+                    feedback.gesture,
+                    feedback.section,
+                    feedback.energy,
+                    feedback.motion,
+                    feedback.tension,
+                    feedback.confidence,
+                    feedback.bpm,
                     int(time.time() * 1000),
                 ),
             )
@@ -231,7 +254,9 @@ class SongMemoryStore:
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT id, position_ms, label, value, note, scope, fixture_id, created_unix_ms
+                SELECT id, position_ms, label, value, note, scope, fixture_id,
+                       gesture, section, energy, motion, tension, confidence, bpm,
+                       created_unix_ms
                 FROM feedback WHERE song_id=?
                 ORDER BY COALESCE(position_ms, -1), created_unix_ms
                 """,
@@ -242,7 +267,9 @@ class SongMemoryStore:
     def all_feedback(self) -> list[dict[str, Any]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT id, song_id, label, value, scope, fixture_id, created_unix_ms FROM feedback"
+                "SELECT id, song_id, position_ms, label, value, note, scope, fixture_id, "
+                "gesture, section, energy, motion, tension, confidence, bpm, created_unix_ms "
+                "FROM feedback"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -293,6 +320,11 @@ class SongMemoryStore:
                     feedback.note,
                     feedback.scope,
                     feedback.fixture_id,
+                    feedback.gesture,
+                    feedback.section,
+                    feedback.energy,
+                    feedback.motion,
+                    feedback.tension,
                     feedback.created_unix_ms
                 FROM feedback
                 JOIN songs ON songs.id = feedback.song_id

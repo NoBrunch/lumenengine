@@ -363,7 +363,9 @@ function renderEngineButtons(engine) {
 function renderControls(controls) {
   $$("[data-control]").forEach((input) => {
     if (document.activeElement !== input && controls[input.dataset.control] !== undefined) {
-      input.value = Math.round(Number(controls[input.dataset.control]) * 100);
+      input.value = input.tagName === "SELECT"
+        ? controls[input.dataset.control]
+        : Math.round(Number(controls[input.dataset.control]) * 100);
     }
   });
   $$("[data-output]").forEach((output) => {
@@ -1354,7 +1356,7 @@ function renderMemory(memory) {
     history.innerHTML = memory.recent_feedback?.length
       ? memory.recent_feedback.map((item) => `<article class="feedback-history-item">
           <div><b>${escapeHtml(label(item.label))}</b><time>${escapeHtml(formatElapsed(item.created_unix_ms))} <button class="feedback-undo" data-delete-feedback="${item.id}">Undo</button></time></div>
-          <span>${escapeHtml(item.song_title || "Unidentified session")} · ${formatTime(item.position_ms)}</span>
+          <span>${escapeHtml(item.song_title || "Unidentified session")} · ${formatTime(item.position_ms)}${item.gesture ? ` · ${escapeHtml(item.gesture)}` : ""}${item.section ? ` · ${escapeHtml(item.section)}` : ""}</span>
           ${item.note ? `<p>${escapeHtml(item.note)}</p>` : ""}
         </article>`).join("")
       : `<div class="empty-selection"><b>No feedback yet</b><p>Use the performance console or phone remote to teach Lumen.</p></div>`;
@@ -1607,7 +1609,7 @@ function installHandlers() {
   $("fresh-gesture-button")?.addEventListener("click", requestFreshGesture);
 
   $$("[data-control]").forEach((input) => {
-    input.addEventListener("input", () => queueControl(input.dataset.control, Number(input.value) / 100));
+    input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => queueControl(input.dataset.control, input.tagName === "SELECT" ? input.value : Number(input.value) / 100));
   });
   $$('[data-calibration-slider]').forEach((slider) => {
     slider.addEventListener('input', () => {

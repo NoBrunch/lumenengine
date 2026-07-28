@@ -70,5 +70,11 @@ Learning should initially adjust understandable preferences:
 - desired contrast between sections
 - repetition tolerance
 
+Feedback context is captured with every operator action: song identity,
+playback position, active gesture, inferred section, expression values, BPM,
+scope, and fixture/group target. The runtime aggregates this memory at overall,
+fixture, song, artist, and song-section levels. Semantic routines store these
+moments and are resolved into the current rig rather than replaying old DMX.
+
 It should learn semantic decisions, not raw DMX bytes. Geometry, constraints,
 output encoding, and hardware transport remain deterministic.

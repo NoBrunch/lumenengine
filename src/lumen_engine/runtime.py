@@ -65,9 +65,19 @@ class PerformanceRuntime:
         self._feedback_intensity: dict[str, float] = {}
         self._feedback_strobe: dict[str, float] = {}
         self._feedback_palette: dict[str, float] = {}
+        self._gesture_preferences: dict[str, dict[str, float]] = {}
         self._motion_phase = 0.0
         self._motion_clock_s: float | None = None
         self._calibration_overrides: dict[str, dict[str, float]] = {}
+        self._active_song_id: int | None = None
+        self._active_section: str | None = None
+        self._active_artist: str | None = None
+
+    def set_media_context(self, song_id: int | None, section: str | None = None, artist: str | None = None) -> None:
+        """Set the identity/section used when resolving learned preferences."""
+        self._active_song_id = song_id
+        self._active_section = section
+        self._active_artist = artist.casefold().strip() if artist else None
 
     def set_calibration_override(
         self, fixture_id: str, *, active: bool, pan_dmx: float = 0.0,
@@ -111,6 +121,7 @@ class PerformanceRuntime:
         self._feedback_intensity.clear()
         self._feedback_strobe.clear()
         self._feedback_palette.clear()
+        self._gesture_preferences.clear()
         for key, bias in biases.items():
             self.apply_feedback(
                 scope="fixture" if key != "overall" else "overall",
@@ -120,19 +131,76 @@ class PerformanceRuntime:
                 strobe_delta=bias.get("strobe", 0.0),
                 palette_delta=bias.get("palette", 0.0),
             )
+            gestures = bias.get("gestures")
+            if isinstance(gestures, dict):
+                self._gesture_preferences[key] = {
+                    str(name): clamp(float(value), -1.0, 1.0)
+                    for name, value in gestures.items()
+                }
 
-    def _feedback_for(self, fixture_id: str) -> tuple[float, float]:
-        return (
-            self._feedback_motion.get("overall", 0.0)
-            + self._feedback_motion.get(fixture_id, 0.0),
-            self._feedback_intensity.get("overall", 0.0)
-            + self._feedback_intensity.get(fixture_id, 0.0),
-            self._feedback_strobe.get("overall", 0.0) + self._feedback_strobe.get(fixture_id, 0.0),
-            self._feedback_palette.get("overall", 0.0) + self._feedback_palette.get(fixture_id, 0.0),
-        )
+    def _gesture_for_context(self, current: PerformanceDecision) -> Gesture:
+        keys = ["overall"]
+        if self._active_song_id is not None:
+            keys.append(f"song:{self._active_song_id}")
+            if self._active_section:
+                keys.append(f"song:{self._active_song_id}:section:{self._active_section}")
+        if self._active_artist:
+            keys.append(f"artist:{self._active_artist}")
+        scores: dict[str, float] = {}
+        for key in keys:
+            for name, score in self._gesture_preferences.get(key, {}).items():
+                scores[name] = scores.get(name, 0.0) + score
+        current_score = scores.get(current.gesture.value, 0.0)
+        if current_score >= -0.22:
+            return current.gesture
+        candidates = [
+            (score, name) for name, score in scores.items()
+            if name != current.gesture.value and score > 0.18
+        ]
+        if not candidates:
+            return current.gesture
+        return Gesture(max(candidates)[1])
+
+    def _feedback_for(self, fixture_id: str) -> tuple[float, float, float, float]:
+        keys = ["overall", fixture_id]
+        if self._active_song_id is not None:
+            song_key = f"song:{self._active_song_id}"
+            keys.append(song_key)
+            if self._active_section:
+                keys.append(f"{song_key}:section:{self._active_section}")
+            keys.append(f"{song_key}:fixture:{fixture_id}")
+        if self._active_artist:
+            keys.append(f"artist:{self._active_artist}")
+        return tuple(
+            clamp(sum(mapping.get(key, 0.0) for key in keys), -1.0, 1.0)
+            for mapping in (
+                self._feedback_motion,
+                self._feedback_intensity,
+                self._feedback_strobe,
+                self._feedback_palette,
+            )
+        )  # type: ignore[return-value]
 
     def step(self, observation: MusicalObservation) -> RuntimeFrame:
+        self._active_section = observation.section
         decision = self.expression.decide(observation)
+        learned_gesture = self._gesture_for_context(decision)
+        if learned_gesture is not decision.gesture:
+            targets = {
+                Gesture.BREATHE: self.expression.policy.room_high,
+                Gesture.CONVERGE: self.expression.policy.room_center,
+                Gesture.PULSE: self.expression.policy.room_center,
+                Gesture.SWEEP: self.expression.policy.room_wide,
+                Gesture.EXPAND: self.expression.policy.room_high,
+                Gesture.RELEASE: self.expression.policy.room_wide,
+                Gesture.HOLD: decision.target,
+            }
+            decision = replace(
+                decision,
+                gesture=learned_gesture,
+                target=targets[learned_gesture],
+                reason=f"Learned preference replaced {decision.gesture.value} with {learned_gesture.value} for this context.",
+            )
         elapsed = (
             None
             if self._last_timestamp_s is None

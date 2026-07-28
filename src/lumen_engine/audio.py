@@ -171,6 +171,18 @@ class RealtimeAudioAnalyzer:
         beat_confidence = beat_state.confidence
         beat_phase = (beat_state.bar_progress * 4.0) % 1.0
         novelty = clamp(0.65 * onset + 0.35 * abs(high - low), 0.0, 1.0)
+        # A lightweight section vocabulary gives feedback a temporal context
+        # even when Spotify supplies no audio-analysis sections. This is an
+        # observable heuristic, not a claim that the engine understands song
+        # form perfectly.
+        if loudness < 0.16:
+            section = "breakdown"
+        elif onset >= 0.78 and low >= 0.45:
+            section = "drop"
+        elif onset >= 0.42 and novelty >= 0.38:
+            section = "build"
+        else:
+            section = "groove"
         return MusicalObservation(
             timestamp_s=timestamp,
             loudness=loudness,
@@ -183,6 +195,8 @@ class RealtimeAudioAnalyzer:
             beat_pulse=clamp(self._beat_envelope, 0.0, 1.0),
             beat_confidence=beat_confidence,
             bpm=bpm,
+            section=section,
+            section_confidence=clamp(0.35 + 0.45 * beat_confidence + 0.20 * novelty, 0.0, 1.0),
             novelty=novelty,
         )
 

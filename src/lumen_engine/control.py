@@ -206,6 +206,7 @@ class OperatorExpressionEngine(ExpressionEngine):
             expression=state,
             target=target,
             brightness=brightness,
+            palette_hint=self.controls.palette,
             reason=reason,
         )
 
@@ -293,7 +294,24 @@ class LumenApplication:
             "brighter": (0.0, 0.25, 0.0, 0.0), "dimmer": (0.0, -0.25, 0.0, 0.0),
             "slower_side_arms": (-0.18, 0.0, 0.0, 0.0), "faster_side_arms": (0.18, 0.0, 0.0, 0.0),
             "cool_blue_purple": (0.0, 0.0, 0.0, -0.7), "warmer_color": (0.0, 0.0, 0.0, 0.7),
+            "liked_this": (0.08, 0.04, 0.0, 0.0), "hold_this": (0.06, 0.02, 0.0, 0.0),
+            "bad_timing": (-0.08, 0.0, 0.0, 0.0),
         }.get(label, (0.0, 0.0, 0.0, 0.0))
+
+    @staticmethod
+    def _feedback_gesture_effect(label: str, gesture: str | None) -> dict[str, float]:
+        preferred = {
+            "calm_down": "breathe", "decrease_movement": "breathe",
+            "too_busy": "breathe", "pick_it_up": "release",
+            "increase_movement": "sweep", "not_busy_enough": "sweep",
+        }.get(label)
+        if preferred:
+            return {preferred: 0.42}
+        if gesture and label in {"liked_this", "hold_this", "great_timing", "perfect_motion", "more_like_this", "great_transition"}:
+            return {gesture: 0.42}
+        if gesture and label in {"bad_timing", "too_busy"}:
+            return {gesture: -0.42}
+        return {}
 
     def _rebuild_feedback_biases(self) -> None:
         """Reconstruct preferences with recency decay and agreement confidence."""
@@ -310,17 +328,39 @@ class LumenApplication:
             keys_for_row = [key for key in keys_for_row if key]
             if not keys_for_row:
                 continue
+            song_id = row.get("song_id")
+            context_keys = list(keys_for_row)
+            if song_id is not None:
+                song_key = f"song:{song_id}"
+                context_keys.append(song_key)
+                song = self.memory.get_song(int(song_id))
+                if song:
+                    context_keys.extend(
+                        f"artist:{str(artist).casefold().strip()}"
+                        for artist in song.get("artists", ())
+                        if str(artist).strip()
+                    )
+                if row.get("section"):
+                    context_keys.append(f"{song_key}:section:{row['section']}")
+                if scope == "fixture" and row.get("fixture_id"):
+                    context_keys.append(f"{song_key}:fixture:{row['fixture_id']}")
             age_days = max(0.0, (now - float(row.get("created_unix_ms") or now)) / 86_400_000.0)
             decay = math.exp(-age_days / 21.0)
             motion, intensity, strobe, palette = self._feedback_effect(str(row.get("label", "")))
             weight = decay * min(1.0, abs(float(row.get("value") or 1.0)))
-            for key in keys_for_row:
-                bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0})
+            for key in context_keys:
+                bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0, "gestures": {}})
                 bucket["motion"] += motion * weight
                 bucket["intensity"] += intensity * weight
                 bucket["strobe"] = bucket.get("strobe", 0.0) + strobe * weight
                 bucket["palette"] = bucket.get("palette", 0.0) + palette * weight
                 bucket["weight"] += weight
+                gesture = str(row.get("gesture") or "")
+                gesture_deltas = self._feedback_gesture_effect(str(row.get("label", "")), gesture)
+                if gesture_deltas:
+                    gestures = bucket.setdefault("gestures", {})
+                    for gesture_name, gesture_delta in gesture_deltas.items():
+                        gestures[gesture_name] = gestures.get(gesture_name, 0.0) + gesture_delta * weight
                 counts[key] = counts.get(key, 0) + 1
         self._feedback_biases = {}
         for key, bucket in buckets.items():
@@ -330,6 +370,10 @@ class LumenApplication:
                 "intensity": clamp(bucket["intensity"] * confidence, -1.0, 1.0),
                 "strobe": clamp(bucket.get("strobe", 0.0) * confidence, -1.0, 1.0),
                 "palette": clamp(bucket.get("palette", 0.0) * confidence, -1.0, 1.0),
+                "gestures": {
+                    name: clamp(value * confidence, -1.0, 1.0)
+                    for name, value in bucket.get("gestures", {}).items()
+                },
             }
 
     def _read_settings(self) -> dict[str, Any]:
@@ -673,15 +717,11 @@ class LumenApplication:
                 min(2.6, max(2.2, self.rig.room.height_m * 0.45)),
             ),
         )
-        for key, bias in self._feedback_biases.items():
-            runtime.apply_feedback(
-                scope="fixture" if key != "overall" else "overall",
-                fixture_id=None if key == "overall" else key,
-                motion_delta=bias.get("motion", 0.0),
-                intensity_delta=bias.get("intensity", 0.0),
-                strobe_delta=bias.get("strobe", 0.0),
-                palette_delta=bias.get("palette", 0.0),
-            )
+        runtime.replace_feedback(self._feedback_biases)
+        runtime.set_media_context(
+            self.song_id, self.observation.section,
+            self.media.artists[0] if self.media and self.media.artists else None,
+        )
         for fixture_id, override in self._calibration_overrides.items():
             runtime.set_calibration_override(fixture_id, active=True, **override)
         return runtime
@@ -985,6 +1025,11 @@ class LumenApplication:
         key = f"{media.provider}:{media.provider_item_id}"
         count_play = key != self._last_media_key
         self.song_id = self.memory.remember_media(media, count_play=count_play)
+        if self._runtime is not None:
+            self._runtime.set_media_context(
+                self.song_id, self.observation.section,
+                media.artists[0] if media.artists else None,
+            )
         if count_play:
             self._last_media_key = key
             self._add_event("media", f"Now playing {media.display_name}")
@@ -1136,20 +1181,6 @@ class LumenApplication:
                 bias["intensity"] = clamp(bias["intensity"] + intensity_delta, -1.0, 1.0)
                 bias["strobe"] = clamp(bias.get("strobe", 0.0) + strobe_delta, -1.0, 1.0)
                 bias["palette"] = clamp(bias.get("palette", 0.0) + palette_delta, -1.0, 1.0)
-            if self._runtime is not None:
-                if not target_ids:
-                    self._runtime.apply_feedback(
-                        scope="overall", fixture_id=None,
-                        motion_delta=motion_delta, intensity_delta=intensity_delta,
-                        strobe_delta=strobe_delta, palette_delta=palette_delta,
-                    )
-                else:
-                    for target_id in target_ids:
-                        self._runtime.apply_feedback(
-                            scope="fixture", fixture_id=target_id,
-                            motion_delta=motion_delta, intensity_delta=intensity_delta,
-                            strobe_delta=strobe_delta, palette_delta=palette_delta,
-                        )
             if self.song_id is None:
                 media = self.media or MediaIdentity(
                     provider="line-in",
@@ -1159,6 +1190,8 @@ class LumenApplication:
                     is_playing=self.engine_mode != "standby",
                 )
                 self.song_id = self.memory.remember_media(media)
+            context_frame = self.frame
+            context_observation = self.observation
             feedback_id = self.memory.add_feedback(
                 Feedback(
                     song_id=self.song_id,
@@ -1168,19 +1201,41 @@ class LumenApplication:
                     note=note,
                     scope=scope,
                     fixture_id=group_id if scope == "group" else fixture_id,
+                    gesture=(context_frame.decision.gesture.value if context_frame else None),
+                    section=context_observation.section,
+                    energy=(context_frame.decision.expression.energy if context_frame else None),
+                    motion=(context_frame.decision.expression.motion if context_frame else None),
+                    tension=(context_frame.decision.expression.tension if context_frame else None),
+                    confidence=(context_frame.decision.confidence if context_frame else None),
+                    bpm=context_observation.bpm,
                 )
+            )
+            # Keep a compact semantic routine alongside the raw feedback. It
+            # is deliberately made from moments and decisions, not DMX bytes,
+            # so it can be resolved against a changed rig later.
+            song_feedback = self.memory.list_feedback(self.song_id)
+            self.memory.save_routine(
+                self.song_id,
+                routine_version=len(song_feedback),
+                payload={
+                    "kind": "semantic_feedback_routine",
+                    "moments": [
+                        {
+                            "position_ms": row.get("position_ms"),
+                            "label": row.get("label"),
+                            "gesture": row.get("gesture"),
+                            "section": row.get("section"),
+                            "scope": row.get("scope"),
+                            "fixture_id": row.get("fixture_id"),
+                        }
+                        for row in song_feedback[-128:]
+                    ],
+                    "palette_family": self.controls.palette,
+                },
             )
             self._rebuild_feedback_biases()
             if self._runtime is not None:
                 self._runtime.replace_feedback(self._feedback_biases)
-                # The current instruction should be obvious immediately;
-                # confidence/decay governs historical influence, not the
-                # operator's just-submitted correction.
-                if not target_ids:
-                    self._runtime.apply_feedback(scope="overall", fixture_id=None, motion_delta=motion_delta, intensity_delta=intensity_delta, strobe_delta=strobe_delta, palette_delta=palette_delta)
-                else:
-                    for target_id in target_ids:
-                        self._runtime.apply_feedback(scope="fixture", fixture_id=target_id, motion_delta=motion_delta, intensity_delta=intensity_delta, strobe_delta=strobe_delta, palette_delta=palette_delta)
             self._add_event("feedback", f"Recorded feedback: {label.replace('_', ' ')}")
             self._status_sequence += 1
         return {"feedback_id": feedback_id, "song_id": self.song_id}
@@ -1239,6 +1294,11 @@ class LumenApplication:
                     self.song_id = self.memory.remember_media(
                         media, count_play=count_play
                     )
+                    if self._runtime is not None:
+                        self._runtime.set_media_context(
+                            self.song_id, self.observation.section,
+                            media.artists[0] if media.artists else None,
+                        )
                     if count_play:
                         self._last_media_key = key
                         self._add_event("media", f"Now playing {media.display_name}")

@@ -195,10 +195,17 @@ during sustained silence.
 Feedback is both stored and used.
 
 Each feedback event has a label, value, timestamp, song, playback position,
+active gesture, inferred section, energy, motion, tension, confidence, BPM,
 scope, and optional fixture/group target. The label maps to movement,
 intensity, strobe, and palette deltas. For example, **Too busy** contributes a negative movement
 bias, while **Timing was right** contributes a smaller positive movement and
 intensity bias.
+
+Lumen aggregates this context at overall, fixture, song, artist, and song
+section levels. Positive feedback reinforces the gesture that was active;
+controls such as **Calm down**, **Pick it up**, and **More movement** also
+nominate gesture families. Timing feedback can cause a learned gesture to be
+replaced in the same context rather than changing every song globally.
 
 ### Decay
 
@@ -234,12 +241,14 @@ Use Memory → Recent teaching moments → Undo. Lumen deletes the event, rebuil
 the decayed/confidence-weighted profile, and replaces the running runtime's
 feedback profile.
 
-### Current learning boundary
+### Semantic routines and palette families
 
-The preference model currently learns motion and intensity tendencies. It does
-not yet automatically synthesize a complete semantic song routine, artist
-profile, or genre profile from feedback. Those can be built on top of the
-stored, weighted feedback history without changing the operator workflow.
+Every feedback event updates that song's semantic routine. The routine stores
+positions, labels, gestures, sections, and scopes—not raw DMX bytes—so it can
+be resolved against the current calibrated rig. The desktop and phone controls
+also expose Automatic, Party vivid, Cool blue/violet, Warm red/amber,
+Magenta/blue, Cyan/violet, and Red/amber palette families. Palette feedback
+shifts the family for the relevant learned context.
 
 ## Calibration
 

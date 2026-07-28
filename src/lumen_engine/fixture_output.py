@@ -37,7 +37,21 @@ def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> 
         (0.55, 0.08, 1.00),  # violet
         (0.95, 0.95, 1.00),  # white hit
     )
-    palette_index = int(max(0.0, decision.timestamp_s) / 8.0 + tension * 2.0) % len(palettes)
+    palette_modes = {
+        "auto": None,
+        "party_vivid": (0, 1, 2, 3, 4, 5, 6),
+        "cool": (1, 2, 5, 6),
+        "warm": (3, 4, 6, 0),
+        "magenta_blue": (0, 1, 5),
+        "cyan_violet": (1, 2, 5),
+        "red_amber": (3, 4, 6),
+    }
+    mode = palette_modes.get(decision.palette_hint)
+    palette_index = int(max(0.0, decision.timestamp_s) / 8.0 + tension * 2.0 + palette_bias * 2.0)
+    if mode:
+        palette_index = mode[palette_index % len(mode)]
+    else:
+        palette_index %= len(palettes)
     red, green, blue = palettes[palette_index]
     # Keep lower-energy passages atmospheric without washing out the palette.
     saturation = clamp(0.62 + 0.38 * energy + 0.10 * intimacy, 0.0, 1.0)

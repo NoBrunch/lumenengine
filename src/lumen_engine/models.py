@@ -261,6 +261,7 @@ class PerformanceDecision:
     brightness: float
     reason: str
     confidence: float
+    palette_hint: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,3 +273,13 @@ class Feedback:
     note: str | None = None
     scope: str = "overall"
     fixture_id: str | None = None
+    # Snapshot of what Lumen was doing when the operator pressed the control.
+    # These fields make a feedback moment explainable and learnable rather than
+    # a timeless scalar preference.
+    gesture: str | None = None
+    section: str | None = None
+    energy: float | None = None
+    motion: float | None = None
+    tension: float | None = None
+    confidence: float | None = None
+    bpm: float | None = None
