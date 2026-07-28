@@ -60,7 +60,7 @@ def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> 
     blue *= saturation
     if decision.gesture is Gesture.RELEASE:
         return 1.0, clamp(green + 0.28, 0, 1), clamp(blue + 0.18, 0, 1)
-    if energy < 0.46:
+    if energy < 0.46 and decision.palette_hint in {"auto", "cool", "cyan_violet"}:
         # Soft acoustic/jazz material defaults to cool, low-saturation color.
         red = 0.18
         green = 0.08
