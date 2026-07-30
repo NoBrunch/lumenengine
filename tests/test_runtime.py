@@ -181,6 +181,21 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(result.decision.routine, "counter_rotate")
 
+    def test_media_change_does_not_carry_previous_routine(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+        runtime.replace_feedback({"overall": {"routines": {"counter_rotate": 0.9}}})
+        observation = MusicalObservation(
+            timestamp_s=0.0, loudness=0.8, onset_strength=0.7,
+            low_energy=0.6, mid_energy=0.6, high_energy=0.5,
+            beat_pulse=1.0, beat_confidence=0.8, bpm=120.0,
+            section="groove", section_confidence=0.8,
+        )
+        self.assertEqual(runtime.step(observation).decision.routine, "counter_rotate")
+        runtime.set_media_context(99, "groove", "new artist")
+        runtime.replace_feedback({})
+        self.assertNotEqual(runtime.step(observation).decision.routine, "counter_rotate")
+
 
 if __name__ == "__main__":
     unittest.main()

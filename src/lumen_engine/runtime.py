@@ -78,6 +78,9 @@ class PerformanceRuntime:
 
     def set_media_context(self, song_id: int | None, section: str | None = None, artist: str | None = None) -> None:
         """Set the identity/section used when resolving learned preferences."""
+        if song_id != self._active_song_id:
+            self._active_routine = "auto"
+            self._active_routine_bar = None
         self._active_song_id = song_id
         self._active_section = section
         self._active_artist = artist.casefold().strip() if artist else None
@@ -126,6 +129,8 @@ class PerformanceRuntime:
         self._feedback_palette.clear()
         self._gesture_preferences.clear()
         self._routine_preferences.clear()
+        self._active_routine = "auto"
+        self._active_routine_bar = None
         for key, bias in biases.items():
             self.apply_feedback(
                 scope="fixture" if key != "overall" else "overall",
@@ -340,7 +345,7 @@ class PerformanceRuntime:
                         else previous[1],
                     )
                 if observation.loudness >= 0.02 and calibration_override is None:
-                        solution = self._performance_solution(
+                    solution = self._performance_solution(
                         fixture,
                         index,
                         observation,
