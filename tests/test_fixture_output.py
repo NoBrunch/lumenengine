@@ -6,6 +6,7 @@ from lumen_engine.dmx import DMXFrame
 from lumen_engine.fixture_output import (
     apply_auxiliary_fixture,
     apply_moving_head_profile,
+    expression_rgb,
 )
 from lumen_engine.models import (
     EulerXYZ,
@@ -39,6 +40,14 @@ def decision() -> PerformanceDecision:
 
 
 class FixtureOutputTests(unittest.TestCase):
+    def test_legacy_midnight_teal_is_an_explicit_palette_family(self) -> None:
+        selected = decision()
+        from dataclasses import replace
+        teal = expression_rgb(replace(selected, palette_hint="midnight_teal"))
+        automatic = expression_rgb(replace(selected, palette_hint="auto"))
+        self.assertNotEqual(teal, automatic)
+        self.assertGreater(teal[2], teal[0])
+
     def test_generic_rgbw_mover_writes_party_parrot_layout(self) -> None:
         fixture = FixturePatch(
             fixture_id="mover",

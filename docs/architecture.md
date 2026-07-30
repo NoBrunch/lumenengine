@@ -14,12 +14,14 @@ The current modules are:
 - `media`: optional recording identity providers
 - `memory`: private song and performance knowledge
 - `expression`: interpretable expressive state and gesture policy
+- `runtime`: phrase-level routine planner that holds a named motif across a
+  musical bar and applies contextual learned preferences
 - `spatial`: calibrated 3D inverse kinematics
 - `dmx`: frame realization and isolated outputs
 - `usb_dmx`: native libftdi and tty Open-DMX transports
 - `profiles`: fixture capabilities and channel layouts
 - `party_parrot`: read-only show database importer
-- `runtime`: one-way coordination of the above
+- `runtime`: coordination of the above, including beat/bar routine selection
 - `config`: validated room, fixture, calibration, and patch data
 
 ## Timing domains
@@ -72,9 +74,14 @@ Learning should initially adjust understandable preferences:
 
 Feedback context is captured with every operator action: song identity,
 playback position, active gesture, inferred section, expression values, BPM,
-scope, and fixture/group target. The runtime aggregates this memory at overall,
+scope, routine, and fixture/group target. The runtime aggregates this memory at overall,
 fixture, song, artist, and song-section levels. Semantic routines store these
 moments and are resolved into the current rig rather than replaying old DMX.
+
+The current phrase vocabulary is `breathe`, `fan_sweep`, `figure_eight`,
+`opposing_chase`, `beat_nod`, and `counter_rotate`. A routine is held for a
+bar; beat accents continue inside it. Positive feedback reinforces the active
+routine, while movement/timing corrections select or reject routine families.
 
 It should learn semantic decisions, not raw DMX bytes. Geometry, constraints,
 output encoding, and hardware transport remain deterministic.

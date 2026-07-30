@@ -246,7 +246,7 @@ feedback profile.
 Every feedback event updates that song's semantic routine. The routine stores
 positions, labels, gestures, sections, and scopes—not raw DMX bytes—so it can
 be resolved against the current calibrated rig. The desktop and phone controls
-also expose Automatic, Party vivid, Cool blue/violet, Warm red/amber,
+also expose Automatic, Party vivid, Midnight teal, Cool blue/violet, Warm red/amber,
 Magenta/blue, Cyan/violet, and Red/amber palette families. Palette feedback
 shifts the family for the relevant learned context.
 
@@ -256,7 +256,9 @@ Moving-head strobes are off by default, matching Party Parrot's normal mover
 interpretation. The center multi-effect retains the beat-flash role, while its
 ball and arm emitters exchange saturated palette colors on the beat. High-level
 gesture changes are held for a readable phrase instead of being allowed to
-alternate on adjacent audio packets. Compound motion uses the detected bar
+alternate on adjacent audio packets. A named routine (`breathe`, `fan_sweep`,
+`figure_eight`, `opposing_chase`, `beat_nod`, or `counter_rotate`) is held for
+each bar and can be learned from contextual feedback. Compound motion uses the detected bar
 phase when available, keeping sweeps, arm chases, and body rotation on the same
 tempo grid as the movers.
 
@@ -438,8 +440,8 @@ commit. At minimum update:
   preferences.
 - **Performance decision**: The explainable lighting choice produced from an
   observation and controls.
-- **Routine**: A future-facing semantic performance description that can be
-  adapted to the installed rig rather than replaying fixed DMX.
+- **Routine**: A named phrase-level performance motif adapted to the installed
+  rig rather than replaying fixed DMX.
 
 ### Lighting and DMX
 

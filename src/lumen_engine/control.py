@@ -53,6 +53,7 @@ from lumen_engine.models import (
     clamp,
 )
 from lumen_engine.profiles import PARTY_PARROT_PROFILES, profile_summary
+from lumen_engine.fixture_output import PALETTE_FAMILIES
 from lumen_engine.runtime import PerformanceRuntime, RuntimeFrame
 from lumen_engine.spatial import SpatialTargetingEngine, UnreachableTargetError
 from lumen_engine.usb_dmx import OpenDmxUsbOutput, describe_open_dmx_environment
@@ -94,7 +95,7 @@ class OperatorControls:
             self.blackout = bool(values["blackout"])
         if "palette" in values:
             palette = str(values["palette"]).strip()
-            if palette:
+            if palette in PALETTE_FAMILIES:
                 self.palette = palette[:64]
 
 
@@ -313,6 +314,22 @@ class LumenApplication:
             return {gesture: -0.42}
         return {}
 
+    @staticmethod
+    def _feedback_routine_effect(label: str, routine: str | None) -> dict[str, float]:
+        preferred = {
+            "calm_down": "breathe", "decrease_movement": "breathe",
+            "too_busy": "breathe", "pick_it_up": "opposing_chase",
+            "increase_movement": "opposing_chase", "not_busy_enough": "opposing_chase",
+            "faster_side_arms": "counter_rotate", "slower_side_arms": "fan_sweep",
+        }.get(label)
+        if preferred:
+            return {preferred: 0.50}
+        if routine and label in {"liked_this", "hold_this", "great_timing", "perfect_motion", "more_like_this", "great_transition"}:
+            return {routine: 0.50}
+        if routine and label in {"bad_timing", "too_busy"}:
+            return {routine: -0.50}
+        return {}
+
     def _rebuild_feedback_biases(self) -> None:
         """Reconstruct preferences with recency decay and agreement confidence."""
         rows = self.memory.all_feedback()
@@ -349,7 +366,7 @@ class LumenApplication:
             motion, intensity, strobe, palette = self._feedback_effect(str(row.get("label", "")))
             weight = decay * min(1.0, abs(float(row.get("value") or 1.0)))
             for key in context_keys:
-                bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0, "gestures": {}})
+                bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0, "gestures": {}, "routines": {}})
                 bucket["motion"] += motion * weight
                 bucket["intensity"] += intensity * weight
                 bucket["strobe"] = bucket.get("strobe", 0.0) + strobe * weight
@@ -361,6 +378,19 @@ class LumenApplication:
                     gestures = bucket.setdefault("gestures", {})
                     for gesture_name, gesture_delta in gesture_deltas.items():
                         gestures[gesture_name] = gestures.get(gesture_name, 0.0) + gesture_delta * weight
+                routine = str(row.get("routine") or "")
+                if not routine:
+                    routine = {
+                        "breathe": "breathe", "release": "opposing_chase",
+                        "sweep": "fan_sweep", "expand": "fan_sweep",
+                        "pulse": "beat_nod",
+                    }.get(gesture, "")
+                routine_deltas = self._feedback_routine_effect(
+                    str(row.get("label", "")), routine
+                )
+                routines = bucket.setdefault("routines", {})
+                for routine_name, routine_delta in routine_deltas.items():
+                    routines[routine_name] = routines.get(routine_name, 0.0) + routine_delta * weight
                 counts[key] = counts.get(key, 0) + 1
         self._feedback_biases = {}
         for key, bucket in buckets.items():
@@ -373,6 +403,10 @@ class LumenApplication:
                 "gestures": {
                     name: clamp(value * confidence, -1.0, 1.0)
                     for name, value in bucket.get("gestures", {}).items()
+                },
+                "routines": {
+                    name: clamp(value * confidence, -1.0, 1.0)
+                    for name, value in bucket.get("routines", {}).items()
                 },
             }
 
@@ -600,6 +634,7 @@ class LumenApplication:
                         frame.decision,
                         song_id=self.song_id,
                         position_ms=self._media_position_ms(),
+                        observation=observation,
                     )
             self._status_sequence += 1
         self._poll_spotify_if_due()
@@ -1208,6 +1243,7 @@ class LumenApplication:
                     tension=(context_frame.decision.expression.tension if context_frame else None),
                     confidence=(context_frame.decision.confidence if context_frame else None),
                     bpm=context_observation.bpm,
+                    routine=(context_frame.decision.routine if context_frame else None),
                 )
             )
             # Keep a compact semantic routine alongside the raw feedback. It
@@ -1224,6 +1260,7 @@ class LumenApplication:
                             "position_ms": row.get("position_ms"),
                             "label": row.get("label"),
                             "gesture": row.get("gesture"),
+                            "routine": row.get("routine"),
                             "section": row.get("section"),
                             "scope": row.get("scope"),
                             "fixture_id": row.get("fixture_id"),

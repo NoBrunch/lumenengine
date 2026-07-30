@@ -262,6 +262,10 @@ class PerformanceDecision:
     reason: str
     confidence: float
     palette_hint: str = "auto"
+    # A phrase-level semantic routine.  This is intentionally separate from
+    # the broad gesture so the resolver can keep one musical idea coherent for
+    # several bars while still changing individual beat accents.
+    routine: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,3 +287,4 @@ class Feedback:
     tension: float | None = None
     confidence: float | None = None
     bpm: float | None = None
+    routine: str | None = None

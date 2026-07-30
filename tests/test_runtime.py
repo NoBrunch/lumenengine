@@ -132,6 +132,55 @@ class RuntimeTests(unittest.TestCase):
         self.assertGreater(max(center_arm_2) - min(center_arm_2), 190)
         self.assertGreater(max(center_strobe), 150)
 
+    def test_phrase_routine_is_stable_within_bar_and_changes_between_bars(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+        routines = []
+        for index in range(96):
+            timestamp = index / 12.0
+            result = runtime.step(
+                MusicalObservation(
+                    timestamp_s=timestamp,
+                    loudness=0.82,
+                    onset_strength=0.72 if index % 3 == 0 else 0.25,
+                    low_energy=0.65,
+                    mid_energy=0.60,
+                    high_energy=0.55,
+                    bar_phase=((index / 3.0) % 4.0) / 4.0,
+                    beat_pulse=1.0 if index % 3 == 0 else 0.15,
+                    beat_confidence=0.9,
+                    bpm=120.0,
+                    section="drop",
+                    section_confidence=0.9,
+                )
+            )
+            routines.append(result.decision.routine)
+        self.assertEqual(len(set(routines[:24])), 1)
+        self.assertGreaterEqual(len(set(routines)), 3)
+
+    def test_learned_routine_preference_reaches_decision(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+        runtime.replace_feedback({"overall": {"motion": 0.0, "intensity": 0.0,
+                                                "strobe": 0.0, "palette": 0.0,
+                                                "routines": {"counter_rotate": 0.9}}})
+        result = runtime.step(
+            MusicalObservation(
+                timestamp_s=0.0,
+                loudness=0.8,
+                onset_strength=0.7,
+                low_energy=0.6,
+                mid_energy=0.6,
+                high_energy=0.5,
+                beat_pulse=1.0,
+                beat_confidence=0.8,
+                bpm=120.0,
+                section="groove",
+                section_confidence=0.8,
+            )
+        )
+        self.assertEqual(result.decision.routine, "counter_rotate")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ import sqlite3
 import time
 from typing import Any
 
-from lumen_engine.models import Feedback, MediaIdentity, PerformanceDecision
+from lumen_engine.models import Feedback, MediaIdentity, MusicalObservation, PerformanceDecision
 
 SCHEMA_VERSION = 1
 
@@ -77,6 +77,7 @@ class SongMemoryStore:
                     tension REAL,
                     confidence REAL,
                     bpm REAL,
+                    routine TEXT,
                     created_unix_ms INTEGER NOT NULL
                 );
 
@@ -121,7 +122,7 @@ class SongMemoryStore:
                 ("gesture", "TEXT"), ("section", "TEXT"),
                 ("energy", "REAL"), ("motion", "REAL"),
                 ("tension", "REAL"), ("confidence", "REAL"),
-                ("bpm", "REAL"),
+                ("bpm", "REAL"), ("routine", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE feedback ADD COLUMN {name} {definition}")
@@ -227,8 +228,8 @@ class SongMemoryStore:
                 INSERT INTO feedback(
                     song_id, position_ms, label, value, note, scope,
                     fixture_id, gesture, section, energy, motion, tension,
-                    confidence, bpm, created_unix_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    confidence, bpm, routine, created_unix_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feedback.song_id,
@@ -245,6 +246,7 @@ class SongMemoryStore:
                     feedback.tension,
                     feedback.confidence,
                     feedback.bpm,
+                    feedback.routine,
                     int(time.time() * 1000),
                 ),
             )
@@ -255,7 +257,7 @@ class SongMemoryStore:
             rows = connection.execute(
                 """
                 SELECT id, position_ms, label, value, note, scope, fixture_id,
-                       gesture, section, energy, motion, tension, confidence, bpm,
+                       gesture, section, energy, motion, tension, confidence, bpm, routine,
                        created_unix_ms
                 FROM feedback WHERE song_id=?
                 ORDER BY COALESCE(position_ms, -1), created_unix_ms
@@ -268,7 +270,7 @@ class SongMemoryStore:
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 "SELECT id, song_id, position_ms, label, value, note, scope, fixture_id, "
-                "gesture, section, energy, motion, tension, confidence, bpm, created_unix_ms "
+                "gesture, section, energy, motion, tension, confidence, bpm, routine, created_unix_ms "
                 "FROM feedback"
             ).fetchall()
         return [dict(row) for row in rows]
@@ -400,9 +402,12 @@ class SongMemoryStore:
         decision: PerformanceDecision,
         song_id: int | None = None,
         position_ms: int | None = None,
+        observation: MusicalObservation | None = None,
     ) -> int:
         payload = asdict(decision)
         payload["gesture"] = decision.gesture.value
+        if observation is not None:
+            payload["observation"] = asdict(observation)
         with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
                 """

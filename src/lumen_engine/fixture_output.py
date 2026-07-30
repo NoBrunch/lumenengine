@@ -16,6 +16,22 @@ from lumen_engine.models import (
 from lumen_engine.profiles import party_parrot_profile
 
 
+# One authoritative palette vocabulary shared by the desktop controls and the
+# DMX resolver.  ``midnight_teal`` is retained as a real family because it was
+# already persisted in this installation; it is not allowed to silently fall
+# through to automatic selection.
+PALETTE_FAMILIES: dict[str, tuple[int, ...] | None] = {
+    "auto": None,
+    "party_vivid": (0, 1, 2, 3, 4, 5, 6),
+    "midnight_teal": (1, 2, 5),
+    "cool": (1, 2, 5, 6),
+    "warm": (3, 4, 6, 0),
+    "magenta_blue": (0, 1, 5),
+    "cyan_violet": (1, 2, 5),
+    "red_amber": (3, 4, 6),
+}
+
+
 def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> tuple[float, float, float]:
     """Resolve Lumen expressions through Party Parrot's saturated show palette.
 
@@ -37,16 +53,7 @@ def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> 
         (0.55, 0.08, 1.00),  # violet
         (0.95, 0.95, 1.00),  # white hit
     )
-    palette_modes = {
-        "auto": None,
-        "party_vivid": (0, 1, 2, 3, 4, 5, 6),
-        "cool": (1, 2, 5, 6),
-        "warm": (3, 4, 6, 0),
-        "magenta_blue": (0, 1, 5),
-        "cyan_violet": (1, 2, 5),
-        "red_amber": (3, 4, 6),
-    }
-    mode = palette_modes.get(decision.palette_hint)
+    mode = PALETTE_FAMILIES.get(decision.palette_hint)
     palette_index = int(max(0.0, decision.timestamp_s) / 8.0 + tension * 2.0 + palette_bias * 2.0)
     if mode:
         palette_index = mode[palette_index % len(mode)]

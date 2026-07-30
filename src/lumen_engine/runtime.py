@@ -66,6 +66,9 @@ class PerformanceRuntime:
         self._feedback_strobe: dict[str, float] = {}
         self._feedback_palette: dict[str, float] = {}
         self._gesture_preferences: dict[str, dict[str, float]] = {}
+        self._routine_preferences: dict[str, dict[str, float]] = {}
+        self._active_routine = "auto"
+        self._active_routine_bar: int | None = None
         self._motion_phase = 0.0
         self._motion_clock_s: float | None = None
         self._calibration_overrides: dict[str, dict[str, float]] = {}
@@ -122,6 +125,7 @@ class PerformanceRuntime:
         self._feedback_strobe.clear()
         self._feedback_palette.clear()
         self._gesture_preferences.clear()
+        self._routine_preferences.clear()
         for key, bias in biases.items():
             self.apply_feedback(
                 scope="fixture" if key != "overall" else "overall",
@@ -137,6 +141,56 @@ class PerformanceRuntime:
                     str(name): clamp(float(value), -1.0, 1.0)
                     for name, value in gestures.items()
                 }
+            routines = bias.get("routines")
+            if isinstance(routines, dict):
+                self._routine_preferences[key] = {
+                    str(name): clamp(float(value), -1.0, 1.0)
+                    for name, value in routines.items()
+                }
+
+    def _routine_for_context(self, decision: PerformanceDecision, observation: MusicalObservation) -> str:
+        """Choose one phrase motif and hold it until the next musical bar.
+
+        The old implementation selected a gesture, then let each fixture infer
+        a pattern from process time.  This made the rig look busy but made the
+        phrase impossible to learn.  A routine is now selected once per bar
+        from the section/energy state and contextual operator preferences.
+        """
+        bpm = observation.bpm or 120.0
+        bar = math.floor(max(0.0, observation.timestamp_s) * bpm / 60.0 / 4.0)
+        if self._active_routine_bar == bar and self._active_routine != "auto":
+            return self._active_routine
+        keys = ["overall"]
+        if self._active_song_id is not None:
+            keys.append(f"song:{self._active_song_id}")
+            if self._active_section:
+                keys.append(f"song:{self._active_song_id}:section:{self._active_section}")
+        if self._active_artist:
+            keys.append(f"artist:{self._active_artist}")
+        learned: dict[str, float] = {}
+        for key in keys:
+            for name, score in self._routine_preferences.get(key, {}).items():
+                learned[name] = learned.get(name, 0.0) + score
+        if learned:
+            best_name, best_score = max(learned.items(), key=lambda item: item[1])
+            if best_score >= 0.24:
+                self._active_routine = best_name
+                self._active_routine_bar = bar
+                return best_name
+
+        if observation.loudness < 0.20 or decision.expression.energy < 0.24:
+            routine = "breathe"
+        elif observation.section == "build":
+            routine = "fan_sweep"
+        elif observation.section == "drop" or decision.expression.energy >= 0.70:
+            routine = ("opposing_chase", "beat_nod", "counter_rotate", "figure_eight")[bar % 4]
+        elif decision.expression.motion >= 0.42:
+            routine = ("figure_eight", "opposing_chase", "fan_sweep")[bar % 3]
+        else:
+            routine = "breathe"
+        self._active_routine = routine
+        self._active_routine_bar = bar
+        return routine
 
     def _gesture_for_context(self, current: PerformanceDecision) -> Gesture:
         keys = ["overall"]
@@ -202,6 +256,12 @@ class PerformanceRuntime:
                 reason=f"Learned preference replaced {decision.gesture.value} with {learned_gesture.value} for this context.",
             )
             self.expression.accept_gesture_override(learned_gesture, observation.timestamp_s)
+        routine = self._routine_for_context(decision, observation)
+        decision = replace(
+            decision,
+            routine=routine,
+            reason=f"{decision.reason} Phrase routine: {routine.replace('_', ' ')}.",
+        )
         elapsed = (
             None
             if self._last_timestamp_s is None
@@ -280,7 +340,7 @@ class PerformanceRuntime:
                         else previous[1],
                     )
                 if observation.loudness >= 0.02 and calibration_override is None:
-                    solution = self._performance_solution(
+                        solution = self._performance_solution(
                         fixture,
                         index,
                         observation,
@@ -518,19 +578,25 @@ class PerformanceRuntime:
             envelope *= 0.66
         elif decision.gesture is Gesture.BREATHE:
             envelope *= 0.58
-        mode = int((observation.timestamp_s * (bpm or 120.0) / 60.0 / 4.0)) % 4
-        if mode == 0:  # figure eight: a fast vertical harmonic over a pan loop
+        routine = decision.routine
+        if routine == "figure_eight":  # fast vertical harmonic over a pan loop
             pan_motion = math.sin(phase)
             tilt_motion = math.sin(phase * 2.0 + index * 0.6)
-        elif mode == 1:  # broad circle with fixture-to-fixture phase opposition
+        elif routine == "opposing_chase":  # broad circle with fixture opposition
             pan_motion = math.sin(phase + index * math.pi)
             tilt_motion = math.cos(phase + index * math.pi)
-        elif mode == 2:  # smooth pan sweep with a smaller tilt breathe
+        elif routine == "fan_sweep":  # smooth pan sweep with a smaller tilt breathe
             pan_motion = math.sin(phase)
             tilt_motion = math.sin(phase * 0.5 + index)
-        else:  # beat nods and alternating sides
+        elif routine == "beat_nod":  # beat nods and alternating sides
             pan_motion = math.sin(phase * 0.5 + index * math.pi)
             tilt_motion = math.sin(phase * 2.0 + observation.beat_phase * math.tau)
+        elif routine == "counter_rotate":
+            pan_motion = math.cos(phase + index * math.pi)
+            tilt_motion = -math.sin(phase * 0.75 + index * 0.8)
+        else:  # breathe/unknown: slow, spacious movement
+            pan_motion = math.sin(phase * 0.45 + index * 0.7)
+            tilt_motion = math.sin(phase * 0.35 + index)
         pan_normalized = 0.5 + envelope * 0.47 * pan_motion
         tilt_normalized = 0.5 + envelope * 0.44 * tilt_motion
         if observation.beat_pulse > 0.02:
