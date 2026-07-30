@@ -28,7 +28,10 @@ class ExpressionPolicy:
     room_center: Vec3 = Vec3(0.0, 0.0, 1.2)
     room_high: Vec3 = Vec3(0.0, 0.0, 2.4)
     room_wide: Vec3 = Vec3(2.0, 0.0, 1.4)
-    minimum_gesture_hold_s: float = 0.8
+    # Hold a visual idea long enough for a mechanical fixture to complete a
+    # readable phrase. Beat accents remain continuous; only the high-level
+    # routine changes are rate-limited here.
+    minimum_gesture_hold_s: float = 1.8
     release_onset_threshold: float = 0.68
     high_energy_threshold: float = 0.48
     quiet_threshold: float = 0.16
@@ -113,7 +116,7 @@ class ExpressionEngine:
         )
         is_build = observation.section == "build" and state.tension >= 0.42
 
-        if is_release and (can_change or self._last_gesture != Gesture.RELEASE):
+        if is_release and can_change:
             gesture = Gesture.RELEASE
             target = self.policy.room_wide
             reason = (
@@ -176,3 +179,8 @@ class ExpressionEngine:
         """Allow the next observation to reconsider the current visual idea."""
 
         self._last_gesture_at = float("-inf")
+
+    def accept_gesture_override(self, gesture: Gesture, timestamp_s: float) -> None:
+        """Make a learned routine replacement part of the state machine."""
+        self._last_gesture = gesture
+        self._last_gesture_at = timestamp_s

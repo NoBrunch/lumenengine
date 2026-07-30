@@ -201,6 +201,7 @@ class PerformanceRuntime:
                 target=targets[learned_gesture],
                 reason=f"Learned preference replaced {decision.gesture.value} with {learned_gesture.value} for this context.",
             )
+            self.expression.accept_gesture_override(learned_gesture, observation.timestamp_s)
         elapsed = (
             None
             if self._last_timestamp_s is None
@@ -525,8 +526,7 @@ class PerformanceRuntime:
             pan_motion = math.sin(phase + index * math.pi)
             tilt_motion = math.cos(phase + index * math.pi)
         elif mode == 2:  # smooth pan sweep with a smaller tilt breathe
-            pan_motion = 2.0 * ((phase / math.tau + 0.5) % 1.0) - 1.0
-            pan_motion = 2.0 * abs(pan_motion) - 1.0
+            pan_motion = math.sin(phase)
             tilt_motion = math.sin(phase * 0.5 + index)
         else:  # beat nods and alternating sides
             pan_motion = math.sin(phase * 0.5 + index * math.pi)
@@ -536,8 +536,8 @@ class PerformanceRuntime:
         if observation.beat_pulse > 0.02:
             pan_normalized += (
                 1.0 if (beat_index + index) % 2 else -1.0
-            ) * 0.08 * observation.beat_pulse * envelope
-            tilt_normalized += 0.07 * observation.beat_pulse * envelope
+            ) * 0.045 * observation.beat_pulse * envelope
+            tilt_normalized += 0.035 * observation.beat_pulse * envelope
 
         calibration = fixture.calibration
         pan = calibration.pan_min_deg + pan_normalized * (calibration.pan_max_deg - calibration.pan_min_deg)

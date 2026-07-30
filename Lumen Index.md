@@ -250,6 +250,16 @@ also expose Automatic, Party vivid, Cool blue/violet, Warm red/amber,
 Magenta/blue, Cyan/violet, and Red/amber palette families. Palette feedback
 shifts the family for the relevant learned context.
 
+### Beat and motion behavior
+
+Moving-head strobes are off by default, matching Party Parrot's normal mover
+interpretation. The center multi-effect retains the beat-flash role, while its
+ball and arm emitters exchange saturated palette colors on the beat. High-level
+gesture changes are held for a readable phrase instead of being allowed to
+alternate on adjacent audio packets. Compound motion uses the detected bar
+phase when available, keeping sweeps, arm chases, and body rotation on the same
+tempo grid as the movers.
+
 ## Calibration
 
 Open Room & rig on the desktop PC and select a moving head.

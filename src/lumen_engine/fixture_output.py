@@ -58,8 +58,8 @@ def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> 
     red *= saturation
     green *= saturation
     blue *= saturation
-    if decision.gesture is Gesture.RELEASE:
-        return 1.0, clamp(green + 0.28, 0, 1), clamp(blue + 0.18, 0, 1)
+    # Release changes movement/brightness, not color to white. This keeps a
+    # release from being mistaken for a strobe hit.
     if energy < 0.46 and decision.palette_hint in {"auto", "cool", "cyan_violet"}:
         # Soft acoustic/jazz material defaults to cool, low-saturation color.
         red = 0.18
@@ -105,10 +105,10 @@ def apply_moving_head_profile(
         _set_relative(frame, fixture.universe, fixture.address, channels["movement_speed"], speed)
         beat_pulse = 0.0 if observation is None else observation.beat_pulse
         strobe = (
-            round(clamp(70 + 150 * beat_pulse + 80 * strobe_feedback, 0.0, 255.0))
+            round(clamp(80 + 135 * beat_pulse + 60 * strobe_feedback, 0.0, 255.0))
             if (
                 idle_amount < 1.0
-                and strobe_feedback > -0.2
+                and strobe_feedback > 0.25
                 and beat_pulse >= 0.78
                 and decision.expression.energy >= 0.70
             )
@@ -239,7 +239,14 @@ def _apply_generic_multi_effect(
     motion_scale = clamp(0.35 + 0.90 * activity, 0.30, 1.0)
     if decision.gesture is Gesture.BREATHE:
         motion_scale *= 0.56
-    motion_phase = timestamp * (observation.bpm or 120.0) / 60.0 * math.tau / 4.0
+    # Use the detected bar phase when available so the compound fixture is
+    # locked to the same beat grid as the movers instead of free-running from
+    # the process clock.
+    motion_phase = (
+        bar_phase * math.tau
+        if beat_confidence >= 0.12
+        else timestamp * (observation.bpm or 120.0) / 60.0 * math.tau / 4.0
+    )
     if pattern == 0:  # chase: each arm follows the other by a quarter cycle
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase), math.sin(motion_phase + math.pi / 2)
     elif pattern == 1:  # true opposing sweep
@@ -258,6 +265,9 @@ def _apply_generic_multi_effect(
     # This fixture's CH2 is inverted: zero is fastest and 255 is slowest.
     body_speed = round(235.0 - 210.0 * activity)
     strobe = 0
+    # The center unit keeps Party Parrot's beat-flash behavior; mover strobes
+    # remain explicitly off unless requested. This is the fixture that owns
+    # the center beat chase, rather than every light flashing together.
     if beat_pulse >= 0.78 and energy >= 0.70 and strobe_feedback > -0.2:
         strobe = round(clamp(70.0 + 150.0 * beat_pulse * activity + 80.0 * strobe_feedback, 0.0, 255.0))
 
@@ -279,8 +289,9 @@ def _apply_generic_multi_effect(
         "strip_speed": 0,
         "macro": 0,
     }
-    rgbw = rgb_to_rgbw(expression_rgb(decision, palette_bias))
     even_beat = beat_index % 2 == 0
+    ball_rgbw = rgb_to_rgbw(expression_rgb(decision, palette_bias + (0.45 if even_beat else -0.45)))
+    arm_rgbw = rgb_to_rgbw(expression_rgb(decision, palette_bias + (-0.45 if even_beat else 0.45)))
     contrast = beat_pulse * (0.45 + 0.45 * activity)
     ball_scale = clamp(
         0.92 + (0.18 if even_beat else -0.72) * contrast,
@@ -292,11 +303,11 @@ def _apply_generic_multi_effect(
         0.18,
         1.0,
     )
-    for prefix, scale in (
-        ("magic_ball", ball_scale),
-        ("arm_beams", arm_scale),
+    for prefix, scale, color_values in (
+        ("magic_ball", ball_scale, ball_rgbw),
+        ("arm_beams", arm_scale, arm_rgbw),
     ):
-        for color_name, value in zip(("red", "green", "blue", "white"), rgbw):
+        for color_name, value in zip(("red", "green", "blue", "white"), color_values):
             values[f"{prefix}_{color_name}"] = round(value * scale)
 
     red, green, _blue = expression_rgb(decision)
