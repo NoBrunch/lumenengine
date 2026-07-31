@@ -25,11 +25,11 @@
 
 ## Milestone 2 — dependable live perception
 
-- Improve beat/downbeat tracking
-- Add bar and phrase state
+- Improve beat/downbeat tracking (harmonic retune protection and silence reset implemented; downbeat refinement remains)
+- Add bar and phrase state (two-bar routine clock implemented)
 - Track spectral flux and rhythmic density
 - Detect silence, restart, pause, and source loss
-- Record compact feature timelines, not raw audio by default
+- Record compact feature timelines, not raw audio by default (implemented at 2 Hz)
 - Reconcile Spotify progress with the sample clock
 
 ## Milestone 3 — expression laboratory

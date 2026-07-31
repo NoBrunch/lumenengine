@@ -372,7 +372,7 @@ class SpectralTempoTracker:
         quality = clamp((best_score - 0.04) / 0.34, 0.0, 1.0)
         # A strong half-time harmonic is normal in four-on-the-floor music;
         # it should modestly temper confidence rather than prevent lock.
-        distinctness = 0.82 + 0.18 * clamp(prominence / 0.14, 0.0, 1.0)
+        distinctness = 0.45 + 0.55 * clamp(prominence / 0.14, 0.0, 1.0)
         confidence = clamp(evidence * quality * distinctness, 0.0, 1.0)
         self._confidence = 0.45 * self._confidence + 0.55 * confidence
 
@@ -386,6 +386,18 @@ class SpectralTempoTracker:
             self._pending_bpm = None
             self._pending_count = 0
             return
+        current_lag = self.updates_per_second * 60.0 / self._bpm
+        current_offset = min(
+            range(len(lags)),
+            key=lambda index: abs(lags[index] - current_lag),
+        )
+        # Do not jump between octave/harmonic rivals unless the new peak is
+        # decisively better than the correlation at the locked tempo.
+        if best_score - correlations[current_offset] < 0.065:
+            self._pending_bpm = None
+            self._pending_count = 0
+            self._confidence *= 0.92
+            return
         if (
             self._pending_bpm is not None
             and abs(candidate_bpm - self._pending_bpm)
@@ -397,8 +409,9 @@ class SpectralTempoTracker:
         else:
             self._pending_bpm = candidate_bpm
             self._pending_count = 1
-        if self._pending_count >= 4 and confidence >= 0.25:
+        if self._pending_count >= 8 and confidence >= 0.45:
             self._bpm = self._pending_bpm
+            self._confidence = min(self._confidence, confidence * 0.55)
             self._pending_bpm = None
             self._pending_count = 0
 

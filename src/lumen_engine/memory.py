@@ -13,7 +13,7 @@ from typing import Any
 
 from lumen_engine.models import Feedback, MediaIdentity, MusicalObservation, PerformanceDecision
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SongMemoryStore:
@@ -104,6 +104,18 @@ class SongMemoryStore:
                     ON feedback(song_id, position_ms);
                 CREATE INDEX IF NOT EXISTS decisions_song_position
                     ON decisions(song_id, position_ms);
+
+                CREATE TABLE IF NOT EXISTS performance_samples (
+                    id INTEGER PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    song_id INTEGER REFERENCES songs(id) ON DELETE SET NULL,
+                    position_ms INTEGER,
+                    created_unix_ms INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS performance_samples_session_time
+                    ON performance_samples(session_id, created_unix_ms);
                 """
             )
             columns = {
@@ -428,6 +440,58 @@ class SongMemoryStore:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def log_performance_sample(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        *,
+        song_id: int | None = None,
+        position_ms: int | None = None,
+    ) -> int:
+        """Persist a compact time-series sample for last-run diagnosis."""
+        with closing(self._connect()) as connection, connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO performance_samples(
+                    session_id, song_id, position_ms, created_unix_ms, payload_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    song_id,
+                    position_ms,
+                    int(time.time() * 1000),
+                    json.dumps(payload, sort_keys=True),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def latest_performance_session(self, limit: int = 2400) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT session_id FROM performance_samples
+                ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return []
+            rows = connection.execute(
+                """
+                SELECT id, session_id, song_id, position_ms, created_unix_ms,
+                       payload_json
+                FROM performance_samples WHERE session_id=?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (row["session_id"], max(1, int(limit))),
+            ).fetchall()
+        result = []
+        for sample in reversed(rows):
+            item = dict(sample)
+            item["payload"] = json.loads(item.pop("payload_json"))
+            result.append(item)
+        return result
 
     @staticmethod
     def _fallback_identity(media: MediaIdentity) -> str:

@@ -102,6 +102,42 @@ class FixtureOutputTests(unittest.TestCase):
         self.assertTrue(any(frame.get_channel(0, channel) for channel in (15, 16)))
         self.assertEqual(frame.get_channel(0, 19), 0)  # no internal macro
 
+    def test_multi_effect_motion_consumes_phrase_routine(self) -> None:
+        from dataclasses import replace
+
+        fixture = ProfileFixturePatch(
+            fixture_id="multi",
+            name="Multi",
+            profile_key="generic_multi_effect_19ch",
+            universe=0,
+            address=1,
+            position_m=Vec3(0, 0, 2),
+            housing_rotation=EulerXYZ(),
+        )
+        observation = MusicalObservation(
+            timestamp_s=3.0,
+            loudness=0.8,
+            onset_strength=0.3,
+            low_energy=0.5,
+            mid_energy=0.4,
+            high_energy=0.2,
+            bar_phase=0.37,
+            beat_confidence=0.9,
+            bpm=120.0,
+        )
+        opposing = DMXFrame()
+        fan = DMXFrame()
+        apply_auxiliary_fixture(
+            opposing, fixture, replace(decision(), routine="opposing_chase"), observation
+        )
+        apply_auxiliary_fixture(
+            fan, fixture, replace(decision(), routine="fan_sweep"), observation
+        )
+        self.assertNotEqual(
+            (opposing.get_channel(0, 3), opposing.get_channel(0, 4)),
+            (fan.get_channel(0, 3), fan.get_channel(0, 4)),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

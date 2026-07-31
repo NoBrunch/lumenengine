@@ -18,6 +18,7 @@ import json
 import math
 import os
 from pathlib import Path
+import queue
 import shutil
 import socket
 import subprocess
@@ -158,21 +159,20 @@ class OperatorExpressionEngine(ExpressionEngine):
         motion_bias = (self.controls.motion - 0.5) * 0.50 * influence
         state = replace(
             state,
-            # The influence fader is the blend between Lumen's read of the
-            # music and the operator's explicit intensity/motion targets.
-            # This makes the controls perceptible instead of merely nudging a
-            # multiplier around the neutral midpoint.
+            # Influence controls are centered biases, not replacement state.
+            # The previous blend forced energy and motion toward the slider
+            # positions on every frame, flattening quiet/loud contrast.
             energy=clamp(
-                state.energy * (1.0 - influence)
-                + clamp(self.controls.intensity * intensity_scale, 0.0, 1.0) * influence,
+                state.energy
+                + (self.controls.intensity - 0.5) * 0.40 * influence,
                 0.0,
                 1.0,
             ),
             tension=clamp(state.tension + warm_bias, 0.0, 1.0),
             motion=clamp(
-                state.motion * (1.0 - influence)
-                + clamp(self.controls.motion * motion_scale, 0.0, 1.0) * influence
-                + motion_bias * 0.35,
+                state.motion
+                + (self.controls.motion - 0.5) * 0.50 * influence
+                + motion_bias * 0.15,
                 0.0,
                 1.0,
             ),
@@ -238,6 +238,7 @@ class LumenApplication:
         ).strip()
         self._spotify_login_phase = "connected" if DEFAULT_SPOTIFY_TOKEN.exists() else "disconnected"
         self._spotify_login_thread: threading.Thread | None = None
+        self._spotify_poll_thread: threading.Thread | None = None
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -247,6 +248,16 @@ class LumenApplication:
         self.rig = load_rig(self.rig_path)
         self._rig_payload = self._read_rig_payload()
         self.memory = SongMemoryStore(self.memory_path)
+        self._trace_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=512)
+        self._trace_stop = threading.Event()
+        self._trace_thread = threading.Thread(
+            target=self._trace_worker,
+            name="lumen-performance-trace",
+            daemon=True,
+        )
+        self._trace_thread.start()
+        self._session_id = "standby"
+        self._last_trace_timestamp: float | None = None
         self.engine_mode = "standby"
         self.engine_phase = "ready"
         self.started_at: float | None = None
@@ -275,6 +286,9 @@ class LumenApplication:
         self._audio_capture_started_at: float | None = None
         self._audio_last_packet_at: float | None = None
         self._audio_packet_times: deque[float] = deque(maxlen=96)
+        self._analysis_history: deque[dict[str, Any]] = deque(maxlen=240)
+        self._last_analysis_history_at: float | None = None
+        self._analysis_generation = 0
         self._add_event("system", f"Loaded {self.rig.name}")
         self._rebuild_feedback_biases()
         self.solve_target(self.selected_target)
@@ -298,6 +312,30 @@ class LumenApplication:
             "liked_this": (0.08, 0.04, 0.0, 0.0), "hold_this": (0.06, 0.02, 0.0, 0.0),
             "bad_timing": (-0.08, 0.0, 0.0, 0.0),
         }.get(label, (0.0, 0.0, 0.0, 0.0))
+
+    @staticmethod
+    def _feedback_note_effect(note: str | None) -> tuple[float, float, float, float]:
+        text = (note or "").casefold()
+        motion = intensity = strobe = palette = 0.0
+        if any(term in text for term in ("no strobe", "stop flashing", "less flash")):
+            strobe -= 0.60
+        if any(term in text for term in ("slow", "calm", "too fast")):
+            motion -= 0.18
+        if any(term in text for term in ("faster", "pick it up", "more movement")):
+            motion += 0.18
+        if any(term in text for term in ("strobe", "flash")) and not any(
+            term in text for term in ("no strobe", "stop flashing", "less flash")
+        ):
+            strobe += 0.35
+        if any(term in text for term in ("blue", "purple", "cool")):
+            palette -= 0.70
+        if any(term in text for term in ("warm", "red", "amber")):
+            palette += 0.70
+        if any(term in text for term in ("brighter", "too dim")):
+            intensity += 0.25
+        if any(term in text for term in ("dimmer", "too bright")):
+            intensity -= 0.25
+        return motion, intensity, strobe, palette
 
     @staticmethod
     def _feedback_gesture_effect(label: str, gesture: str | None) -> dict[str, float]:
@@ -338,32 +376,50 @@ class LumenApplication:
         counts: dict[str, int] = {}
         for row in rows:
             scope = row.get("scope", "overall")
-            if scope == "group" and row.get("fixture_id") == "movers":
-                keys_for_row = [fixture.fixture_id for fixture in self.rig.fixtures]
-            else:
-                keys_for_row = [row.get("fixture_id")] if scope == "fixture" else ["overall"]
-            keys_for_row = [key for key in keys_for_row if key]
-            if not keys_for_row:
-                continue
             song_id = row.get("song_id")
-            context_keys = list(keys_for_row)
-            if song_id is not None:
-                song_key = f"song:{song_id}"
-                context_keys.append(song_key)
-                song = self.memory.get_song(int(song_id))
-                if song:
+            song_key = f"song:{song_id}" if song_id is not None else None
+            song = self.memory.get_song(int(song_id)) if song_id is not None else None
+            artists = [
+                str(artist).casefold().strip()
+                for artist in (song or {}).get("artists", ())
+                if str(artist).strip()
+            ]
+            section = row.get("section")
+            if scope == "overall":
+                context_keys = ["overall"]
+                if song_key:
+                    context_keys.append(song_key)
+                    if section:
+                        context_keys.append(f"{song_key}:section:{section}")
+                context_keys.extend(f"artist:{artist}" for artist in artists)
+            else:
+                if scope == "group" and row.get("fixture_id") == "movers":
+                    target_ids = [fixture.fixture_id for fixture in self.rig.fixtures]
+                else:
+                    target_ids = [str(row.get("fixture_id") or "")]
+                target_ids = [target for target in target_ids if target]
+                context_keys = []
+                for target in target_ids:
+                    context_keys.append(target)
+                    if song_key:
+                        context_keys.append(f"{song_key}:fixture:{target}")
+                        if section:
+                            context_keys.append(
+                                f"{song_key}:section:{section}:fixture:{target}"
+                            )
                     context_keys.extend(
-                        f"artist:{str(artist).casefold().strip()}"
-                        for artist in song.get("artists", ())
-                        if str(artist).strip()
+                        f"artist:{artist}:fixture:{target}" for artist in artists
                     )
-                if row.get("section"):
-                    context_keys.append(f"{song_key}:section:{row['section']}")
-                if scope == "fixture" and row.get("fixture_id"):
-                    context_keys.append(f"{song_key}:fixture:{row['fixture_id']}")
+            if not context_keys:
+                continue
             age_days = max(0.0, (now - float(row.get("created_unix_ms") or now)) / 86_400_000.0)
             decay = math.exp(-age_days / 21.0)
             motion, intensity, strobe, palette = self._feedback_effect(str(row.get("label", "")))
+            note_effect = self._feedback_note_effect(row.get("note"))
+            motion += note_effect[0]
+            intensity += note_effect[1]
+            strobe += note_effect[2]
+            palette += note_effect[3]
             weight = decay * min(1.0, abs(float(row.get("value") or 1.0)))
             for key in context_keys:
                 bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0, "gestures": {}, "routines": {}})
@@ -395,17 +451,18 @@ class LumenApplication:
         self._feedback_biases = {}
         for key, bucket in buckets.items():
             confidence = min(1.0, math.sqrt(counts[key]) / 2.0)
+            normalizer = max(float(bucket.get("weight", 0.0)), 1e-9)
             self._feedback_biases[key] = {
-                "motion": clamp(bucket["motion"] * confidence, -1.0, 1.0),
-                "intensity": clamp(bucket["intensity"] * confidence, -1.0, 1.0),
-                "strobe": clamp(bucket.get("strobe", 0.0) * confidence, -1.0, 1.0),
-                "palette": clamp(bucket.get("palette", 0.0) * confidence, -1.0, 1.0),
+                "motion": clamp(bucket["motion"] / normalizer * confidence, -1.0, 1.0),
+                "intensity": clamp(bucket["intensity"] / normalizer * confidence, -1.0, 1.0),
+                "strobe": clamp(bucket.get("strobe", 0.0) / normalizer * confidence, -1.0, 1.0),
+                "palette": clamp(bucket.get("palette", 0.0) / normalizer * confidence, -1.0, 1.0),
                 "gestures": {
-                    name: clamp(value * confidence, -1.0, 1.0)
+                    name: clamp(value / normalizer * confidence, -1.0, 1.0)
                     for name, value in bucket.get("gestures", {}).items()
                 },
                 "routines": {
-                    name: clamp(value * confidence, -1.0, 1.0)
+                    name: clamp(value / normalizer * confidence, -1.0, 1.0)
                     for name, value in bucket.get("routines", {}).items()
                 },
             }
@@ -459,6 +516,8 @@ class LumenApplication:
             self.engine_phase = "starting"
             self.last_error = None
             self.started_at = time.monotonic()
+            self._session_id = f"{int(time.time() * 1000)}:{normalized}"
+            self._last_trace_timestamp = None
             self._reset_audio_diagnostics()
             self._thread = threading.Thread(
                 target=self._run,
@@ -489,6 +548,22 @@ class LumenApplication:
                 output.close()
             except Exception:
                 pass
+        self._trace_stop.set()
+        self._trace_thread.join(timeout=2.0)
+
+    def _trace_worker(self) -> None:
+        while not self._trace_stop.is_set() or not self._trace_queue.empty():
+            try:
+                item = self._trace_queue.get(timeout=0.20)
+            except queue.Empty:
+                continue
+            try:
+                self.memory.log_performance_sample(**item)
+            except Exception as error:
+                with self._lock:
+                    self._add_event("memory", f"Performance trace write failed: {error}")
+            finally:
+                self._trace_queue.task_done()
 
     def _run(self, mode: str) -> None:
         raw_output: VirtualDMXOutput | OpenDmxUsbOutput
@@ -550,11 +625,24 @@ class LumenApplication:
         analyzer = RealtimeAudioAnalyzer(
             capture_config.sample_rate, capture_config.channels
         )
+        analysis_generation = self._analysis_generation
+        sample_clock_origin = time.monotonic()
+        captured_frames = 0
         with AlsaLineIn(capture_config) as capture:
             for pcm in capture.chunks():
                 if self._stop.is_set():
                     break
-                observation = analyzer.analyze_pcm16(pcm)
+                if analysis_generation != self._analysis_generation:
+                    analyzer.reset()
+                    analysis_generation = self._analysis_generation
+                    sample_clock_origin = time.monotonic()
+                    captured_frames = 0
+                timestamp = (
+                    sample_clock_origin
+                    + captured_frames / capture_config.sample_rate
+                )
+                observation = analyzer.analyze_pcm16(pcm, timestamp_s=timestamp)
+                captured_frames += len(pcm) // (2 * capture_config.channels)
                 self._accept_runtime_frame(
                     observation,
                     runtime.step(observation),
@@ -622,6 +710,62 @@ class LumenApplication:
                 self._audio_metrics = audio_metrics
             self.observation = observation
             self.frame = frame
+            if (
+                self._last_analysis_history_at is None
+                or observation.timestamp_s - self._last_analysis_history_at >= 0.095
+            ):
+                self._last_analysis_history_at = observation.timestamp_s
+                self._analysis_history.append(
+                    {
+                        "timestamp_s": observation.timestamp_s,
+                        "dbfs": (
+                            audio_metrics.dbfs
+                            if audio_metrics is not None
+                            else -120.0
+                        ),
+                        "loudness": observation.loudness,
+                        "onset": observation.onset_strength,
+                        "section": observation.section,
+                        "section_confidence": observation.section_confidence,
+                        "bpm": observation.bpm,
+                        "beat_confidence": observation.beat_confidence,
+                        "energy": frame.decision.expression.energy,
+                        "motion": frame.decision.expression.motion,
+                        "gesture": frame.decision.gesture.value,
+                        "routine": frame.decision.routine,
+                    }
+                )
+            if (
+                self._last_trace_timestamp is None
+                or observation.timestamp_s - self._last_trace_timestamp >= 0.48
+            ):
+                self._last_trace_timestamp = observation.timestamp_s
+                trace_decision = asdict(frame.decision)
+                trace_decision["gesture"] = frame.decision.gesture.value
+                try:
+                    self._trace_queue.put_nowait(
+                        {
+                            "session_id": self._session_id,
+                            "song_id": self.song_id,
+                            "position_ms": self._media_position_ms(),
+                            "payload": {
+                                "observation": asdict(observation),
+                                "decision": trace_decision,
+                                "controls": asdict(self.controls),
+                                "solutions": [
+                                    {
+                                        "fixture_id": solution.fixture_id,
+                                        "pan_deg": solution.pan_deg,
+                                        "tilt_deg": solution.tilt_deg,
+                                        "branch": solution.branch,
+                                    }
+                                    for solution in frame.solutions
+                                ],
+                            },
+                        }
+                    )
+                except queue.Full:
+                    pass
             gesture = frame.decision.gesture.value
             if gesture != self._last_gesture:
                 self._last_gesture = gesture
@@ -637,7 +781,21 @@ class LumenApplication:
                         observation=observation,
                     )
             self._status_sequence += 1
-        self._poll_spotify_if_due()
+        self._schedule_spotify_poll()
+
+    def _schedule_spotify_poll(self) -> None:
+        """Keep network metadata work off the real-time audio/DMX loop."""
+        thread = self._spotify_poll_thread
+        if thread is not None and thread.is_alive():
+            return
+        if time.monotonic() - self._last_media_poll < 5.0:
+            return
+        self._spotify_poll_thread = threading.Thread(
+            target=self._poll_spotify_if_due,
+            name="lumen-spotify-poll",
+            daemon=True,
+        )
+        self._spotify_poll_thread.start()
 
     def _reset_audio_diagnostics(self) -> None:
         self._audio_metrics = AudioInputMetrics.silence()
@@ -647,6 +805,8 @@ class LumenApplication:
         self._audio_capture_started_at = None
         self._audio_last_packet_at = None
         self._audio_packet_times.clear()
+        self._analysis_history.clear()
+        self._last_analysis_history_at = None
 
     def _audio_snapshot_unlocked(self, running: bool) -> dict[str, Any]:
         now = time.monotonic()
@@ -1066,6 +1226,7 @@ class LumenApplication:
                 media.artists[0] if media.artists else None,
             )
         if count_play:
+            self._analysis_generation += 1
             self._last_media_key = key
             self._add_event("media", f"Now playing {media.display_name}")
 
@@ -1185,20 +1346,12 @@ class LumenApplication:
         ):
             raise ValueError("feedback fixture_id is not in the active rig")
         motion_delta, intensity_delta, strobe_delta, palette_delta = self._feedback_effect(label)
-        note_lower = (note or "").lower()
         if label == "operator_note":
-            if any(term in note_lower for term in ("no strobe", "stop flashing", "less flash")):
-                strobe_delta -= 0.6
-            if any(term in note_lower for term in ("slow", "calm", "too fast")):
-                motion_delta -= 0.18
-            if any(term in note_lower for term in ("faster", "pick it up", "more movement")):
-                motion_delta += 0.18
-            if any(term in note_lower for term in ("strobe", "flash")) and not any(term in note_lower for term in ("no strobe", "stop flashing", "less flash")):
-                strobe_delta += 0.35
-            if any(term in note_lower for term in ("blue", "purple", "cool")):
-                palette_delta -= 0.7
-            if any(term in note_lower for term in ("warm", "red", "amber")):
-                palette_delta += 0.7
+            note_effect = self._feedback_note_effect(note)
+            motion_delta += note_effect[0]
+            intensity_delta += note_effect[1]
+            strobe_delta += note_effect[2]
+            palette_delta += note_effect[3]
         motion_delta *= abs(value) if value else 1.0
         intensity_delta *= abs(value) if value else 1.0
         strobe_delta *= abs(value) if value else 1.0
@@ -1337,6 +1490,7 @@ class LumenApplication:
                             media.artists[0] if media.artists else None,
                         )
                     if count_play:
+                        self._analysis_generation += 1
                         self._last_media_key = key
                         self._add_event("media", f"Now playing {media.display_name}")
         except Exception as error:
@@ -1480,6 +1634,7 @@ class LumenApplication:
             "controls": asdict(self.controls),
             "audio": self._audio_snapshot_unlocked(running),
             "observation": observation,
+            "analysis_history": list(self._analysis_history),
             "decision": decision,
             "solutions": solutions,
             "dmx": dmx,

@@ -8,7 +8,8 @@ required to leave the PC.
 
 The current modules are:
 
-- `audio`: line-in capture and musical observations
+- `audio`: line-in capture, sample-clock timing, musical observations, and a
+  hysteretic section tracker
 - `beat`: Party Parrot's trigger tracker plus a spectrum-onset autocorrelation
   tempo clock for stable full-mix BPM and phase
 - `media`: optional recording identity providers
@@ -35,7 +36,7 @@ Runtime work will eventually be separated into bounded loops:
 1. DMX output
 2. Audio capture and time stamping
 3. Live feature extraction
-4. Gesture planning and spatial realization
+4. Two-bar phrase planning and spatial realization
 5. User interface and 3D preview
 6. Background song analysis and preference learning
 
@@ -80,8 +81,13 @@ moments and are resolved into the current rig rather than replaying old DMX.
 
 The current phrase vocabulary is `breathe`, `fan_sweep`, `figure_eight`,
 `opposing_chase`, `beat_nod`, and `counter_rotate`. A routine is held for a
-bar; beat accents continue inside it. Positive feedback reinforces the active
+two-bar phrase; beat accents continue inside it. Positive feedback reinforces the active
 routine, while movement/timing corrections select or reject routine families.
+
+The operator controls apply centered biases to the audio-derived expression;
+they do not replace energy or motion. Spotify polling and persistent trace
+writes run outside the audio/DMX loop. Compact half-second performance samples
+are retained locally for last-run diagnosis and future training data.
 
 It should learn semantic decisions, not raw DMX bytes. Geometry, constraints,
 output encoding, and hardware transport remain deterministic.

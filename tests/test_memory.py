@@ -52,7 +52,17 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(routine["routine_version"], 2)
             self.assertEqual(routine["payload"]["strategy"], "adaptive")
 
+            store.log_performance_sample(
+                "session-1",
+                {"observation": {"section": "groove"}, "decision": {"routine": "fan_sweep"}},
+                song_id=song_id,
+                position_ms=32_000,
+            )
+            samples = store.latest_performance_session()
+            self.assertEqual(len(samples), 1)
+            self.assertEqual(samples[0]["session_id"], "session-1")
+            self.assertEqual(samples[0]["payload"]["decision"]["routine"], "fan_sweep")
+
 
 if __name__ == "__main__":
     unittest.main()
-

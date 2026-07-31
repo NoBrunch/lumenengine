@@ -80,7 +80,21 @@ class RealtimeAudioAnalyzer:
         self._flux_history: deque[float] = deque(maxlen=420)
         self._bass_rise_history: deque[float] = deque(maxlen=420)
         self._last_timestamp: float | None = None
+        self._section = "groove"
+        self._section_started_at: float | None = None
+        self._section_candidate: str | None = None
+        self._section_candidate_since: float | None = None
+        self._section_fast_level = 0.0
+        self._section_slow_level = 0.0
+        self._section_last_timestamp: float | None = None
+        self._silence_started_at: float | None = None
+        self._tempo_reset_for_silence = False
+        self._release_refractory_until = float("-inf")
         self.last_metrics = AudioInputMetrics.silence(channels=channels)
+
+    def reset(self) -> None:
+        """Reset temporal analysis at a recording/seek boundary."""
+        self.__init__(self.sample_rate, self.channels)
 
     def analyze_pcm16(
         self, pcm: bytes, timestamp_s: float | None = None
@@ -102,13 +116,14 @@ class RealtimeAudioAnalyzer:
         # Track the actual interface noise without allowing sustained music to
         # drag the floor upward. This prevents electrical hiss from becoming a
         # fictional low-frequency "performance" during silence.
-        noise_alpha = 0.97 if rms <= self._noise_floor * 1.5 else 0.9995
-        self._noise_floor = clamp(
-            noise_alpha * self._noise_floor
-            + (1.0 - noise_alpha) * min(rms, 0.02),
-            0.00005,
-            0.02,
-        )
+        # Learn the floor only from genuinely quiet packets. Sustained music
+        # must not ratchet the floor upward until soft passages disappear.
+        if rms <= max(0.003, self._noise_floor * 1.5):
+            self._noise_floor = clamp(
+                0.97 * self._noise_floor + 0.03 * min(rms, 0.003),
+                0.00005,
+                0.003,
+            )
         signal_present = rms >= max(0.001, self._noise_floor * 2.2)
         if signal_present:
             # A gentle logarithmic mapping makes normal line levels readable.
@@ -153,6 +168,14 @@ class RealtimeAudioAnalyzer:
             if spectral_beat_state.bpm > 0.0
             else fallback_beat_state
         )
+        if signal_present:
+            self._silence_started_at = None
+            self._tempo_reset_for_silence = False
+            quiet_for = 0.0
+        else:
+            if self._silence_started_at is None:
+                self._silence_started_at = timestamp
+            quiet_for = max(0.0, timestamp - self._silence_started_at)
         elapsed = (
             1.0 / 24.0
             if self._last_timestamp is None
@@ -169,20 +192,19 @@ class RealtimeAudioAnalyzer:
 
         bpm = beat_state.bpm or None
         beat_confidence = beat_state.confidence
+        if not signal_present:
+            beat_confidence *= math.exp(-quiet_for / 0.35)
+            if quiet_for >= 0.75:
+                bpm = None
+            if quiet_for >= 1.5 and not self._tempo_reset_for_silence:
+                self._beat_tracker = BeatTracker()
+                self._tempo_tracker = SpectralTempoTracker(self._tempo_update_rate)
+                self._tempo_reset_for_silence = True
         beat_phase = (beat_state.bar_progress * 4.0) % 1.0
         novelty = clamp(0.65 * onset + 0.35 * abs(high - low), 0.0, 1.0)
-        # A lightweight section vocabulary gives feedback a temporal context
-        # even when Spotify supplies no audio-analysis sections. This is an
-        # observable heuristic, not a claim that the engine understands song
-        # form perfectly.
-        if loudness < 0.16:
-            section = "breakdown"
-        elif onset >= 0.78 and low >= 0.45:
-            section = "drop"
-        elif onset >= 0.42 and novelty >= 0.38:
-            section = "build"
-        else:
-            section = "groove"
+        section, section_confidence = self._classify_section(
+            timestamp, loudness, onset, low, novelty
+        )
         return MusicalObservation(
             timestamp_s=timestamp,
             loudness=loudness,
@@ -196,9 +218,108 @@ class RealtimeAudioAnalyzer:
             beat_confidence=beat_confidence,
             bpm=bpm,
             section=section,
-            section_confidence=clamp(0.35 + 0.45 * beat_confidence + 0.20 * novelty, 0.0, 1.0),
+            section_confidence=section_confidence,
             novelty=novelty,
         )
+
+    def _classify_section(
+        self,
+        timestamp: float,
+        loudness: float,
+        onset: float,
+        low_energy: float,
+        novelty: float,
+    ) -> tuple[str, float]:
+        """Track stable musical regions with hysteresis and transition memory.
+
+        Spectral features arrive every ~43 ms. Treating each packet as a whole
+        song section caused the dashboard to alternate groove/build on normal
+        notes. This tracker compares short- and long-term level, requires a
+        candidate to persist, and holds a release long enough to be meaningful.
+        """
+        if self._section_last_timestamp is None:
+            elapsed = 1.0 / 24.0
+            self._section_fast_level = loudness
+            self._section_slow_level = loudness
+            self._section_started_at = timestamp
+        else:
+            elapsed = clamp(timestamp - self._section_last_timestamp, 0.005, 0.25)
+        self._section_last_timestamp = timestamp
+        fast_alpha = 1.0 - math.exp(-elapsed / 0.70)
+        slow_alpha = 1.0 - math.exp(-elapsed / 5.5)
+        self._section_fast_level += fast_alpha * (loudness - self._section_fast_level)
+        self._section_slow_level += slow_alpha * (loudness - self._section_slow_level)
+        trend = self._section_fast_level - self._section_slow_level
+        section_age = timestamp - (
+            timestamp if self._section_started_at is None else self._section_started_at
+        )
+
+        if self._section == "release" and section_age < 1.6:
+            return "release", clamp(0.72 + 0.18 * onset, 0.0, 1.0)
+        if self._section == "release":
+            # Release is a bounded transition event, not a persistent region.
+            # Return to groove unconditionally so ordinary post-drop
+            # transients cannot trap the classifier in release forever.
+            self._section = "groove"
+            self._section_started_at = timestamp
+            self._section_candidate = None
+            self._section_candidate_since = None
+            section_age = 0.0
+
+        strong_release = (
+            onset >= 0.82
+            and low_energy >= 0.32
+            and novelty >= 0.58
+            and loudness >= max(0.34, self._section_slow_level * 0.82)
+        )
+        if (
+            self._section != "release"
+            and timestamp >= self._release_refractory_until
+            and strong_release
+            and (self._section == "build" or trend >= 0.045)
+        ):
+            candidate = "release"
+            required = 0.0
+        elif loudness <= max(0.10, self._section_slow_level * 0.48):
+            candidate = "breakdown"
+            required = 0.75
+        elif trend >= 0.055 and novelty >= 0.30 and loudness >= 0.26:
+            candidate = "build"
+            required = 1.10
+        else:
+            candidate = "groove"
+            required = 1.35
+
+        if candidate != self._section_candidate:
+            self._section_candidate = candidate
+            self._section_candidate_since = timestamp
+        candidate_age = timestamp - (
+            timestamp
+            if self._section_candidate_since is None
+            else self._section_candidate_since
+        )
+        minimum_hold = 1.0 if self._section == "breakdown" else 2.4
+        if (
+            candidate != self._section
+            and candidate_age >= required
+            and (section_age >= minimum_hold or candidate == "release")
+        ):
+            self._section = candidate
+            self._section_started_at = timestamp
+            if candidate == "release":
+                self._release_refractory_until = timestamp + 3.5
+            self._section_candidate = None
+            self._section_candidate_since = None
+            section_age = 0.0
+
+        stability = clamp(section_age / 3.0, 0.0, 1.0)
+        evidence = {
+            "breakdown": clamp((0.24 - loudness) / 0.20, 0.0, 1.0),
+            "build": clamp(trend / 0.14 + novelty * 0.35, 0.0, 1.0),
+            "release": clamp(onset * 0.70 + novelty * 0.30, 0.0, 1.0),
+            "groove": clamp(0.45 + 0.35 * (1.0 - novelty), 0.0, 1.0),
+        }[self._section]
+        return self._section, clamp(0.35 + 0.35 * stability + 0.30 * evidence, 0.0, 1.0)
 
     def _input_metrics(
         self,

@@ -45,7 +45,7 @@ feedback.
 ```text
 Line input / Spotify metadata
         ↓
-Audio capture and spectral analysis
+Audio capture, sample-clock timing, and spectral analysis
         ↓
 Musical observation
         ↓
@@ -252,15 +252,26 @@ shifts the family for the relevant learned context.
 
 ### Beat and motion behavior
 
-Moving-head strobes are off by default, matching Party Parrot's normal mover
-interpretation. The center multi-effect retains the beat-flash role, while its
+Moving-head strobes are off by default. The center multi-effect retains the
+beat-flash role, while its
 ball and arm emitters exchange saturated palette colors on the beat. High-level
 gesture changes are held for a readable phrase instead of being allowed to
 alternate on adjacent audio packets. A named routine (`breathe`, `fan_sweep`,
 `figure_eight`, `opposing_chase`, `beat_nod`, or `counter_rotate`) is held for
-each bar and can be learned from contextual feedback. Compound motion uses the detected bar
+two bars and can be learned from contextual feedback. The center fixture and
+movers consume the same routine. Compound motion uses the detected bar
 phase when available, keeping sweeps, arm chases, and body rotation on the same
 tempo grid as the movers.
+
+The Audio laboratory chart shows 24 seconds of physical input level and
+audio-derived expression energy. Section labels use temporal hysteresis rather
+than classifying each PCM packet independently. A release is a short transition
+event; builds, grooves, and breakdowns must persist before the label changes.
+
+Lumen writes a compact performance trace twice per second. Each sample includes
+the audio observation, expression, gesture, routine, controls, song position,
+and resolved mover angles. This makes the most recent run reviewable even when
+the gesture itself did not change.
 
 ## Calibration
 

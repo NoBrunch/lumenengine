@@ -14,9 +14,11 @@ const app = {
   lastAudioPacketCount: 0,
   lastBeatPhase: null,
   lastBeatPulse: 0,
+  beatDisplayTurns: 0,
   pointer: { dragging: false, moved: false, fixtureId: null },
   roomCamera: { yaw: -0.55, pitch: 0.62, panX: 0, panY: 0, zoom: 1 },
   polling: null,
+  pollInFlight: false,
   controlTimer: null,
   disconnected: false,
   pollCount: 0,
@@ -161,7 +163,7 @@ async function initialize() {
     toast("Could not open Lumen", error.message, "error");
     renderConnection(false);
   }
-  app.polling = window.setInterval(pollStatus, 250);
+  app.polling = window.setTimeout(pollStatus, 100);
   window.addEventListener("resize", () => {
     drawPerformanceRoom();
     drawRig();
@@ -170,6 +172,8 @@ async function initialize() {
 }
 
 async function pollStatus() {
+  if (app.pollInFlight) return;
+  app.pollInFlight = true;
   try {
     const status = await api("/api/status");
     app.status = status;
@@ -178,18 +182,23 @@ async function pollStatus() {
     renderStatus();
     renderConnection(true);
     app.pollCount += 1;
-    if (app.pollCount % 20 === 0) {
+    if (app.pollCount % 50 === 0) {
       app.system = await api("/api/system");
       renderSystem(app.system);
       updateComponentStatuses();
     }
-    if (app.pollCount % 30 === 0 && app.system?.spotify?.token_present) {
+    if (app.pollCount % 100 === 0 && app.system?.spotify?.token_present) {
       refreshSpotifyConsole(false);
     }
   } catch {
     if (!app.disconnected) toast("Connection interrupted", "Trying to reconnect to the local Lumen service.", "error");
     app.disconnected = true;
     renderConnection(false);
+  } finally {
+    app.pollInFlight = false;
+    if (app.polling !== null) {
+      app.polling = window.setTimeout(pollStatus, 100);
+    }
   }
 }
 
@@ -238,7 +247,7 @@ function renderStatus() {
   const expression = decision?.expression || { energy: 0, tension: 0, motion: 0, intimacy: 0.5, confidence: 0 };
   const running = Boolean(engine.running);
   const fault = engine.phase === "fault";
-  const mood = `${label(decision?.gesture || "standing_by")} · ${label(observation?.section || "waiting")}`;
+  const mood = `${label(decision?.gesture || "standing_by")} · ${label(observation?.section || "waiting")} · ${label(decision?.routine || "no_routine")}`;
   setText("analysis-mood", mood);
   setText("analysis-mood-detail", decision?.reason || "Waiting for a musical observation.");
   setText("analysis-energy", percent(expression.energy));
@@ -740,16 +749,26 @@ function renderExpression(decision, expression, observation) {
   setText("beat-lock-badge", observation.beat_confidence >= 0.5 ? "LOCKED" : "SEARCHING");
   const circumference = 2 * Math.PI * 66;
   const phase = clamp(observation.beat_phase);
+  const previousBeatPhase = app.lastBeatPhase;
   if ($("beat-dial-progress")) $("beat-dial-progress").style.strokeDashoffset = String(circumference * (1 - phase));
-  if ($("beat-hand")) $("beat-hand").style.transform = `rotate(${phase * 360}deg)`;
+  if (previousBeatPhase === null) {
+    app.beatDisplayTurns = phase;
+  } else {
+    let delta = phase - previousBeatPhase;
+    if (delta < -0.5) delta += 1;
+    if (delta > 0.5) delta -= 1;
+    app.beatDisplayTurns += delta;
+  }
+  app.lastBeatPhase = phase;
+  if ($("beat-hand")) $("beat-hand").style.transform = `rotate(${app.beatDisplayTurns * 360}deg)`;
   const beatPulse = Number(observation.beat_pulse || 0);
   const beatArrived = (
     beatPulse >= 0.50
     && app.lastBeatPulse < 0.50
   ) || (
     observation.beat_confidence >= 0.35
-    && app.lastBeatPhase !== null
-    && phase < app.lastBeatPhase
+    && previousBeatPhase !== null
+    && phase < previousBeatPhase
   );
   if (beatArrived) {
     const lamp = $("beat-receive-lamp");
@@ -1289,7 +1308,7 @@ function drawScope() {
   if (!configured) return;
   const { context: ctx, width, height } = configured;
   ctx.clearRect(0, 0, width, height);
-  const values = app.status?.audio?.metrics?.waveform || [];
+  const values = app.status?.analysis_history || [];
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
   gradient.addColorStop(0, "rgba(100, 222, 213, .85)");
   gradient.addColorStop(1, "rgba(69, 126, 163, .42)");
@@ -1302,15 +1321,30 @@ function drawScope() {
     ctx.moveTo(0, height * 0.5);
     ctx.lineTo(width, height * 0.5);
   }
-  values.forEach((rawValue, index) => {
-    const value = Math.max(-1, Math.min(1, Number(rawValue) || 0));
+  values.forEach((sample, index) => {
+    const value = clamp((Number(sample.dbfs) + 60) / 60);
     const x = index / Math.max(1, values.length - 1) * width;
-    const y = height * 0.5 - value * height * 0.44;
+    const y = height - value * height;
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
   ctx.stroke();
   ctx.shadowBlur = 0;
+  ctx.strokeStyle = "rgba(208, 163, 92, .78)";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  values.forEach((sample, index) => {
+    const x = index / Math.max(1, values.length - 1) * width;
+    const y = height - clamp(sample.energy) * height;
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = "rgba(100, 222, 213, .9)";
+  ctx.font = "8px DejaVu Sans Mono";
+  ctx.fillText("INPUT dBFS", 10, 13);
+  ctx.fillStyle = "rgba(208, 163, 92, .9)";
+  ctx.fillText("EXPRESSION ENERGY", 88, 13);
   const observation = app.status?.observation || {};
   const bands = [
     ["LOW", observation.low_energy || 0, "#55c4bb"],
@@ -1497,7 +1531,8 @@ async function shutdownLumen() {
   if (!confirmed) return;
   try {
     const result = await api("/api/service/shutdown", { method: "POST", body: {} });
-    window.clearInterval(app.polling);
+    window.clearTimeout(app.polling);
+    app.polling = null;
     $("shutdown-screen")?.classList.remove("hidden");
     document.title = "Lumen is shut down";
     toast("Lumen is shutting down", result.message);

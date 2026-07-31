@@ -31,7 +31,7 @@ class ExpressionPolicy:
     # Hold a visual idea long enough for a mechanical fixture to complete a
     # readable phrase. Beat accents remain continuous; only the high-level
     # routine changes are rate-limited here.
-    minimum_gesture_hold_s: float = 1.8
+    minimum_gesture_hold_s: float = 3.5
     release_onset_threshold: float = 0.68
     high_energy_threshold: float = 0.48
     quiet_threshold: float = 0.16
@@ -40,6 +40,13 @@ class ExpressionPolicy:
 class ExpressionEngine:
     def __init__(self, policy: ExpressionPolicy | None = None) -> None:
         self.policy = policy or ExpressionPolicy()
+        self.state = ExpressionState()
+        self._last_gesture = Gesture.HOLD
+        self._last_target = self.policy.room_center
+        self._last_gesture_at = float("-inf")
+
+    def reset(self) -> None:
+        """Clear temporal expression state at a recording boundary."""
         self.state = ExpressionState()
         self._last_gesture = Gesture.HOLD
         self._last_target = self.policy.room_center
@@ -103,15 +110,13 @@ class ExpressionEngine:
         reason = "Maintaining the current visual idea to avoid restless changes."
 
         is_release = (
-            (
-                observation.onset_strength
-                >= self.policy.release_onset_threshold
-                or observation.beat_pulse >= 0.90
-            )
+            observation.section in {"drop", "release"}
+            and observation.onset_strength
+            >= self.policy.release_onset_threshold * 0.82
             and state.energy >= self.policy.high_energy_threshold
             and (
-                observation.beat_confidence >= 0.25
-                or observation.beat_pulse >= 0.90
+                observation.beat_confidence >= 0.20
+                or observation.section_confidence >= 0.60
             )
         )
         is_build = observation.section == "build" and state.tension >= 0.42
@@ -128,11 +133,23 @@ class ExpressionEngine:
             reason = (
                 "The music is building, so the composition narrows while tension rises."
             )
-        elif state.energy <= self.policy.quiet_threshold and can_change:
+        elif (
+            observation.section == "breakdown"
+            or state.energy <= self.policy.quiet_threshold
+        ) and can_change:
             gesture = Gesture.BREATHE
             target = self.policy.room_high
             reason = "Low energy favors a slow, spacious gesture with visual restraint."
-        elif state.motion >= 0.42 and state.energy >= 0.32 and can_change:
+        elif can_change and self._last_gesture == Gesture.RELEASE:
+            gesture = Gesture.EXPAND
+            target = self.policy.room_high
+            reason = "The release resolves into a wider, sustained composition."
+        elif (
+            observation.section == "groove"
+            and state.motion >= 0.42
+            and state.energy >= 0.32
+            and can_change
+        ):
             gesture = Gesture.SWEEP
             target = self.policy.room_wide
             reason = "Rhythmic activity is sustained enough to support coordinated motion."
@@ -143,10 +160,6 @@ class ExpressionEngine:
             gesture = Gesture.PULSE
             target = self.policy.room_center
             reason = "A clear onset supports a contained accent without changing the motif."
-        elif can_change and self._last_gesture == Gesture.RELEASE:
-            gesture = Gesture.EXPAND
-            target = self.policy.room_high
-            reason = "The release resolves into a wider, sustained composition."
 
         if gesture != self._last_gesture:
             self._last_gesture = gesture

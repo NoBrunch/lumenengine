@@ -222,7 +222,7 @@ def _apply_generic_multi_effect(
         0.0 if observation is None else observation.beat_confidence
     )
     activity = clamp(
-        0.20 + 0.48 * energy + 0.42 * motion + 0.55 * motion_feedback,
+        0.02 + 0.85 * energy + 0.35 * motion + 0.55 * motion_feedback,
         0.0,
         1.0,
     )
@@ -240,12 +240,19 @@ def _apply_generic_multi_effect(
     # arms, and a restrained nod. Motor speed follows energy so the effect
     # visibly settles with the music instead of racing through quiet parts.
     bar_number = int(timestamp * (observation.bpm or 120.0) / 60.0 / 4.0)
-    pattern = bar_number % 6
+    pattern = {
+        "breathe": 4,
+        "opposing_chase": 1,
+        "figure_eight": 2,
+        "beat_nod": 3,
+        "fan_sweep": 4,
+        "counter_rotate": 5,
+    }.get(decision.routine, bar_number % 6)
     # Give the side arms the full 8-bit travel at performance energy; the
     # resolver no longer compresses them into a small nod.
-    motion_scale = clamp(0.35 + 0.90 * activity, 0.30, 1.0)
+    motion_scale = clamp(0.08 + 0.92 * activity, 0.05, 1.0)
     if decision.gesture is Gesture.BREATHE:
-        motion_scale *= 0.56
+        motion_scale *= 0.38
     # Use the detected bar phase when available so the compound fixture is
     # locked to the same beat grid as the movers instead of free-running from
     # the process clock.
@@ -257,13 +264,15 @@ def _apply_generic_multi_effect(
     if pattern == 0:  # chase: each arm follows the other by a quarter cycle
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase), math.sin(motion_phase + math.pi / 2)
     elif pattern == 1:  # true opposing sweep
-        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * .5), math.sin(motion_phase), -math.sin(motion_phase)
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase), -math.sin(motion_phase)
     elif pattern == 2:  # figure-eight style independent phases
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * 2), math.sin(motion_phase * 2), -math.cos(motion_phase * 2)
-    elif pattern == 3:  # beat alternation, reaching endpoints on every other beat
-        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * 2), (1 if beat_index % 2 == 0 else -1), (-1 if beat_index % 2 == 0 else 1)
+    elif pattern == 3:  # smooth beat nod with opposing arms
+        body_motion = math.sin(motion_phase)
+        arm_1_motion = math.sin(motion_phase * 2.0)
+        arm_2_motion = -arm_1_motion
     elif pattern == 4:  # broad fan: body and arms use different rates
-        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase * .5), math.sin(motion_phase * 1.5), math.cos(motion_phase * 1.5)
+        body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase * 1.5), math.cos(motion_phase * 1.5)
     else:  # counter-rotating circles
         body_motion, arm_1_motion, arm_2_motion = math.cos(motion_phase), math.sin(motion_phase * .75), -math.sin(motion_phase * .75)
     body = round(128.0 + 127.0 * motion_scale * body_motion)

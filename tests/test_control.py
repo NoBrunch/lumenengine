@@ -7,10 +7,49 @@ import time
 import unittest
 from unittest.mock import patch
 
-from lumen_engine.control import LumenApplication
+from lumen_engine.control import LumenApplication, OperatorControls, OperatorExpressionEngine
+from lumen_engine.expression import ExpressionPolicy
+from lumen_engine.models import MusicalObservation
 
 
 class ControlApplicationTests(unittest.TestCase):
+    def test_default_operator_bias_preserves_audio_dynamics(self) -> None:
+        engine = OperatorExpressionEngine(OperatorControls(), ExpressionPolicy())
+        quiet = None
+        for index in range(24):
+            quiet = engine.decide(
+                MusicalObservation(
+                    timestamp_s=index * 0.1,
+                    loudness=0.05,
+                    onset_strength=0.02,
+                    low_energy=0.3,
+                    mid_energy=0.3,
+                    high_energy=0.2,
+                    section="breakdown",
+                    section_confidence=0.8,
+                )
+            )
+        assert quiet is not None
+        loud = None
+        for index in range(24, 64):
+            loud = engine.decide(
+                MusicalObservation(
+                    timestamp_s=index * 0.1,
+                    loudness=0.9,
+                    onset_strength=0.7,
+                    low_energy=0.6,
+                    mid_energy=0.5,
+                    high_energy=0.4,
+                    beat_pulse=0.8,
+                    beat_confidence=0.8,
+                    section="groove",
+                    section_confidence=0.8,
+                )
+            )
+        assert loud is not None
+        self.assertGreater(loud.expression.energy - quiet.expression.energy, 0.35)
+        self.assertGreater(loud.expression.motion - quiet.expression.motion, 0.20)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         root = Path(self.temporary.name)
@@ -88,6 +127,43 @@ class ControlApplicationTests(unittest.TestCase):
             bootstrap["rig"]["fixtures"][0]["position_m"],
             [-1.1, -2.2, 2.8],
         )
+
+    def test_operator_note_is_rebuilt_and_fixture_feedback_stays_scoped(self) -> None:
+        self.application.add_feedback(
+            {
+                "label": "operator_note",
+                "value": 1,
+                "note": "more movement, no strobe, cooler",
+            }
+        )
+        overall = self.application._feedback_biases["overall"]
+        self.assertGreater(overall["motion"], 0.0)
+        self.assertLess(overall["strobe"], 0.0)
+        self.assertLess(overall["palette"], 0.0)
+
+        fixture_id = self.application.rig.fixtures[0].fixture_id
+        other_id = self.application.rig.fixtures[1].fixture_id
+        self.application.add_feedback(
+            {
+                "label": "increase_movement",
+                "value": 1,
+                "scope": "fixture",
+                "fixture_id": fixture_id,
+            }
+        )
+        self.assertIn(fixture_id, self.application._feedback_biases)
+        self.assertNotIn(other_id, self.application._feedback_biases)
+
+        memory_path = self.application.memory_path
+        self.application.close()
+        self.application = LumenApplication(
+            rig_path=self.rig_path,
+            memory_path=memory_path,
+            settings_path=Path(self.temporary.name) / "settings.json",
+        )
+        rebuilt = self.application._feedback_biases["overall"]
+        self.assertGreater(rebuilt["motion"], 0.0)
+        self.assertLess(rebuilt["strobe"], 0.0)
 
     @patch("lumen_engine.control.subprocess.run")
     @patch("lumen_engine.control.shutil.which", return_value="/usr/bin/amixer")

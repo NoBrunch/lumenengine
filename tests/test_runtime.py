@@ -146,7 +146,7 @@ class RuntimeTests(unittest.TestCase):
                     low_energy=0.65,
                     mid_energy=0.60,
                     high_energy=0.55,
-                    bar_phase=((index / 3.0) % 4.0) / 4.0,
+                    bar_phase=(timestamp / 2.0) % 1.0,
                     beat_pulse=1.0 if index % 3 == 0 else 0.15,
                     beat_confidence=0.9,
                     bpm=120.0,
@@ -155,8 +155,8 @@ class RuntimeTests(unittest.TestCase):
                 )
             )
             routines.append(result.decision.routine)
-        self.assertEqual(len(set(routines[:24])), 1)
-        self.assertGreaterEqual(len(set(routines)), 3)
+        self.assertEqual(len(set(routines[:48])), 1)
+        self.assertGreaterEqual(len(set(routines)), 2)
 
     def test_learned_routine_preference_reaches_decision(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
@@ -195,6 +195,44 @@ class RuntimeTests(unittest.TestCase):
         runtime.set_media_context(99, "groove", "new artist")
         runtime.replace_feedback({})
         self.assertNotEqual(runtime.step(observation).decision.routine, "counter_rotate")
+
+    def test_contextual_preference_breaks_conflicting_global_tie(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+        runtime.set_media_context(7, "groove", "artist")
+        runtime.replace_feedback(
+            {
+                "overall": {"routines": {"breathe": 0.4, "opposing_chase": 0.4}},
+                "song:7": {"routines": {"opposing_chase": 0.6}},
+            }
+        )
+        result = runtime.step(
+            MusicalObservation(
+                timestamp_s=100.0, loudness=0.65, onset_strength=0.25,
+                low_energy=0.5, mid_energy=0.5, high_energy=0.4,
+                bar_phase=0.3, beat_confidence=0.8, bpm=120.0,
+                section="groove", section_confidence=0.8,
+            )
+        )
+        self.assertEqual(result.decision.routine, "opposing_chase")
+
+    def test_bpm_nudges_do_not_advance_phrase_without_bar_wrap(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+        routines = []
+        for index in range(12):
+            result = runtime.step(
+                MusicalObservation(
+                    timestamp_s=500_000 + index * 0.2,
+                    loudness=0.8, onset_strength=0.25,
+                    low_energy=0.6, mid_energy=0.5, high_energy=0.4,
+                    bar_phase=0.10 + index * 0.05,
+                    beat_confidence=0.9, bpm=126.0 + index * 0.1,
+                    section="groove", section_confidence=0.8,
+                )
+            )
+            routines.append(result.decision.routine)
+        self.assertEqual(len(set(routines)), 1)
 
 
 if __name__ == "__main__":

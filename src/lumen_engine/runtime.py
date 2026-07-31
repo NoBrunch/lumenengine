@@ -69,6 +69,9 @@ class PerformanceRuntime:
         self._routine_preferences: dict[str, dict[str, float]] = {}
         self._active_routine = "auto"
         self._active_routine_bar: int | None = None
+        self._active_routine_section: str | None = None
+        self._routine_bar_counter = 0
+        self._last_bar_phase: float | None = None
         self._motion_phase = 0.0
         self._motion_clock_s: float | None = None
         self._calibration_overrides: dict[str, dict[str, float]] = {}
@@ -79,8 +82,12 @@ class PerformanceRuntime:
     def set_media_context(self, song_id: int | None, section: str | None = None, artist: str | None = None) -> None:
         """Set the identity/section used when resolving learned preferences."""
         if song_id != self._active_song_id:
+            self.expression.reset()
             self._active_routine = "auto"
             self._active_routine_bar = None
+            self._active_routine_section = None
+            self._routine_bar_counter = 0
+            self._last_bar_phase = None
         self._active_song_id = song_id
         self._active_section = section
         self._active_artist = artist.casefold().strip() if artist else None
@@ -131,6 +138,7 @@ class PerformanceRuntime:
         self._routine_preferences.clear()
         self._active_routine = "auto"
         self._active_routine_bar = None
+        self._active_routine_section = None
         for key, bias in biases.items():
             self.apply_feedback(
                 scope="fixture" if key != "overall" else "overall",
@@ -154,47 +162,65 @@ class PerformanceRuntime:
                 }
 
     def _routine_for_context(self, decision: PerformanceDecision, observation: MusicalObservation) -> str:
-        """Choose one phrase motif and hold it until the next musical bar.
+        """Choose one phrase motif and hold it across a two-bar phrase.
 
         The old implementation selected a gesture, then let each fixture infer
         a pattern from process time.  This made the rig look busy but made the
-        phrase impossible to learn.  A routine is now selected once per bar
+        phrase impossible to learn. A routine is now selected once per phrase
         from the section/energy state and contextual operator preferences.
         """
-        bpm = observation.bpm or 120.0
-        bar = math.floor(max(0.0, observation.timestamp_s) * bpm / 60.0 / 4.0)
-        if self._active_routine_bar == bar and self._active_routine != "auto":
+        if observation.beat_confidence >= 0.20:
+            phase = observation.bar_phase % 1.0
+            if (
+                self._last_bar_phase is not None
+                and self._last_bar_phase >= 0.72
+                and phase <= 0.28
+            ):
+                self._routine_bar_counter += 1
+            self._last_bar_phase = phase
+            bar = self._routine_bar_counter // 2
+        else:
+            bar = self._routine_bar_counter // 2
+        section = observation.section or "groove"
+        if (
+            self._active_routine_bar == bar
+            and self._active_routine != "auto"
+            and self._active_routine_section == section
+        ):
             return self._active_routine
-        keys = ["overall"]
+        contexts = [("overall", 0.20)]
         if self._active_song_id is not None:
-            keys.append(f"song:{self._active_song_id}")
+            contexts.append((f"song:{self._active_song_id}", 0.75))
             if self._active_section:
-                keys.append(f"song:{self._active_song_id}:section:{self._active_section}")
+                contexts.append((f"song:{self._active_song_id}:section:{self._active_section}", 1.0))
         if self._active_artist:
-            keys.append(f"artist:{self._active_artist}")
+            contexts.append((f"artist:{self._active_artist}", 0.35))
         learned: dict[str, float] = {}
-        for key in keys:
+        for key, context_weight in contexts:
             for name, score in self._routine_preferences.get(key, {}).items():
-                learned[name] = learned.get(name, 0.0) + score
-        if learned:
-            best_name, best_score = max(learned.items(), key=lambda item: item[1])
-            if best_score >= 0.24:
-                self._active_routine = best_name
-                self._active_routine_bar = bar
-                return best_name
+                learned[name] = learned.get(name, 0.0) + score * context_weight
 
         if observation.loudness < 0.20 or decision.expression.energy < 0.24:
             routine = "breathe"
         elif observation.section == "build":
             routine = "fan_sweep"
-        elif observation.section == "drop" or decision.expression.energy >= 0.70:
+        elif observation.section in {"drop", "release"} or decision.expression.energy >= 0.70:
             routine = ("opposing_chase", "beat_nod", "counter_rotate", "figure_eight")[bar % 4]
         elif decision.expression.motion >= 0.42:
             routine = ("figure_eight", "opposing_chase", "fan_sweep")[bar % 3]
         else:
             routine = "breathe"
+        if learned:
+            best_name, best_score = max(learned.items(), key=lambda item: item[1])
+            base_score = learned.get(routine, 0.0)
+            # Learning may replace the authored choice only when the contextual
+            # preference is both meaningful and unambiguous. Conflicting old
+            # feedback must not win a dictionary-order tie and latch "breathe".
+            if best_score >= 0.18 and best_score >= base_score + 0.08:
+                routine = best_name
         self._active_routine = routine
         self._active_routine_bar = bar
+        self._active_routine_section = section
         return routine
 
     def _gesture_for_context(self, current: PerformanceDecision) -> Gesture:
@@ -227,9 +253,13 @@ class PerformanceRuntime:
             keys.append(song_key)
             if self._active_section:
                 keys.append(f"{song_key}:section:{self._active_section}")
+                keys.append(
+                    f"{song_key}:section:{self._active_section}:fixture:{fixture_id}"
+                )
             keys.append(f"{song_key}:fixture:{fixture_id}")
         if self._active_artist:
             keys.append(f"artist:{self._active_artist}")
+            keys.append(f"artist:{self._active_artist}:fixture:{fixture_id}")
         return tuple(
             clamp(sum(mapping.get(key, 0.0) for key in keys), -1.0, 1.0)
             for mapping in (
@@ -595,7 +625,10 @@ class PerformanceRuntime:
             tilt_motion = math.sin(phase * 0.5 + index)
         elif routine == "beat_nod":  # beat nods and alternating sides
             pan_motion = math.sin(phase * 0.5 + index * math.pi)
-            tilt_motion = math.sin(phase * 2.0 + observation.beat_phase * math.tau)
+            # One nod per bar plus the small beat accent below stays within
+            # the physical speed envelope. The previous double-counted beat
+            # phase demanded impossible velocity and turned into rate-limit lag.
+            tilt_motion = math.sin(phase + index * 0.45)
         elif routine == "counter_rotate":
             pan_motion = math.cos(phase + index * math.pi)
             tilt_motion = -math.sin(phase * 0.75 + index * 0.8)

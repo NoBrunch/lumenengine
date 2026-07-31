@@ -19,6 +19,50 @@ def sine_pcm(frequency: float, sample_rate: int, frames: int, amplitude: int) ->
 
 
 class AudioAnalyzerTests(unittest.TestCase):
+    def test_section_tracker_rejects_packet_scale_label_flicker(self) -> None:
+        analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=1)
+        sections = []
+        for index in range(240):
+            timestamp = index / 24.0
+            onset = 0.64 if index % 12 == 0 else 0.12
+            section, _confidence = analyzer._classify_section(
+                timestamp, 0.62, onset, 0.42, onset * 0.72
+            )
+            sections.append(section)
+        self.assertEqual(set(sections), {"groove"})
+
+    def test_section_tracker_holds_build_and_release(self) -> None:
+        analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=1)
+        timestamp = 0.0
+        for _ in range(96):
+            analyzer._classify_section(timestamp, 0.35, 0.18, 0.35, 0.18)
+            timestamp += 1 / 24.0
+        seen_build = False
+        for index in range(72):
+            level = 0.35 + index / 72.0 * 0.45
+            section, _ = analyzer._classify_section(
+                timestamp, level, 0.55, 0.45, 0.50
+            )
+            timestamp += 1 / 24.0
+            seen_build |= section == "build"
+        self.assertTrue(seen_build)
+        section, _ = analyzer._classify_section(
+            timestamp, 0.92, 0.95, 0.62, 0.90
+        )
+        self.assertEqual(section, "release")
+        for index in range(60):
+            timestamp += 1 / 24.0
+            section, _ = analyzer._classify_section(
+                timestamp,
+                0.76,
+                0.62 if index % 8 == 0 else 0.16,
+                0.46,
+                0.48 if index % 8 == 0 else 0.20,
+            )
+            if index < 36:
+                self.assertEqual(section, "release")
+        self.assertEqual(section, "groove")
+
     def test_silence_is_bounded(self) -> None:
         analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=1)
         observation = analyzer.analyze_pcm16(bytes(4096), timestamp_s=0.0)
@@ -92,6 +136,28 @@ class AudioAnalyzerTests(unittest.TestCase):
         self.assertGreater(observation.beat_confidence, 0.8)
         self.assertGreaterEqual(observation.bar_phase, 0.0)
         self.assertLessEqual(observation.bar_phase, 1.0)
+
+    def test_silence_clears_tempo_confidence_and_reset_clears_song_state(self) -> None:
+        sample_rate = 48_000
+        frames = 2_048
+        analyzer = RealtimeAudioAnalyzer(sample_rate=sample_rate, channels=1)
+        for chunk in range(180):
+            amplitude = 18_000 if chunk % 12 == 0 else 500
+            pcm = sine_pcm(100, sample_rate, frames, amplitude)
+            observation = analyzer.analyze_pcm16(
+                pcm, timestamp_s=chunk * frames / sample_rate
+            )
+        self.assertIsNotNone(observation.bpm)
+        for offset in range(30):
+            observation = analyzer.analyze_pcm16(
+                bytes(frames * 2),
+                timestamp_s=(180 + offset) * frames / sample_rate,
+            )
+        self.assertIsNone(observation.bpm)
+        self.assertLess(observation.beat_confidence, 0.05)
+        analyzer.reset()
+        self.assertEqual(analyzer._section, "groove")
+        self.assertIsNone(analyzer._tempo_tracker)
 
 
 if __name__ == "__main__":
