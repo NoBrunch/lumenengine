@@ -15,4 +15,11 @@ state/
 *.sqlite3-shm
 *.sqlite3-wal
 .env
+.env.*
+!.env.example
 
+# Local credentials and provider tokens must never enter version control.
+*.pem
+*.key
+credentials.json
+token.json

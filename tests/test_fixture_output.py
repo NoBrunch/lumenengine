@@ -66,6 +66,39 @@ class FixtureOutputTests(unittest.TestCase):
         self.assertEqual(frame.get_channel(0, 37), 0)  # strobe
         self.assertTrue(any(frame.get_channel(0, channel) for channel in range(38, 42)))
 
+    def test_explicit_mover_strobe_stays_on_between_beat_peaks(self) -> None:
+        fixture = FixturePatch(
+            fixture_id="mover",
+            name="Mover",
+            profile_key="generic_rgbw_moving_head_11ch",
+            universe=0,
+            address=31,
+            position_m=Vec3(0, 0, 2),
+            housing_rotation=EulerXYZ(),
+            calibration=FixtureCalibration(-270, 270, -135, 135),
+            dimmer_channel=6,
+        )
+        frame = DMXFrame()
+        apply_moving_head_profile(
+            frame,
+            fixture,
+            decision(),
+            MusicalObservation(
+                timestamp_s=2.2,
+                loudness=0.8,
+                onset_strength=0.1,
+                low_energy=0.5,
+                mid_energy=0.4,
+                high_energy=0.3,
+                beat_pulse=0.05,
+                beat_phase=0.75,
+                beat_confidence=0.9,
+                bpm=120.0,
+            ),
+            choreography_strobe=0.6,
+        )
+        self.assertGreater(frame.get_channel(0, 37), 0)
+
     def test_multi_effect_writes_all_active_systems(self) -> None:
         fixture = ProfileFixturePatch(
             fixture_id="multi",
@@ -101,6 +134,80 @@ class FixtureOutputTests(unittest.TestCase):
         self.assertTrue(any(frame.get_channel(0, channel) for channel in range(7, 15)))
         self.assertTrue(any(frame.get_channel(0, channel) for channel in (15, 16)))
         self.assertEqual(frame.get_channel(0, 19), 0)  # no internal macro
+
+    def test_explicit_multi_effect_strobe_uses_internal_rate_channel(self) -> None:
+        fixture = ProfileFixturePatch(
+            fixture_id="multi",
+            name="Multi",
+            profile_key="generic_multi_effect_19ch",
+            universe=0,
+            address=1,
+            position_m=Vec3(0, 0, 2),
+            housing_rotation=EulerXYZ(),
+        )
+        frame = DMXFrame()
+        apply_auxiliary_fixture(
+            frame,
+            fixture,
+            decision(),
+            MusicalObservation(
+                timestamp_s=2.2,
+                loudness=0.8,
+                onset_strength=0.1,
+                low_energy=0.5,
+                mid_energy=0.4,
+                high_energy=0.3,
+                beat_pulse=0.05,
+                beat_phase=0.75,
+                beat_confidence=0.9,
+                bpm=120.0,
+            ),
+            choreography_strobe=0.6,
+        )
+        # Characterized personality: channel 6 is 0 off and 10..255 active.
+        self.assertGreaterEqual(frame.get_channel(0, 6), 10)
+
+    def test_strobe_feedback_changes_hardware_rate_and_can_veto_step(self) -> None:
+        fixture = ProfileFixturePatch(
+            fixture_id="multi",
+            name="Multi",
+            profile_key="generic_multi_effect_19ch",
+            universe=0,
+            address=1,
+            position_m=Vec3(0, 0, 2),
+            housing_rotation=EulerXYZ(),
+        )
+        observation = MusicalObservation(
+            timestamp_s=2.2,
+            loudness=0.8,
+            onset_strength=0.1,
+            low_energy=0.5,
+            mid_energy=0.4,
+            high_energy=0.3,
+            beat_pulse=0.05,
+            beat_phase=0.75,
+            beat_confidence=0.9,
+            bpm=120.0,
+        )
+        slower = DMXFrame()
+        faster = DMXFrame()
+        vetoed = DMXFrame()
+        apply_auxiliary_fixture(
+            slower, fixture, decision(), observation,
+            strobe_feedback=-0.3, choreography_strobe=0.6,
+        )
+        apply_auxiliary_fixture(
+            faster, fixture, decision(), observation,
+            strobe_feedback=0.3, choreography_strobe=0.6,
+        )
+        apply_auxiliary_fixture(
+            vetoed, fixture, decision(), observation,
+            strobe_feedback=-0.8, choreography_strobe=0.6,
+        )
+        self.assertLess(
+            slower.get_channel(0, 6), faster.get_channel(0, 6)
+        )
+        self.assertEqual(vetoed.get_channel(0, 6), 0)
 
     def test_multi_effect_motion_consumes_phrase_routine(self) -> None:
         from dataclasses import replace

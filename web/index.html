@@ -41,6 +41,7 @@
 
       <div class="desktop-menubar">
         <button data-nav="performance">Session</button>
+        <button data-nav="rehearsal">Rehearsal</button>
         <button data-nav="rig">Rig</button>
         <button data-nav="audio">Analysis</button>
         <button data-nav="memory">Memory</button>
@@ -99,30 +100,35 @@
             <span><b>Performance</b><small>Live operation</small></span>
             <kbd>1</kbd>
           </button>
+          <button class="nav-item" data-nav="rehearsal">
+            <span class="nav-glyph rehearsal-glyph"></span>
+            <span><b>Rehearsal</b><small>Audition and place routines</small></span>
+            <kbd>2</kbd>
+          </button>
           <button class="nav-item" data-nav="rig">
             <span class="nav-glyph rig-glyph"></span>
             <span><b>Room &amp; rig</b><small>Geometry and patch</small></span>
-            <kbd>2</kbd>
+            <kbd>3</kbd>
           </button>
           <button class="nav-item" data-nav="audio">
             <span class="nav-glyph audio-glyph"></span>
             <span><b>Audio laboratory</b><small>Signal analysis</small></span>
-            <kbd>3</kbd>
+            <kbd>4</kbd>
           </button>
           <button class="nav-item" data-nav="memory">
             <span class="nav-glyph memory-glyph"></span>
             <span><b>Song memory</b><small>Feedback and routines</small></span>
-            <kbd>4</kbd>
+            <kbd>5</kbd>
           </button>
           <button class="nav-item" data-nav="music">
             <span class="nav-glyph spotify-glyph"></span>
             <span><b>Spotify console</b><small>Chromecast control</small></span>
-            <kbd>5</kbd>
+            <kbd>6</kbd>
           </button>
           <button class="nav-item" data-nav="system">
             <span class="nav-glyph system-glyph"></span>
             <span><b>System</b><small>Hardware and service</small></span>
-            <kbd>6</kbd>
+            <kbd>7</kbd>
           </button>
 
           <div class="nav-section-label lower">Active session</div>
@@ -288,44 +294,34 @@
 
               <section class="panel feedback-panel">
                 <div class="panel-titlebar">
-                  <h3>Teach this performance</h3>
-                  <span class="panel-note">Attached to the current musical moment</span>
-                </div>
-                <div class="feedback-buttons">
-                  <button data-feedback="liked_this" data-value="1"><span>✓</span>I liked that</button>
-                  <button data-feedback="increase_movement" data-value="1"><span>↗</span>More movement</button>
-                  <button data-feedback="decrease_movement" data-value="-1"><span>↘</span>Less movement</button>
-                  <button data-feedback="too_busy" data-value="-1"><span>≋</span>Too busy</button>
-                  <button data-feedback="not_busy_enough" data-value="1"><span>＋</span>Not busy enough</button>
-                  <button data-feedback="calm_down" data-value="-1"><span>◌</span>Calm down</button>
-                  <button data-feedback="pick_it_up" data-value="1"><span>⚡</span>Pick it up</button>
-                  <button data-feedback="too_bright" data-value="-1"><span>☀</span>Too bright</button>
-                  <button data-feedback="too_dim" data-value="1"><span>◐</span>Too dim</button>
-                  <button data-feedback="bad_timing" data-value="-1"><span>◷</span>Bad timing</button>
-                  <button data-feedback="hold_this" data-value="1"><span>◇</span>Hold this idea</button>
-                  <button data-feedback="great_timing" data-value="1"><span>✓</span>Timing was right</button>
-                  <button data-feedback="perfect_motion" data-value="1"><span>✦</span>Perfect motion</button>
-                  <button data-feedback="more_like_this" data-value="1"><span>★</span>More like this</button>
-                  <button data-feedback="no_strobes" data-value="1"><span>◫</span>No strobes</button>
-                  <button data-feedback="strobe" data-value="1"><span>▦</span>Strobe</button>
-                  <button data-feedback="faster_strobe" data-value="1"><span>≫</span>Faster strobe</button>
-                  <button data-feedback="slower_strobe" data-value="1"><span>≪</span>Slower strobe</button>
-                  <button data-feedback="faster" data-value="1"><span>↗</span>Faster</button>
-                  <button data-feedback="slower" data-value="1"><span>↘</span>Slower</button>
-                  <button data-feedback="brighter" data-value="1"><span>☀</span>Brighter</button>
-                  <button data-feedback="dimmer" data-value="1"><span>◐</span>Dimmer</button>
-                  <button data-feedback="slower_side_arms" data-value="1"><span>◌</span>Slower side arms</button>
-                  <button data-feedback="faster_side_arms" data-value="1"><span>◌</span>Faster side arms</button>
-                  <button data-feedback="cool_blue_purple" data-value="1"><span>◈</span>Blue / purple</button>
-                  <button data-feedback="warmer_color" data-value="1"><span>◈</span>Warmer palette</button>
+                  <h3>Quick feedback</h3>
+                  <span class="panel-note">Repeated taps increase urgency; they do not interrupt the routine</span>
                 </div>
                 <label class="feedback-target">Applies to
                   <select id="feedback-scope"><option value="overall">Overall performance</option></select>
                 </label>
-                <div class="feedback-note">
-                  <input id="feedback-note" type="text" placeholder="Optional note in your own words…">
-                  <button id="feedback-note-button">Save note</button>
+                <div class="feedback-buttons feedback-primary">
+                  <button data-feedback="liked_this" data-value="1"><span>✓</span>Keep this</button>
+                  <button data-feedback="pick_it_up" data-value="1"><span>↗</span>More</button>
+                  <button data-feedback="calm_down" data-value="-1"><span>↘</span>Less</button>
+                  <button data-feedback="great_timing" data-value="1"><span>◉</span>Timing good</button>
+                  <button data-feedback="bad_timing" data-value="-1"><span>◷</span>Timing off</button>
+                  <button data-feedback="wrong_look" data-value="-1"><span>×</span>Wrong look</button>
                 </div>
+                <div class="feedback-actions"><button id="feedback-undo-button" class="compact-button">Undo last</button><span>Detailed corrections are optional.</span></div>
+                <details class="feedback-details">
+                  <summary>Specific correction or note</summary>
+                  <div class="feedback-buttons feedback-specific">
+                    <button data-feedback="increase_movement" data-value="1">More movement</button><button data-feedback="decrease_movement" data-value="-1">Less movement</button>
+                    <button data-feedback="faster" data-value="1">Faster</button><button data-feedback="slower" data-value="-1">Slower</button>
+                    <button data-feedback="brighter" data-value="1">Brighter</button><button data-feedback="dimmer" data-value="-1">Dimmer</button>
+                    <button data-feedback="strobe" data-value="1">More strobe</button><button data-feedback="no_strobes" data-value="1">No strobe</button>
+                    <button data-feedback="faster_strobe" data-value="1">Faster strobe</button><button data-feedback="slower_strobe" data-value="1">Slower strobe</button>
+                    <button data-feedback="faster_side_arms" data-value="1">Faster side arms</button><button data-feedback="slower_side_arms" data-value="1">Slower side arms</button>
+                    <button data-feedback="cool_blue_purple" data-value="1">Cooler palette</button><button data-feedback="warmer_color" data-value="1">Warmer palette</button>
+                  </div>
+                  <div class="feedback-note"><input id="feedback-note" type="text" placeholder="Optional note…"><button id="feedback-note-button">Save note</button></div>
+                </details>
               </section>
 
               <section class="panel event-panel">
@@ -334,6 +330,76 @@
                   <button class="mini-tool" data-nav="system">Full diagnostics</button>
                 </div>
                 <div id="event-log" class="event-log"></div>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-page" data-page="rehearsal">
+            <div class="page-heading">
+              <div><span class="eyebrow">Programming workspace</span><h2>Rehearsal</h2></div>
+              <div class="heading-actions"><span id="rehearsal-state" class="panel-badge">STOPPED</span><button id="rehearsal-stop" class="compact-button">Stop rehearsal</button></div>
+            </div>
+            <div class="rehearsal-grid">
+              <section class="panel rehearsal-library">
+                <div class="panel-titlebar"><h3>Movement Lab</h3><span class="panel-note">Auditioning alone does not train Lumen</span></div>
+                <div id="rehearsal-routines" class="routine-cards"></div>
+                <div class="rehearsal-transport">
+                  <button id="rehearsal-previous">← Previous</button>
+                  <button id="rehearsal-restart">Restart</button>
+                  <button id="rehearsal-next">Next →</button>
+                  <button id="rehearsal-tour">Tour: off</button>
+                </div>
+              </section>
+              <section class="panel rehearsal-control-panel">
+                <div class="panel-titlebar"><h3>Audition controls</h3><span id="rehearsal-output-badge" class="panel-badge">VIRTUAL PREVIEW</span></div>
+                <p class="control-help">Preview renders DMX without touching the rig. Live rig sends the selected routine to the physical fixtures. Stop rehearsal before switching output.</p>
+                <div class="rehearsal-controls">
+                  <label><span>Output</span><select id="rehearsal-output"><option value="virtual">Preview only</option><option value="live">Live rig</option></select></label>
+                  <label><span>Fixture scope</span><select id="rehearsal-scope"><option value="movers">Both movers</option><option value="center">Center effect</option><option value="overall">Whole rig</option></select></label>
+                  <label><span>Tempo <output id="rehearsal-bpm-value">120 BPM</output></span><input id="rehearsal-bpm" type="range" min="40" max="240" step="1" value="120"></label>
+                  <label><span>Audition scale <output id="rehearsal-size-value">100%</output></span><input id="rehearsal-size" type="range" min="0" max="100" step="1" value="100"></label>
+                  <label><span>Intensity <output id="rehearsal-intensity-value">68%</output></span><input id="rehearsal-intensity" type="range" min="0" max="100" step="1" value="68"></label>
+                  <label><span>Strobe <output id="rehearsal-strobe-value">Off</output></span><input id="rehearsal-strobe" type="range" min="0" max="100" step="1" value="0"></label>
+                  <label><span>Palette</span><select id="rehearsal-palette"><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
+                  <label class="check-control"><input id="rehearsal-isolate" type="checkbox" checked><span>Darken fixtures outside selected scope</span></label>
+                </div>
+                <button id="rehearsal-start" class="rehearsal-start">Start selected routine</button>
+                <div class="rehearsal-now"><span>NOW AUDITIONING</span><b id="rehearsal-routine-name">Figure eight</b><p id="rehearsal-routine-description">Looping pan with a faster vertical harmonic.</p></div>
+              </section>
+              <section class="panel motion-editor-panel">
+                <div class="panel-titlebar"><h3>Motion Studio</h3><span id="motion-editor-status" class="panel-note">Saved locally</span></div>
+                <div class="motion-editor-body">
+                  <div class="motion-path-stage">
+                    <canvas id="motion-path-canvas"></canvas>
+                    <div class="motion-path-legend"><span class="mover-a">Mover A</span><span class="mover-b">Mover B</span><span>Pan ↔ · Tilt ↕</span></div>
+                  </div>
+                  <div class="motion-editor-controls">
+                    <label><span>Cycle length <output id="motion-cycle-value">16 beats</output></span><input id="motion-cycle" data-motion-control="cycle_beats" type="range" min="1" max="32" step="1" value="16"></label>
+                    <label><span>Pan travel <output id="motion-pan-size-value">100%</output></span><input id="motion-pan-size" data-motion-control="pan_size" type="range" min="0" max="100" step="1" value="100"></label>
+                    <label><span>Tilt travel <output id="motion-tilt-size-value">82%</output></span><input id="motion-tilt-size" data-motion-control="tilt_size" type="range" min="0" max="100" step="1" value="82"></label>
+                    <label><span>Pan center <output id="motion-pan-center-value">50%</output></span><input id="motion-pan-center" data-motion-control="pan_center" type="range" min="0" max="100" step="1" value="50"></label>
+                    <label><span>Tilt center <output id="motion-tilt-center-value">50%</output></span><input id="motion-tilt-center" data-motion-control="tilt_center" type="range" min="0" max="100" step="1" value="50"></label>
+                    <label><span>Fixture relationship</span><select id="motion-relationship" data-motion-control="relationship"><option value="synchronized">Synchronized</option><option value="opposed">Exactly opposed</option><option value="mirrored">Mirrored pan</option><option value="chase">Even chase</option><option value="counter">Counter direction</option></select></label>
+                    <label><span>Direction</span><select id="motion-direction" data-motion-control="direction"><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
+                    <label><span>Center body travel <output id="motion-body-size-value">65%</output></span><input id="motion-body-size" data-motion-control="body_size" type="range" min="0" max="100" step="1" value="65"></label>
+                    <label><span>Center arm travel <output id="motion-arm-size-value">90%</output></span><input id="motion-arm-size" data-motion-control="arm_size" type="range" min="0" max="100" step="1" value="90"></label>
+                  </div>
+                </div>
+                <div class="motion-editor-actions"><button id="motion-reset-defaults">Reset this routine</button><span>These are shared routine definitions. Edits affect this rehearsal and every future automatic performance that selects the routine; audition tempo, scale, intensity, strobe, palette, and scope above remain rehearsal-only.</span><strong id="motion-velocity-status">VELOCITY OK</strong></div>
+              </section>
+              <section class="panel rehearsal-place-panel">
+                <div class="panel-titlebar"><h3>Place in song memory</h3><span class="panel-note">Explicit teaching action</span></div>
+                <p>After you find a movement you want, identify the musical moment and save the selected routine. This is the only rehearsal action that teaches Lumen.</p>
+                <div class="rehearsal-placement">
+                  <label><span>This part of the song</span><select id="rehearsal-context-label"><option value="intro">Intro</option><option value="verse">Verse</option><option value="pre_chorus">Pre-chorus</option><option value="chorus">Chorus</option><option value="build">Build</option><option value="release">Release / drop</option><option value="breakdown">Breakdown / quiet part</option><option value="bridge">Bridge</option><option value="solo">Solo</option><option value="outro">Outro</option><option value="vocal_focus">Vocal focus</option><option value="instrumental">Instrumental</option><option value="transition">Transition</option></select></label>
+                  <button id="rehearsal-context-button">Save song context</button>
+                  <div class="placement-summary"><span>Preferred action</span><b id="rehearsal-preferred-summary">Figure eight · Both movers</b></div>
+                  <button id="rehearsal-use-here" class="rehearsal-use-here">Use this routine here</button>
+                </div>
+              </section>
+              <section class="panel rehearsal-guide-panel">
+                <div class="panel-titlebar"><h3>Rehearsal workflow</h3></div>
+                <ol><li>Select Preview only and learn each motion.</li><li>Switch to Live rig and check its physical range.</li><li>Adjust tempo, size, scope, color, and intensity.</li><li>While a song plays later, return here and choose Use this routine here.</li></ol>
               </section>
             </div>
           </section>
@@ -432,24 +498,34 @@
                     </div>
                   </fieldset>
                   <fieldset id="calibration-fieldset">
-                    <legend>Mechanical calibration <small>Party Parrot-style live envelope</small></legend>
-                    <p class="calibration-guide">These whole-degree sliders define the usable software movement envelope. They are the room limits used by Lumen’s resolver, not hidden hardware limits. Start calibration to light and jog the mover, capture left/home/right, then save the fixture.</p>
-                    <div class="calibration-slider-panel">
-                      <label>Pan minimum <output id="pan-range-readout">—</output><input data-calibration-slider="pan_min_deg" type="range" min="0" max="540" step="1" value="0"></label>
-                      <label>Pan maximum <input data-calibration-slider="pan_max_deg" type="range" min="0" max="540" step="1" value="540"></label>
-                      <label>Tilt minimum <output id="tilt-range-readout">—</output><input data-calibration-slider="tilt_min_deg" type="range" min="0" max="270" step="1" value="0"></label>
-                      <label>Tilt maximum <input data-calibration-slider="tilt_max_deg" type="range" min="0" max="270" step="1" value="270"></label>
-                      <div class="calibration-presets"><button type="button" data-calibration-preset="wide">Wide</button><button type="button" data-calibration-preset="center">Center</button><button type="button" data-calibration-preset="reset">Loaded</button></div>
-                    </div>
+                    <legend>Beam envelope calibration <small>physical room positions</small></legend>
+                    <p class="calibration-guide">Define where the beam is useful by looking at the light—not by interpreting angles. Pan and tilt are captured independently. Lumen automatically handles a fixture whose number direction is reversed.</p>
                     <div class="live-calibration-panel">
                       <div class="live-calibration-heading"><b>Live mover calibration</b><button type="button" id="calibration-toggle">Start calibration</button></div>
-                      <p>Jog the selected mover at low output, capture left/home/right and save the room envelope.</p>
-                      <label>Pan jog <output id="calibration-pan-value">128</output><input id="calibration-pan" type="range" min="0" max="255" step="1" value="128" disabled></label>
-                      <label>Tilt jog <output id="calibration-tilt-value">128</output><input id="calibration-tilt" type="range" min="0" max="255" step="1" value="128" disabled></label>
+                      <p>Start at the saved Home position. Move one slider, look at the beam, and capture the named room position.</p>
+                      <label>Pan position <input id="calibration-pan" type="range" min="0" max="255" step="1" value="128" disabled><output id="calibration-pan-value">50%</output></label>
+                      <div class="calibration-axis-block">
+                        <b>Horizontal beam limits</b>
+                        <div class="calibration-captures"><button type="button" data-calibration-capture="pan_left" disabled>Capture Left</button><button type="button" data-calibration-capture="pan_home" disabled>Capture Home</button><button type="button" data-calibration-capture="pan_right" disabled>Capture Right</button></div>
+                        <div class="calibration-points"><button type="button" data-calibration-preview="pan_left">Left <span id="capture-pan-left">—</span></button><button type="button" data-calibration-preview="pan_home">Home <span id="capture-pan-home">—</span></button><button type="button" data-calibration-preview="pan_right">Right <span id="capture-pan-right">—</span></button></div>
+                      </div>
+                      <label>Tilt position <input id="calibration-tilt" type="range" min="0" max="255" step="1" value="128" disabled><output id="calibration-tilt-value">50%</output></label>
+                      <div class="calibration-axis-block">
+                        <b>Vertical beam limits</b>
+                        <p><strong>High</strong> is the highest useful beam in the room. <strong>Low</strong> is the lowest useful beam. There is no universal vertical number.</p>
+                        <div class="calibration-captures"><button type="button" data-calibration-capture="tilt_high" disabled>Capture High</button><button type="button" data-calibration-capture="tilt_home" disabled>Capture Home</button><button type="button" data-calibration-capture="tilt_low" disabled>Capture Low</button></div>
+                        <div class="calibration-points"><button type="button" data-calibration-preview="tilt_high">High <span id="capture-tilt-high">—</span></button><button type="button" data-calibration-preview="tilt_home">Home <span id="capture-tilt-home">—</span></button><button type="button" data-calibration-preview="tilt_low">Low <span id="capture-tilt-low">—</span></button></div>
+                      </div>
                       <label>Jog speed <output id="calibration-speed-value">192</output><input id="calibration-speed" type="range" min="0" max="255" value="192" disabled></label>
-                      <div class="calibration-captures"><button type="button" data-calibration-capture="left" disabled>Capture left</button><button type="button" data-calibration-capture="home" disabled>Capture home</button><button type="button" data-calibration-capture="right" disabled>Capture right</button></div>
+                      <p id="calibration-direction-note" class="calibration-direction-note">Axis direction will be detected from the captured points.</p>
                     </div>
-                    <div class="form-grid two">
+                    <div class="calibration-storage" aria-hidden="true">
+                      <input data-calibration="pan_left_dmx" type="number">
+                      <input data-calibration="pan_right_dmx" type="number">
+                      <input data-calibration="tilt_high_dmx" type="number">
+                      <input data-calibration="tilt_low_dmx" type="number">
+                      <input data-calibration="home_pan_dmx" type="number">
+                      <input data-calibration="home_tilt_dmx" type="number">
                       <label>Pan minimum<input data-calibration="pan_min_deg" type="number" step="0.01"></label>
                       <label>Pan maximum<input data-calibration="pan_max_deg" type="number" step="0.01"></label>
                       <label>Tilt minimum<input data-calibration="tilt_min_deg" type="number" step="0.01"></label>
@@ -460,18 +536,11 @@
                       <label>Tilt direction<select data-calibration="tilt_direction"><option value="1">Normal (+1)</option><option value="-1">Reverse (-1)</option></select></label>
                       <label>Pan speed °/s<input data-calibration="max_pan_speed_deg_s" type="number" step="1"></label>
                       <label>Tilt speed °/s<input data-calibration="max_tilt_speed_deg_s" type="number" step="1"></label>
-                      <label>Home pan DMX<input data-calibration="home_pan_dmx" type="number" min="0" max="255" step="1"></label>
-                      <label>Home tilt DMX<input data-calibration="home_tilt_dmx" type="number" min="0" max="255" step="1"></label>
+                      <input data-calibration="pan_dmx_min_u16" type="number">
+                      <input data-calibration="pan_dmx_max_u16" type="number">
+                      <input data-calibration="tilt_dmx_min_u16" type="number">
+                      <input data-calibration="tilt_dmx_max_u16" type="number">
                     </div>
-                    <details>
-                      <summary>DMX endpoint calibration</summary>
-                      <div class="form-grid two details-grid">
-                        <label>Pan DMX minimum<input data-calibration="pan_dmx_min_u16" type="number" min="0" max="65535"></label>
-                        <label>Pan DMX maximum<input data-calibration="pan_dmx_max_u16" type="number" min="0" max="65535"></label>
-                        <label>Tilt DMX minimum<input data-calibration="tilt_dmx_min_u16" type="number" min="0" max="65535"></label>
-                        <label>Tilt DMX maximum<input data-calibration="tilt_dmx_max_u16" type="number" min="0" max="65535"></label>
-                      </div>
-                    </details>
                   </fieldset>
                 </form>
               </section>
@@ -568,6 +637,7 @@
                   <div><span>ENERGY</span><b id="analysis-energy">0%</b><small>Brightness and effect activity</small></div>
                   <div><span>MOTION</span><b id="analysis-motion">0%</b><small>Pan, tilt, and motor travel</small></div>
                   <div><span>TIMING</span><b id="analysis-timing">Searching</b><small>Beat/tempo confidence</small></div>
+                  <div><span>STRUCTURE MODEL</span><b id="analysis-structure">Live analyzer only</b><small id="analysis-structure-detail">No validated streaming student is active.</small></div>
                   <div><span>RESOLUTION</span><b id="analysis-resolution">Waiting</b><small>How the target becomes DMX</small></div>
                 </div>
                 <div class="pipeline">
@@ -581,6 +651,81 @@
                   <i></i>
                   <div><span>05</span><b>Resolver</b><small>Geometry to fixture state</small></div>
                 </div>
+              </section>
+              <section class="panel training-panel">
+                <div class="panel-titlebar">
+                  <h3>Neural training dataset</h3>
+                  <button class="mini-tool" id="training-export-button">Build training manifest</button>
+                </div>
+                <div class="training-status">
+                  <span class="training-record-indicator" id="training-record-indicator"></span>
+                  <div>
+                    <small>LOCAL LOSSLESS AUDIO + SYNCHRONIZED LABELS</small>
+                    <b id="training-state">ARMED</b>
+                    <p id="training-detail">Armed for the next Monitor or Live session.</p>
+                  </div>
+                </div>
+                <div class="training-facts">
+                  <div><span>Current duration</span><b id="training-duration">0:00</b></div>
+                  <div><span>WAV segments</span><b id="training-segments">0</b></div>
+                  <div><span>Semantic frames</span><b id="training-features">0</b></div>
+                  <div><span>Linked feedback</span><b id="training-feedback">0</b></div>
+                  <div><span>Context / action labels</span><b id="training-annotations">0</b></div>
+                  <div><span>Dataset size</span><b id="training-size">0 B</b></div>
+                  <div><span>Disk available</span><b id="training-free">—</b></div>
+                  <div><span>Dropped frames</span><b id="training-dropped">0</b></div>
+                </div>
+                <div class="training-settings">
+                  <label class="training-toggle">
+                    <input id="training-capture-enabled" type="checkbox" checked>
+                    <span>Collect line-in audio during Monitor and Live modes</span>
+                  </label>
+                  <label>
+                    <span>Storage ceiling</span>
+                    <div><input id="training-max-gb" type="number" min="1" max="800" step="1" value="100"><small>GB</small></div>
+                  </label>
+                  <button id="save-training-settings-button">Save collection settings</button>
+                </div>
+                <dl class="training-paths">
+                  <div><dt>Dataset root</dt><dd id="training-path">state/training</dd></div>
+                  <div><dt>Latest export</dt><dd id="training-export-path">No manifest built yet</dd></div>
+                </dl>
+                <p class="training-explanation">Every feature frame is tied to an exact PCM frame, song position, musical interpretation, semantic routine, complete fixture output, and any feedback you submit. Runtime choices are saved as baseline context—not assumed to be correct training targets.</p>
+              </section>
+              <section class="panel research-panel">
+                <div class="panel-titlebar">
+                  <h3>Musical-structure research stack</h3>
+                  <div class="panel-tools">
+                    <button class="mini-tool" id="research-refresh-button">Refresh</button>
+                    <button class="mini-tool" id="research-run-button">Analyze new recordings</button>
+                    <button class="mini-tool" id="research-cancel-button">Pause analysis</button>
+                    <button class="mini-tool" id="research-train-button">Train and validate</button>
+                  </div>
+                </div>
+                <div class="training-steps">
+                  <div><b>1</b><span>Analyze recordings</span><small>EDMFormer and SongFormer label the captured songs. This is resumable.</small></div>
+                  <div><b>2</b><span>Check readiness</span><small>Lumen keeps songs separated and reserves held-out songs for an honest test.</small></div>
+                  <div><b>3</b><span>Train and validate</span><small>The 60-second causal student activates only after passing the held-out gate.</small></div>
+                </div>
+                <div class="research-summary">
+                  <div><span>Captured recordings</span><b id="research-captured">0 total</b></div>
+                  <div><span>Eligible songs processed</span><b id="research-recordings">0 / 0</b></div>
+                  <div><span>Teacher jobs</span><b id="research-jobs">0 / 0</b></div>
+                  <div><span>Analysis progress</span><b id="research-progress">0%</b></div>
+                  <div><span>Usable examples</span><b id="research-examples">0</b></div>
+                  <div><span>Held-out examples</span><b id="research-heldout">0</b></div>
+                  <div><span>Errors</span><b id="research-errors">0</b></div>
+                  <div><span>Streaming student</span><b id="research-student-state">Awaiting training</b></div>
+                </div>
+                <div class="research-readiness" id="research-readiness">Analyze captured songs to begin.</div>
+                <div class="research-error-list" id="research-error-list"></div>
+                <div class="research-label-balance" id="research-label-balance"></div>
+                <details class="research-details">
+                  <summary>Dataset and dependency details</summary>
+                  <div class="panel-tools research-detail-tools"><button class="mini-tool" id="research-import-button">Refresh normalized annotations</button></div>
+                  <div id="research-components" class="research-components"></div>
+                </details>
+                <p class="training-explanation">Public datasets teach general musical form. Offline teachers convert your captured songs into timed labels. Your feedback and preferred actions remain the separate source for learning how those musical moments should look in this room.</p>
               </section>
             </div>
           </section>
@@ -894,39 +1039,26 @@
 
         <section class="remote-section">
           <div class="remote-section-heading"><h2>Teach this moment</h2><span id="remote-feedback-time">Now</span></div>
-          <div class="remote-feedback">
-            <button data-feedback="liked_this" data-value="1"><span>✓</span><b>I liked that</b></button>
-            <button data-feedback="increase_movement" data-value="1"><span>↗</span><b>More movement</b></button>
-            <button data-feedback="decrease_movement" data-value="-1"><span>↘</span><b>Less movement</b></button>
-            <button data-feedback="too_busy" data-value="-1"><span>≋</span><b>Too busy</b></button>
-            <button data-feedback="not_busy_enough" data-value="1"><span>＋</span><b>Not busy enough</b></button>
-            <button data-feedback="calm_down" data-value="-1"><span>◌</span><b>Calm down</b></button>
-            <button data-feedback="pick_it_up" data-value="1"><span>⚡</span><b>Pick it up</b></button>
-            <button data-feedback="too_bright" data-value="-1"><span>☀</span><b>Too bright</b></button>
-            <button data-feedback="too_dim" data-value="1"><span>◐</span><b>Too dim</b></button>
-            <button data-feedback="bad_timing" data-value="-1"><span>◷</span><b>Bad timing</b></button>
-            <button data-feedback="hold_this" data-value="1"><span>◇</span><b>Hold this idea</b></button>
-            <button data-feedback="great_timing" data-value="1"><span>✓</span><b>Timing was right</b></button>
-            <button data-feedback="perfect_motion" data-value="1"><span>✦</span><b>Perfect motion</b></button>
-            <button data-feedback="more_like_this" data-value="1"><span>★</span><b>More like this</b></button>
-            <button data-feedback="no_strobes" data-value="1"><span>◫</span><b>No strobes</b></button>
-            <button data-feedback="strobe" data-value="1"><span>▦</span><b>Strobe</b></button>
-            <button data-feedback="faster_strobe" data-value="1"><span>≫</span><b>Faster strobe</b></button>
-            <button data-feedback="slower_strobe" data-value="1"><span>≪</span><b>Slower strobe</b></button>
-            <button data-feedback="faster" data-value="1"><span>↗</span><b>Faster</b></button>
-            <button data-feedback="slower" data-value="1"><span>↘</span><b>Slower</b></button>
-            <button data-feedback="brighter" data-value="1"><span>☀</span><b>Brighter</b></button>
-            <button data-feedback="dimmer" data-value="1"><span>◐</span><b>Dimmer</b></button>
-            <button data-feedback="slower_side_arms" data-value="1"><span>◌</span><b>Slower side arms</b></button>
-            <button data-feedback="faster_side_arms" data-value="1"><span>◌</span><b>Faster side arms</b></button>
-            <button data-feedback="cool_blue_purple" data-value="1"><span>◈</span><b>Blue / purple</b></button>
-            <button data-feedback="warmer_color" data-value="1"><span>◈</span><b>Warmer palette</b></button>
-            <button id="remote-note-open"><span>+</span><b>Add a note</b></button>
-          </div>
           <label class="feedback-target">Applies to
             <select id="remote-feedback-scope"><option value="overall">Overall performance</option></select>
           </label>
+          <div class="remote-feedback remote-feedback-primary">
+            <button data-feedback="liked_this" data-value="1"><span>✓</span><b>Keep this</b></button>
+            <button data-feedback="pick_it_up" data-value="1"><span>↗</span><b>More</b></button>
+            <button data-feedback="calm_down" data-value="-1"><span>↘</span><b>Less</b></button>
+            <button data-feedback="great_timing" data-value="1"><span>◉</span><b>Timing good</b></button>
+            <button data-feedback="bad_timing" data-value="-1"><span>◷</span><b>Timing off</b></button>
+            <button data-feedback="wrong_look" data-value="-1"><span>×</span><b>Wrong look</b></button>
+          </div>
+          <div class="remote-feedback-actions"><button id="remote-feedback-undo">Undo last</button><button id="remote-note-open">Specific correction</button></div>
           <div id="remote-note-box" class="remote-note-box hidden">
+            <div class="remote-specific-feedback">
+              <button data-feedback="increase_movement" data-value="1">More movement</button><button data-feedback="decrease_movement" data-value="-1">Less movement</button>
+              <button data-feedback="faster" data-value="1">Faster</button><button data-feedback="slower" data-value="-1">Slower</button>
+              <button data-feedback="brighter" data-value="1">Brighter</button><button data-feedback="dimmer" data-value="-1">Dimmer</button>
+              <button data-feedback="strobe" data-value="1">More strobe</button><button data-feedback="no_strobes" data-value="1">No strobe</button>
+              <button data-feedback="cool_blue_purple" data-value="1">Cooler color</button><button data-feedback="warmer_color" data-value="1">Warmer color</button>
+            </div>
             <textarea id="remote-feedback-note" rows="3" placeholder="Say what you noticed in your own words…"></textarea>
             <button id="remote-feedback-note-button">Save this note</button>
           </div>
@@ -958,7 +1090,7 @@
       <div class="dialog-body">
         <p>Hotkeys work anywhere in the console unless you are typing into a field.</p>
         <div class="hotkey-grid compact">
-          <div><kbd>1—5</kbd><span>Switch workspaces</span></div>
+          <div><kbd>1—7</kbd><span>Switch workspaces</span></div>
           <div><kbd>B</kbd><span>Toggle blackout</span></div>
           <div><kbd>M</kbd><span>Monitor line-in</span></div>
           <div><kbd>L</kbd><span>Perform through DMX</span></div>

@@ -24,7 +24,16 @@ from lumen_engine.media import (
 )
 from lumen_engine.memory import SongMemoryStore
 from lumen_engine.models import Feedback, MediaIdentity, MusicalObservation, Vec3
+from lumen_engine.offline import (
+    EDMFORMER_JOB,
+    SONGFORMER_JOB,
+    STUDENT_TRAIN_JOB,
+    OfflineResearchWorker,
+    ResearchJobCoordinator,
+    enqueue_student_training,
+)
 from lumen_engine.party_parrot import import_party_parrot_show
+from lumen_engine.research import ResearchManager
 from lumen_engine.runtime import PerformanceRuntime
 from lumen_engine.spatial import SpatialTargetingEngine, UnreachableTargetError
 from lumen_engine.usb_dmx import (
@@ -39,6 +48,7 @@ DEFAULT_PARTY_PARROT_DATABASE = (
 )
 DEFAULT_IMPORTED_RIG = PROJECT_DIR / "config" / "party-parrot-active.json"
 DEFAULT_MEMORY = PROJECT_DIR / "state" / "lumen.sqlite3"
+DEFAULT_RESEARCH_ROOT = PROJECT_DIR / "state" / "training" / "research"
 DEFAULT_SPOTIFY_TOKEN = (
     Path.home() / ".local" / "state" / "lumenengine" / "spotify-token.json"
 )
@@ -184,6 +194,114 @@ def build_parser() -> argparse.ArgumentParser:
     feedback.add_argument("--note", help="your own words; no lighting jargon required")
     feedback.add_argument("--memory", type=Path, default=DEFAULT_MEMORY)
     feedback.set_defaults(handler=_feedback)
+
+    research_status = subparsers.add_parser(
+        "research-status",
+        help="inspect datasets, teacher environments, models, and local jobs",
+    )
+    research_status.add_argument(
+        "--root", type=Path, default=DEFAULT_RESEARCH_ROOT
+    )
+    research_status.add_argument(
+        "--memory", type=Path, default=DEFAULT_MEMORY
+    )
+    research_status.set_defaults(handler=_research_status)
+
+    research_sources = subparsers.add_parser(
+        "research-provision-sources",
+        help="download the public annotation and teacher source repositories",
+    )
+    research_sources.add_argument(
+        "components",
+        nargs="*",
+        help="optional component IDs; omit for every configured source",
+    )
+    research_sources.add_argument(
+        "--root", type=Path, default=DEFAULT_RESEARCH_ROOT
+    )
+    research_sources.add_argument(
+        "--memory", type=Path, default=DEFAULT_MEMORY
+    )
+    research_sources.set_defaults(handler=_research_provision_sources)
+
+    research_import = subparsers.add_parser(
+        "research-import-annotations",
+        help="normalize available research annotations into Lumen memory",
+    )
+    research_import.add_argument(
+        "components",
+        nargs="*",
+        choices=("edm98", "harmonix", "ccmusic", "salami"),
+        help="optional dataset IDs; omit to import every annotation source",
+    )
+    research_import.add_argument(
+        "--root", type=Path, default=DEFAULT_RESEARCH_ROOT
+    )
+    research_import.add_argument(
+        "--memory", type=Path, default=DEFAULT_MEMORY
+    )
+    research_import.set_defaults(handler=_research_import_annotations)
+
+    research_prepare = subparsers.add_parser(
+        "research-prepare-export",
+        help="reconstruct captured songs and queue offline teacher analysis",
+    )
+    research_prepare.add_argument("export", type=Path)
+    research_prepare.add_argument(
+        "--root", type=Path, default=DEFAULT_RESEARCH_ROOT
+    )
+    research_prepare.add_argument(
+        "--memory", type=Path, default=DEFAULT_MEMORY
+    )
+    research_prepare.add_argument(
+        "--training-root",
+        type=Path,
+        default=DEFAULT_RESEARCH_ROOT.parent,
+    )
+    research_prepare.add_argument(
+        "--songformer",
+        action="store_true",
+        help="also queue SongFormer (only runs after its CPU gate passes)",
+    )
+    research_prepare.set_defaults(handler=_research_prepare_export)
+
+    research_worker = subparsers.add_parser(
+        "research-worker",
+        help="process queued teachers/student jobs outside the live DMX loop",
+    )
+    research_worker.add_argument(
+        "--root", type=Path, default=DEFAULT_RESEARCH_ROOT
+    )
+    research_worker.add_argument(
+        "--memory", type=Path, default=DEFAULT_MEMORY
+    )
+    research_worker.add_argument(
+        "--job-type",
+        action="append",
+        choices=(EDMFORMER_JOB, SONGFORMER_JOB, STUDENT_TRAIN_JOB),
+        default=[],
+    )
+    research_worker.add_argument("--max-jobs", type=int, default=1)
+    research_worker.set_defaults(handler=_research_worker)
+
+    research_train = subparsers.add_parser(
+        "research-train-student",
+        help="train/evaluate the small CPU streaming model from teacher labels",
+    )
+    research_train.add_argument(
+        "examples",
+        nargs="*",
+        type=Path,
+        help="teacher example JSONL files; defaults to all prepared examples",
+    )
+    research_train.add_argument(
+        "--root", type=Path, default=DEFAULT_RESEARCH_ROOT
+    )
+    research_train.add_argument(
+        "--memory", type=Path, default=DEFAULT_MEMORY
+    )
+    research_train.add_argument("--epochs", type=int, default=30)
+    research_train.set_defaults(handler=_research_train_student)
 
     ui = subparsers.add_parser(
         "ui", help="start the desktop console and phone/tablet remote"
@@ -675,6 +793,92 @@ def _feedback(args: argparse.Namespace) -> int:
     if args.note:
         print(f"Your note: {args.note}")
     return 0
+
+
+def _research_status(args: argparse.Namespace) -> int:
+    manager = ResearchManager(
+        args.root,
+        store=SongMemoryStore(args.memory),
+    )
+    print(json.dumps(manager.status(), indent=2, sort_keys=True))
+    return 0
+
+
+def _research_provision_sources(args: argparse.Namespace) -> int:
+    manager = ResearchManager(
+        args.root,
+        store=SongMemoryStore(args.memory),
+    )
+    result = manager.provision_sources(args.components)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return (
+        1
+        if any(item["state"] == "error" for item in result["results"])
+        else 0
+    )
+
+
+def _research_import_annotations(args: argparse.Namespace) -> int:
+    manager = ResearchManager(
+        args.root,
+        store=SongMemoryStore(args.memory),
+    )
+    result = manager.import_annotations(args.components)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return (
+        0
+        if all(item["state"] == "imported" for item in result["results"])
+        else 1
+    )
+
+
+def _research_prepare_export(args: argparse.Namespace) -> int:
+    coordinator = ResearchJobCoordinator(
+        SongMemoryStore(args.memory),
+        training_root=args.training_root,
+        research_root=args.root,
+    )
+    result = coordinator.prepare_export(
+        args.export,
+        queue_songformer=bool(args.songformer),
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _research_worker(args: argparse.Namespace) -> int:
+    if args.max_jobs < 1:
+        raise ValueError("--max-jobs must be at least 1")
+    worker = OfflineResearchWorker(
+        SongMemoryStore(args.memory),
+        research_root=args.root,
+    )
+    results = worker.run_until_empty(
+        args.job_type, maximum_jobs=args.max_jobs
+    )
+    print(json.dumps({"jobs": results}, indent=2, sort_keys=True))
+    return 1 if any(item["status"] == "failed" for item in results) else 0
+
+
+def _research_train_student(args: argparse.Namespace) -> int:
+    store = SongMemoryStore(args.memory)
+    queued = enqueue_student_training(
+        store,
+        research_root=args.root,
+        example_paths=args.examples,
+        epochs=args.epochs,
+    )
+    result = OfflineResearchWorker(
+        store, research_root=args.root
+    ).run_once((STUDENT_TRAIN_JOB,))
+    print(
+        json.dumps(
+            {"queued": queued, "result": result},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0 if result and result["status"] == "complete" else 1
 
 
 def _ui(args: argparse.Namespace) -> int:

@@ -4,7 +4,9 @@ Lumen Engine is a private, local-first system for making a lighting rig listen,
 remember, aim, and perform expressively. It is being built for one dedicated
 Ubuntu PC in a garage audio system. It is a separate project from Party Parrot.
 
-This repository is not connected to a public remote.
+This repository is backed up only to a private GitHub repository. Recordings,
+credentials, tokens, learned preferences, runtime databases, and downloaded
+research assets remain local and ignored by Git.
 
 ## Start Lumen
 
@@ -54,6 +56,9 @@ The command-line tools below remain available for development and diagnostics.
 - Interpretable energy, tension, motion, and intimacy state
 - Explainable gesture selection
 - Private SQLite song, analysis, routine, decision, and feedback memory
+- Lossless local training capture: 48 kHz stereo WAV segments, exact
+  audio-frame synchronization, ten-Hz semantic/DMX context, linked feedback,
+  checksums, storage controls, and model-ready JSONL manifests
 - Provider-neutral media identity
 - Built-in Spotify Connect console with search, transport, queue, seeking,
   volume, device selection, album art, and now-playing metadata
@@ -64,6 +69,46 @@ The command-line tools below remain available for development and diagnostics.
 - Real PCM waveform, packet heartbeat, dBFS/RMS/peak/clipping proof, rhythm
   lock, expression meters, event log, and DMX heatmap
 - One-click desktop launcher
+
+## Neural training collection
+
+Monitor and Perform modes record the same line-in PCM used by the live
+analyzer. The recording runs on a background writer and is divided into
+one-minute lossless WAV files under `state/training/audio`. Every teaching
+moment is linked to an exact audio frame, and ten semantic frames per second
+preserve the observation, expression, routine, complete fixture output, media
+identity, and operator settings. The feedback surfaces also provide structured
+song-context and preferred-next-action labels without interrupting the active
+routine.
+
+Use **Audio laboratory → Neural training dataset** to enable collection, choose
+the storage ceiling, inspect capture health, and build a local JSONL training
+manifest after stopping the engine. Current heuristic output is retained only
+as baseline context; it is not labeled as correct behavior.
+
+The research layer normalizes EDM-98, Harmonix, CCMusic, and SALAMI onto
+independent functional, energy, and content timelines. EDMFormer and the
+CPU-bounded SongFormer runner label completed captures as isolated offline
+teachers. Those labels are aligned to Lumen's causal ten-Hz features for a
+small CPU student model. Lighting taste is learned separately as complete
+beat-addressed choreography sequences, and feedback updates apply at the next
+phrase boundary rather than interrupting the current motion.
+
+Use **Analyze new recordings** in the Musical-structure research panel to run
+both teachers as a resumable batch. The panel exposes recording progress,
+estimated time, database-verified examples, song-separated held-out material,
+label balance, process memory, recovered interrupted jobs, and exact failures.
+EDMFormer uses bounded 30–60-second CPU windows plus an 8 GiB process-group
+memory limit, so offline research cannot consume all memory on the target PC.
+The limit is a cutoff rather than a throttle and is adjustable through
+`LUMEN_OFFLINE_MAX_RSS_GIB` if a future local model demonstrates a legitimate
+larger working set.
+**Train and validate** builds a causal student
+with 0.5–60 second context and a separate boundary output. Training first
+writes a candidate; only a candidate that passes held-out song gates becomes
+the active Live model. Maintenance commands are
+`research-status`, `research-import-annotations`, `research-worker`, and
+`research-train-student`.
 
 The `live-demo` and `dmx-blackout` commands write directly to the FT232R cable.
 The plain `demo` command remains virtual.
@@ -236,4 +281,7 @@ the FT232R device at a time, so stop Party Parrot before running Lumen's direct
 output commands.
 
 See [Architecture](docs/architecture.md) and
-[Roadmap](docs/roadmap.md) for the decisions and next milestones.
+[Roadmap](docs/roadmap.md) for the decisions and next milestones. The
+[progress log](CHANGELOG.md) records restorable versions, and the
+[backup and restore runbook](docs/backup-and-restore.md) explains how to rebuild
+the machine and return safely to the last recorded operating state.

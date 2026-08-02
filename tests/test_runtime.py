@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from lumen_engine.config import load_rig
+from lumen_engine.choreography import SequencePreferenceModel
 from lumen_engine.dmx import VirtualDMXOutput
 from lumen_engine.models import MusicalObservation
 from lumen_engine.models import Vec3
@@ -10,6 +11,193 @@ from lumen_engine.runtime import PerformanceRuntime
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_rehearsal_can_isolate_one_mover_and_fully_disable_center_light(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+        )
+        selected = rig.fixtures[0]
+        runtime.set_rehearsal(
+            "figure_eight",
+            scope=f"fixture:{selected.fixture_id}",
+            intensity=0.7,
+            size=1.0,
+            palette="party_vivid",
+            isolate=True,
+        )
+        frame = runtime.step(MusicalObservation(
+            timestamp_s=0.0, loudness=0.7, onset_strength=0.8,
+            low_energy=0.6, mid_energy=0.5, high_energy=0.4,
+            beat_phase=0.0, bar_phase=0.0, beat_pulse=1.0,
+            beat_confidence=1.0, bpm=120.0, section="groove",
+            section_confidence=1.0,
+        )).dmx
+        universe = frame.universe_data(0)
+        selected_start = selected.address - 1
+        other_start = rig.fixtures[1].address - 1
+        center_start = rig.auxiliary_fixtures[0].address - 1
+        self.assertGreater(universe[selected_start + 5], 0)  # mover dimmer
+        self.assertEqual(universe[other_start + 5], 0)
+        self.assertEqual(universe[other_start + 7:other_start + 11], bytes(4))
+        self.assertEqual(universe[center_start + 4], 0)  # master dimmer
+        self.assertEqual(universe[center_start + 5], 0)  # strobe
+        self.assertEqual(universe[center_start + 6:center_start + 19], bytes(13))
+
+    def test_rehearsal_forces_selected_routine_without_song_planner(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+        )
+        runtime.set_rehearsal(
+            "figure_eight", scope="movers", intensity=0.7,
+            size=0.9, palette="party_vivid", isolate=True,
+        )
+        result = runtime.step(MusicalObservation(
+            timestamp_s=0.0, loudness=0.7, onset_strength=0.8,
+            low_energy=0.6, mid_energy=0.5, high_energy=0.4,
+            beat_phase=0.0, bar_phase=0.0, beat_pulse=1.0,
+            beat_confidence=1.0, bpm=120.0, section="groove",
+            section_confidence=1.0,
+        ))
+        self.assertEqual(result.decision.routine, "figure_eight")
+        self.assertIn("Rehearsal isolates", result.decision.reason)
+        self.assertEqual(
+            runtime.choreography_snapshot()["rehearsal"]["scope"], "movers"
+        )
+
+    def test_performance_paths_follow_physical_axis_direction(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+        runtime.set_rehearsal(
+            "breathe", scope="movers", intensity=0.7,
+            size=1.0, palette="party_vivid", isolate=True,
+        )
+
+        def observation(timestamp: float) -> MusicalObservation:
+            return MusicalObservation(
+                timestamp_s=timestamp, loudness=0.7, onset_strength=0.5,
+                low_energy=0.6, mid_energy=0.5, high_energy=0.4,
+                beat_phase=0.0, bar_phase=0.0, beat_pulse=0.4,
+                beat_confidence=1.0, bpm=120.0, section="groove",
+                section_confidence=1.0,
+            )
+
+        runtime.step(observation(0.0))
+        result = runtime.step(observation(1.0))
+        semantic_tilts = []
+        for fixture, solution in zip(rig.fixtures, result.solutions):
+            calibration = fixture.calibration
+            numeric = (
+                solution.tilt_deg - calibration.tilt_min_deg
+            ) / (calibration.tilt_max_deg - calibration.tilt_min_deg)
+            semantic_tilts.append(
+                numeric if calibration.tilt_direction > 0 else 1.0 - numeric
+            )
+        # Both movers receive the same room-semantic breathe path even though
+        # channel 31's captured high/low DMX order is reversed.
+        self.assertAlmostEqual(
+            semantic_tilts[0], semantic_tilts[1], delta=0.02
+        )
+
+    def test_scalar_feedback_is_staged_until_next_phrase_boundary(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+
+        def observation(timestamp: float, phase: float) -> MusicalObservation:
+            return MusicalObservation(
+                timestamp_s=timestamp,
+                loudness=0.72,
+                onset_strength=0.4,
+                low_energy=0.6,
+                mid_energy=0.5,
+                high_energy=0.4,
+                bar_phase=phase,
+                beat_confidence=0.9,
+                bpm=120.0,
+                section="groove",
+                section_confidence=0.8,
+            )
+
+        runtime.step(observation(0.0, 0.9))
+        runtime.replace_feedback(
+            {
+                "overall": {
+                    "motion": 1.0,
+                    "intensity": 0.8,
+                    "strobe": 0.6,
+                }
+            }
+        )
+        self.assertNotIn("overall", runtime._feedback_motion)
+        self.assertIsNotNone(runtime._pending_feedback_biases)
+
+        # First bar wrap is still within the leased two-bar phrase.
+        runtime.step(observation(0.2, 0.1))
+        self.assertNotIn("overall", runtime._feedback_motion)
+        runtime.step(observation(1.8, 0.9))
+        runtime.step(observation(2.0, 0.1))
+        self.assertEqual(runtime._feedback_motion["overall"], 1.0)
+        self.assertIsNone(runtime._pending_feedback_biases)
+
+    def test_preferred_action_enters_next_phrase_without_interrupting(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        model = SequencePreferenceModel()
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=model,
+        )
+
+        def observation(timestamp: float, bar_phase: float) -> MusicalObservation:
+            return MusicalObservation(
+                timestamp_s=timestamp,
+                loudness=0.78,
+                onset_strength=0.6,
+                low_energy=0.7,
+                mid_energy=0.6,
+                high_energy=0.5,
+                bar_phase=bar_phase,
+                beat_pulse=0.8,
+                beat_confidence=0.9,
+                bpm=120.0,
+                section="drop",
+                section_confidence=0.9,
+            )
+
+        first = runtime.step(observation(0.0, 0.9))
+        self.assertIsNotNone(runtime._choreography_planner)
+        active_before = runtime._choreography_planner.active
+        self.assertIsNotNone(active_before)
+        learning = runtime.learn_choreography_feedback(
+            label="more_like_this",
+            value=1.0,
+            occurrences=3,
+            preferred_routine="counter_rotate",
+        )
+        self.assertIsNotNone(learning)
+        runtime.step(observation(0.2, 0.1))
+        active_held = runtime._choreography_planner.active
+        self.assertEqual(
+            active_held.sequence.semantic_signature,
+            active_before.sequence.semantic_signature,
+        )
+        self.assertEqual(active_held.boundary_id, active_before.boundary_id)
+
+        runtime.step(observation(1.8, 0.9))
+        next_phrase = runtime.step(observation(2.0, 0.1))
+        self.assertEqual(next_phrase.decision.routine, "counter_rotate")
+        self.assertTrue(model.learned_candidates())
+
     def test_observation_reaches_virtual_dmx(self) -> None:
         rig = load_rig("config/example-rig.json")
         output = VirtualDMXOutput()

@@ -1,0 +1,596 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOCK_PATH="${PROJECT_ROOT}/config/research/research-lock.json"
+RESEARCH_ROOT="${PROJECT_ROOT}/state/training/research"
+CPU_WHEEL_INDEX="https://download.pytorch.org/whl/cpu"
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/setup-research COMMAND
+
+Commands:
+  provision       Pin sources, download allowed assets, create both CPU envs
+  sources         Clone/verify pinned source repositories
+  assets          Download/verify model assets and selective label manifests
+  envs            Create/verify EDMFormer and SongFormer CPU environments
+  ccmusic-status  Report the explicit CCMusic Hugging Face gate state
+  ccmusic-metadata
+                  Fetch gated CCMusic metadata only after the user has accepted
+                  its terms and logged in; never fetches Arrow/audio
+  ccmusic-annotations
+                  Project only the 300 authorized label timelines from pinned
+                  Parquet ranges; never fetches Arrow/audio/mel content
+  verify-models   Strictly load both heads and run a short CPU tensor through
+                  MuQ, MusicFM, and EDMFormer (about 4.2 GiB peak RAM)
+  verify          Verify sources, files, environments, and selective datasets
+  status          Concise non-mutating readiness report
+
+This script never downloads SongFormDB's feature repository or public-song
+audio, and it never imports the heavy teachers into Lumen's live process.
+EOF
+}
+
+lock_rows() {
+    local section="$1"
+    python3 - "$LOCK_PATH" "$section" <<'PY'
+import json
+import sys
+
+path, section = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    lock = json.load(handle)
+for item in lock[section]:
+    fields = [
+        item["id"],
+        item["url"],
+        item["destination"],
+        str(item.get("size", "")),
+        item.get("sha256", ""),
+        item.get("revision", ""),
+    ]
+    print("|".join(fields))
+PY
+}
+
+sha256_file() {
+    sha256sum "$1" | cut -d' ' -f1
+}
+
+verify_one_file() {
+    local id="$1"
+    local relative_path="$2"
+    local expected_size="$3"
+    local expected_sha="$4"
+    local path="${PROJECT_ROOT}/${relative_path}"
+    if [[ ! -f "$path" ]]; then
+        printf 'MISSING  %-32s %s\n' "$id" "$relative_path"
+        return 1
+    fi
+    if [[ -n "$expected_size" ]] && [[ "$(stat -c '%s' "$path")" != "$expected_size" ]]; then
+        printf 'BAD-SIZE %-31s %s\n' "$id" "$relative_path"
+        return 1
+    fi
+    if [[ -n "$expected_sha" ]] && [[ "$(sha256_file "$path")" != "$expected_sha" ]]; then
+        printf 'BAD-HASH %-31s %s\n' "$id" "$relative_path"
+        return 1
+    fi
+    printf 'OK       %-31s %s\n' "$id" "$relative_path"
+}
+
+download_one_file() {
+    local id="$1"
+    local url="$2"
+    local relative_path="$3"
+    local expected_size="$4"
+    local expected_sha="$5"
+    local path="${PROJECT_ROOT}/${relative_path}"
+    local partial="${path}.partial"
+    mkdir -p "$(dirname "$path")"
+
+    if verify_one_file "$id" "$relative_path" "$expected_size" "$expected_sha" >/dev/null 2>&1; then
+        printf 'REUSE    %-31s %s\n' "$id" "$relative_path"
+        return
+    fi
+
+    if [[ -f "$partial" ]] && \
+       [[ -n "$expected_size" ]] && [[ "$(stat -c '%s' "$partial")" == "$expected_size" ]] && \
+       [[ -n "$expected_sha" ]] && [[ "$(sha256_file "$partial")" == "$expected_sha" ]]; then
+        mv -f "$partial" "$path"
+        printf 'PROMOTE  %-31s %s\n' "$id" "$relative_path"
+        return
+    fi
+
+    curl --fail --location --retry 5 --retry-delay 3 --continue-at - \
+        --output "$partial" "$url"
+    if [[ -n "$expected_size" ]] && [[ "$(stat -c '%s' "$partial")" != "$expected_size" ]]; then
+        printf 'Downloaded size mismatch for %s\n' "$id" >&2
+        return 1
+    fi
+    if [[ -n "$expected_sha" ]] && [[ "$(sha256_file "$partial")" != "$expected_sha" ]]; then
+        printf 'Downloaded SHA-256 mismatch for %s\n' "$id" >&2
+        return 1
+    fi
+    mv -f "$partial" "$path"
+    printf 'FETCHED  %-31s %s\n' "$id" "$relative_path"
+}
+
+ensure_sources() {
+    while IFS='|' read -r id url destination _size _sha revision; do
+        local path="${PROJECT_ROOT}/${destination}"
+        if [[ ! -d "${path}/.git" ]]; then
+            mkdir -p "$(dirname "$path")"
+            GIT_LFS_SKIP_SMUDGE=1 git clone --filter=blob:none --no-checkout "$url" "$path"
+            GIT_LFS_SKIP_SMUDGE=1 git -C "$path" checkout --detach "$revision"
+        fi
+        local actual
+        actual="$(git -C "$path" rev-parse HEAD)"
+        if [[ "$actual" != "$revision" ]]; then
+            printf 'Source %s is at %s, expected %s; refusing to reset it.\n' \
+                "$id" "$actual" "$revision" >&2
+            return 1
+        fi
+        printf 'OK       %-31s %s\n' "$id" "$actual"
+    done < <(lock_rows sources)
+}
+
+download_assets() {
+    while IFS='|' read -r id url destination size sha _revision; do
+        download_one_file "$id" "$url" "$destination" "$size" "$sha"
+    done < <(lock_rows assets)
+    while IFS='|' read -r id url destination size sha _revision; do
+        download_one_file "$id" "$url" "$destination" "$size" "$sha"
+    done < <(lock_rows selective_dataset_assets)
+    prepare_shared_asset_layout
+}
+
+prepare_shared_asset_layout() {
+    local songformer_ckpts="${RESEARCH_ROOT}/sources/songformer/src/SongFormer/ckpts"
+    mkdir -p "${songformer_ckpts}/MusicFM"
+    ln -sfn \
+        "${RESEARCH_ROOT}/models/songformer/SongFormer.safetensors" \
+        "${songformer_ckpts}/SongFormer.safetensors"
+    ln -sfn \
+        "${RESEARCH_ROOT}/sources/edm98/data/checkpoints/pretrained_msd.pt" \
+        "${songformer_ckpts}/MusicFM/pretrained_msd.pt"
+    ln -sfn \
+        "${RESEARCH_ROOT}/sources/edm98/data/checkpoints/msd_stats.json" \
+        "${songformer_ckpts}/MusicFM/msd_stats.json"
+
+    # Build the exact Hugging Face cache layout expected by EDM-98's hard-coded
+    # OpenMuQ repository name without storing a second 1.33 GB copy.
+    local cache_root="${RESEARCH_ROOT}/cache/huggingface"
+    local repo_cache="${cache_root}/models--OpenMuQ--MuQ-large-msd-iter"
+    local revision="0562a57814f6f8bbd9fdea0a25921a2fce1a841a"
+    local model_blob="273febab2be02872c37d2c37e48a9d6c52c1c9392f3eeeabd498efa281ccb7a6"
+    local config_blob="fec6c73f7b811281b440462fcf4d98c7953c3d94"
+    mkdir -p "${repo_cache}/blobs" "${repo_cache}/refs" "${repo_cache}/snapshots/${revision}"
+    ln -sfn \
+        "${RESEARCH_ROOT}/models/muq/model.safetensors" \
+        "${repo_cache}/blobs/${model_blob}"
+    ln -sfn \
+        "${RESEARCH_ROOT}/models/muq/config.json" \
+        "${repo_cache}/blobs/${config_blob}"
+    ln -sfn "../../blobs/${model_blob}" \
+        "${repo_cache}/snapshots/${revision}/model.safetensors"
+    ln -sfn "../../blobs/${config_blob}" \
+        "${repo_cache}/snapshots/${revision}/config.json"
+    # Hugging Face refs are raw commit identifiers; a trailing newline makes
+    # `try_to_load_from_cache(..., revision="main")` miss the snapshot.
+    printf '%s' "$revision" > "${repo_cache}/refs/main"
+
+    # MusicFM calls Transformers for this architecture config even though it
+    # then loads all trainable weights from the local MSD checkpoint.
+    local wav2vec_repo="${cache_root}/transformers/models--facebook--wav2vec2-conformer-rope-large-960h-ft"
+    local wav2vec_revision="6b36ef01c6443c67ae7ed0822876d091ab50e4aa"
+    local wav2vec_blob="f74dbbf6fe96728cceda4888cf841b39a579e66e"
+    mkdir -p \
+        "${wav2vec_repo}/blobs" \
+        "${wav2vec_repo}/refs" \
+        "${wav2vec_repo}/snapshots/${wav2vec_revision}"
+    ln -sfn \
+        "${RESEARCH_ROOT}/models/musicfm/wav2vec2-conformer-rope-large-960h-ft-config.json" \
+        "${wav2vec_repo}/blobs/${wav2vec_blob}"
+    ln -sfn "../../blobs/${wav2vec_blob}" \
+        "${wav2vec_repo}/snapshots/${wav2vec_revision}/config.json"
+    printf '%s' "$wav2vec_revision" > "${wav2vec_repo}/refs/main"
+}
+
+find_python() {
+    local version="$1"
+    if command -v pyenv >/dev/null 2>&1 && pyenv prefix "$version" >/dev/null 2>&1; then
+        printf '%s/bin/python\n' "$(pyenv prefix "$version")"
+        return
+    fi
+    local short="${version%.*}"
+    if command -v "python${short}" >/dev/null 2>&1; then
+        command -v "python${short}"
+        return
+    fi
+    return 1
+}
+
+install_edmformer_env() {
+    local env_path="${RESEARCH_ROOT}/environments/edmformer"
+    local python
+    if [[ -x "${env_path}/bin/python" ]]; then
+        python="${env_path}/bin/python"
+    else
+        python="$(find_python 3.12.8 || find_python 3.12.13)" || {
+            printf 'Python 3.12 is required for EDMFormer.\n' >&2
+            return 1
+        }
+        "$python" -m venv "$env_path"
+        python="${env_path}/bin/python"
+    fi
+    "$python" -m pip install --upgrade pip setuptools wheel
+    "$python" -m pip install --extra-index-url "$CPU_WHEEL_INDEX" \
+        -r "${PROJECT_ROOT}/config/research/edmformer-freeze.txt"
+    "$python" -m pip install --no-deps -e "${RESEARCH_ROOT}/sources/muq"
+    "$python" -m pip install --no-deps -e "${RESEARCH_ROOT}/sources/edm98"
+}
+
+install_songformer_env() {
+    local env_path="${RESEARCH_ROOT}/environments/songformer"
+    local python
+    if [[ -x "${env_path}/bin/python" ]]; then
+        python="${env_path}/bin/python"
+    else
+        python="$(find_python 3.10.20)" || {
+            printf 'Python 3.10.20 is required. Install it with: pyenv install 3.10.20\n' >&2
+            return 1
+        }
+        "$python" -m venv "$env_path"
+        python="${env_path}/bin/python"
+    fi
+    "$python" -m pip install --upgrade pip setuptools wheel
+    "$python" -m pip install --extra-index-url "$CPU_WHEEL_INDEX" \
+        -r "${PROJECT_ROOT}/config/research/songformer-inference-freeze.txt"
+    "$python" -m pip install --no-deps -e "${RESEARCH_ROOT}/sources/muq"
+}
+
+install_envs() {
+    install_edmformer_env
+    install_songformer_env
+}
+
+verify_sources() {
+    local failed=0
+    while IFS='|' read -r id _url destination _size _sha revision; do
+        local path="${PROJECT_ROOT}/${destination}"
+        local actual=""
+        actual="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
+        if [[ "$actual" == "$revision" ]]; then
+            printf 'OK       %-31s %s\n' "$id" "$actual"
+        else
+            printf 'BAD-REV  %-31s expected=%s actual=%s\n' "$id" "$revision" "$actual"
+            failed=1
+        fi
+    done < <(lock_rows sources)
+    return "$failed"
+}
+
+verify_files() {
+    local failed=0
+    while IFS='|' read -r id _url destination size sha _revision; do
+        verify_one_file "$id" "$destination" "$size" "$sha" || failed=1
+    done < <(lock_rows assets)
+    while IFS='|' read -r id _url destination size sha _revision; do
+        verify_one_file "$id" "$destination" "$size" "$sha" || failed=1
+    done < <(lock_rows selective_dataset_assets)
+    return "$failed"
+}
+
+verify_environment() {
+    local name="$1"
+    local python="${RESEARCH_ROOT}/environments/${name}/bin/python"
+    local freeze="${PROJECT_ROOT}/config/research/${name}-freeze.txt"
+    if [[ "$name" == "songformer" ]]; then
+        freeze="${PROJECT_ROOT}/config/research/songformer-inference-freeze.txt"
+    fi
+    if [[ ! -x "$python" ]]; then
+        printf 'MISSING  %s environment\n' "$name"
+        return 1
+    fi
+    RESEARCH_ROOT="$RESEARCH_ROOT" MUSICFMPATH="${RESEARCH_ROOT}/sources/musicfm" \
+        PYTHONPATH="${RESEARCH_ROOT}/sources${PYTHONPATH:+:${PYTHONPATH}}" \
+        "$python" - "$name" <<'PY'
+import os
+import platform
+import sys
+
+name = sys.argv[1]
+import numpy
+import torch
+import torchaudio
+from muq import MuQ
+from musicfm.model.musicfm_25hz import MusicFM25Hz
+
+assert torch.__version__ == "2.4.0+cpu", torch.__version__
+assert torchaudio.__version__ == "2.4.0+cpu", torchaudio.__version__
+assert not torch.cuda.is_available()
+if name == "edmformer":
+    assert sys.version_info[:2] == (3, 12), sys.version
+    import edm98
+else:
+    assert sys.version_info[:2] == (3, 10), sys.version
+    import ema_pytorch
+    import omegaconf
+    import safetensors
+print(
+    f"OK       {name:31s} "
+    f"python={platform.python_version()} numpy={numpy.__version__} "
+    f"torch={torch.__version__} cuda={torch.cuda.is_available()}"
+)
+PY
+    "$python" -m pip check
+    diff -u "$freeze" <("$python" -m pip freeze --exclude-editable | LC_ALL=C sort)
+}
+
+verify_label_manifests() {
+    python3 - "${RESEARCH_ROOT}/sources/songform-labels" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+files = sorted(root.rglob("*.jsonl"))
+assert len(files) == 5, len(files)
+for path in files:
+    count = 0
+    with path.open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip() or line.startswith("#"):
+                continue
+            item = json.loads(line)
+            assert isinstance(item, dict), (path, line_number)
+            assert "id" in item, (path, line_number)
+            count += 1
+    assert count > 0, path
+    print(f"OK       {path.name:31s} records={count}")
+PY
+}
+
+verify_model_checkpoints() {
+    local edm_python="${RESEARCH_ROOT}/environments/edmformer/bin/python"
+    local song_python="${RESEARCH_ROOT}/environments/songformer/bin/python"
+    [[ -x "$edm_python" && -x "$song_python" ]] || {
+        printf 'Both research environments must be provisioned first.\n' >&2
+        return 1
+    }
+
+    RESEARCH_ROOT="$RESEARCH_ROOT" \
+        MUSICFMPATH="${RESEARCH_ROOT}/sources/musicfm" \
+        PYTHONPATH="${RESEARCH_ROOT}/sources${PYTHONPATH:+:${PYTHONPATH}}" \
+        OMP_NUM_THREADS=4 \
+        "$edm_python" - <<'PY'
+import os
+from pathlib import Path
+
+import torch
+from edm98.inference.pipeline import InferencePipeline
+
+root = Path(os.environ["RESEARCH_ROOT"])
+torch.set_num_threads(4)
+pipeline = InferencePipeline(
+    checkpoint_path=root / "sources/edm98/data/checkpoints/model.pt",
+    config_path=root / "sources/edm98/configs/edmformer.yaml",
+    musicfm_stat_path=root / "sources/edm98/data/checkpoints/msd_stats.json",
+    musicfm_model_path=root / "sources/edm98/data/checkpoints/pretrained_msd.pt",
+    device="cpu",
+    low_memory=False,
+    persistent_models=True,
+    offline=True,
+    hf_cache_dir=root / "cache/huggingface",
+)
+audio = torch.zeros(1, 48_000)
+with torch.inference_mode():
+    muq = pipeline.muq_model(audio, output_hidden_states=True).hidden_states[10]
+    musicfm = pipeline.musicfm_model.get_predictions(audio)[1][10]
+    # The production feature layout fuses wrapped and whole-track embeddings
+    # from both teachers. Reuse this short deterministic window for each axis.
+    fused = torch.cat((muq, musicfm, muq, musicfm), dim=-1)
+    msa, logits = pipeline.model.infer(
+        fused,
+        pipeline.dataset_ids,
+        pipeline.label_mask,
+        with_logits=True,
+    )
+assert tuple(muq.shape) == (1, 50, 1024), muq.shape
+assert tuple(musicfm.shape) == (1, 50, 1024), musicfm.shape
+assert tuple(logits["function_logits"].shape) == (1, 16, 128)
+assert tuple(logits["boundary_logits"].shape) == (1, 16)
+print(
+    "OK       EDMFormer full CPU tensor path "
+    f"MuQ={sum(x.numel() for x in pipeline.muq_model.parameters())} "
+    f"MusicFM={sum(x.numel() for x in pipeline.musicfm_model.parameters())} "
+    f"head={sum(x.numel() for x in pipeline.model.parameters())} "
+    f"sections={len(msa)}"
+)
+PY
+
+    SONGFORMER_ROOT="${RESEARCH_ROOT}/sources/songformer/src/SongFormer" \
+        RESEARCH_ROOT="$RESEARCH_ROOT" \
+        PYTHONPATH="${RESEARCH_ROOT}/sources/songformer/src/SongFormer:${RESEARCH_ROOT}/sources${PYTHONPATH:+:${PYTHONPATH}}" \
+        "$song_python" - <<'PY'
+import importlib
+import os
+from pathlib import Path
+
+import numpy as np
+import scipy
+import torch
+from ema_pytorch import EMA
+from omegaconf import OmegaConf
+from safetensors.torch import load_file
+
+# SongFormer's own infer.py applies this compatibility shim before importing
+# MSAF; reproduce the upstream entry point exactly.
+scipy.inf = np.inf
+source = Path(os.environ["SONGFORMER_ROOT"])
+research = Path(os.environ["RESEARCH_ROOT"])
+config = OmegaConf.load(source / "configs/SongFormer.yaml")
+model_type = getattr(importlib.import_module("models.SongFormer"), "Model")
+model = model_type(config)
+state = load_file(
+    research / "models/songformer/SongFormer.safetensors",
+    device="cpu",
+)
+ema = EMA(model, include_online_model=False)
+ema.load_state_dict(state)
+model.load_state_dict(ema.ema_model.state_dict(), strict=True)
+model.eval()
+mask = torch.zeros(1, 1, config.num_classes, dtype=torch.bool)
+with torch.inference_mode():
+    msa, logits = model.infer(
+        torch.zeros(1, 50, config.input_dim_raw),
+        torch.tensor([5], dtype=torch.long),
+        mask,
+        with_logits=True,
+    )
+assert tuple(logits["function_logits"].shape) == (1, 16, config.num_classes)
+assert tuple(logits["boundary_logits"].shape) == (1, 16)
+print(
+    "OK       SongFormer strict EMA CPU path "
+    f"head={sum(x.numel() for x in model.parameters())} "
+    f"checkpoint_keys={len(state)} sections={len(msa)}"
+)
+PY
+}
+
+ccmusic_status() {
+    local python="${RESEARCH_ROOT}/environments/edmformer/bin/python"
+    if [[ ! -x "$python" ]]; then
+        printf 'CCMusic status requires the provisioned EDMFormer environment.\n'
+        return 0
+    fi
+    "$python" "${PROJECT_ROOT}/scripts/ccmusic-minimal-fetch.py" status
+}
+
+fetch_ccmusic_metadata() {
+    local python="${RESEARCH_ROOT}/environments/edmformer/bin/python"
+    [[ -x "$python" ]] || {
+        printf 'Provision the EDMFormer environment first.\n' >&2
+        return 1
+    }
+    "$python" - "${RESEARCH_ROOT}/sources/ccmusic-gated-metadata" <<'PY'
+import pathlib
+import sys
+from huggingface_hub import get_token, snapshot_download
+
+target = pathlib.Path(sys.argv[1])
+token = get_token()
+if not token:
+    raise SystemExit(
+        "No Hugging Face credential found. Run the research environment's "
+        "`huggingface-cli login` command or set HF_TOKEN."
+    )
+snapshot_download(
+    repo_id="ccmusic-database/song_structure",
+    repo_type="dataset",
+    revision="be72c4d67e0c99c8b68a37eb1df649c40ea8e4e3",
+    local_dir=target,
+    token=token,
+    allow_patterns=[
+        "README.md",
+        "default/dataset_dict.json",
+        "default/train/dataset_info.json",
+        "default/train/state.json",
+    ],
+)
+arrow_files = list(target.rglob("*.arrow"))
+if arrow_files:
+    raise SystemExit("Unexpected CCMusic Arrow payload was downloaded")
+print(f"Fetched gated metadata only into {target}")
+PY
+}
+
+fetch_ccmusic_annotations() {
+    local python="${RESEARCH_ROOT}/environments/edmformer/bin/python"
+    [[ -x "$python" ]] || {
+        printf 'Provision the EDMFormer environment first.\n' >&2
+        return 1
+    }
+    "$python" "${PROJECT_ROOT}/scripts/ccmusic-minimal-fetch.py" fetch \
+        --output "${RESEARCH_ROOT}/sources/ccmusic/authorized-annotations" \
+        --duckdb-extension-dir "${RESEARCH_ROOT}/cache/duckdb"
+}
+
+verify_ccmusic_export_if_present() {
+    local output="${RESEARCH_ROOT}/sources/ccmusic/authorized-annotations"
+    local python="${RESEARCH_ROOT}/environments/edmformer/bin/python"
+    if [[ -f "${output}/manifest.json" ]]; then
+        "$python" "${PROJECT_ROOT}/scripts/ccmusic-minimal-fetch.py" verify \
+            --output "$output"
+    fi
+}
+
+verify_all() {
+    python3 -m json.tool "$LOCK_PATH" >/dev/null
+    verify_sources
+    verify_files
+    prepare_shared_asset_layout
+    verify_environment edmformer
+    verify_environment songformer
+    verify_label_manifests
+    verify_model_checkpoints
+    verify_ccmusic_export_if_present
+    ccmusic_status
+}
+
+status() {
+    python3 -m json.tool "$LOCK_PATH" >/dev/null
+    printf 'Research lock: valid JSON\n'
+    verify_sources || true
+    verify_files || true
+    verify_environment edmformer || true
+    verify_environment songformer || true
+    ccmusic_status
+}
+
+command="${1:-status}"
+case "$command" in
+    provision)
+        ensure_sources
+        download_assets
+        install_envs
+        verify_all
+        ;;
+    sources)
+        ensure_sources
+        ;;
+    assets)
+        download_assets
+        ;;
+    envs)
+        install_envs
+        ;;
+    ccmusic-status)
+        ccmusic_status
+        ;;
+    ccmusic-metadata)
+        fetch_ccmusic_metadata
+        ;;
+    ccmusic-annotations)
+        fetch_ccmusic_annotations
+        ;;
+    verify-models)
+        prepare_shared_asset_layout
+        verify_model_checkpoints
+        ;;
+    verify)
+        verify_all
+        ;;
+    status)
+        status
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

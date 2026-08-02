@@ -13,6 +13,7 @@ from lumen_engine.models import (
     ProfileFixturePatch,
     clamp,
 )
+from lumen_engine.motion import MotionTuning
 from lumen_engine.profiles import party_parrot_profile
 
 
@@ -30,6 +31,66 @@ PALETTE_FAMILIES: dict[str, tuple[int, ...] | None] = {
     "cyan_violet": (1, 2, 5),
     "red_amber": (3, 4, 6),
 }
+
+
+def _strobe_request(
+    observation: MusicalObservation | None,
+    energy: float,
+    strobe_feedback: float,
+    choreography_strobe: float,
+    *,
+    automatic: bool,
+) -> float:
+    """Return a sustained, normalized request for a fixture strobe channel.
+
+    A fixture strobe channel is a rate command, not a one-frame flash trigger.
+    Explicit rehearsal/choreography and positive operator feedback therefore
+    remain active for the whole frame sequence in which they apply.  Automatic
+    beat strobe uses a visible section of the detected beat instead of the
+    much narrower onset envelope; repeatedly writing a non-zero value for only
+    one analysis frame merely looks like an irregular flicker on the physical
+    fixtures.
+    """
+
+    # Strong negative feedback is an operator veto even when the remembered
+    # sequence contains a strobe step. Milder negative/positive feedback trims
+    # that step's hardware rate, so slower/faster have literal meaning.
+    if strobe_feedback <= -0.60:
+        return 0.0
+    if choreography_strobe > 0.05:
+        return clamp(
+            choreography_strobe + 0.5 * strobe_feedback,
+            0.06,
+            1.0,
+        )
+    if strobe_feedback > 0.05:
+        return clamp(strobe_feedback, 0.0, 1.0)
+    if not automatic or strobe_feedback < -0.2 or observation is None:
+        return 0.0
+    if (
+        energy < 0.70
+        or observation.beat_confidence < 0.25
+        or observation.beat_phase > 0.42
+    ):
+        return 0.0
+    return clamp(0.48 + 0.42 * energy, 0.0, 1.0)
+
+
+def _direct_strobe_dmx(request: float) -> int:
+    """Map a normalized request to the direct 0=off, 1..255 mover channel."""
+
+    if request <= 0.0:
+        return 0
+    return round(18.0 + 237.0 * clamp(request, 0.0, 1.0))
+
+
+def _multi_effect_strobe_dmx(request: float) -> int:
+    """Map to the characterized center fixture range: 0 off, 10..255 active."""
+
+    if request <= 0.0:
+        return 0
+    logical = round(clamp(request, 0.0, 1.0) * 255.0)
+    return 10 + round(logical / 255.0 * 245.0)
 
 
 def expression_rgb(decision: PerformanceDecision, palette_bias: float = 0.0) -> tuple[float, float, float]:
@@ -101,26 +162,40 @@ def apply_moving_head_profile(
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
     strobe_feedback: float = 0.0,
+    choreography_strobe: float = 0.0,
     palette_bias: float = 0.0,
+    enabled: bool = True,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
         return
     if fixture.profile_key == "generic_rgbw_moving_head_11ch":
         channels = profile.channels
+        if not enabled:
+            for name in ("strobe", "red", "green", "blue", "white"):
+                _set_relative(
+                    frame, fixture.universe, fixture.address,
+                    channels[name], 0,
+                )
+            _set_relative(
+                frame, fixture.universe, fixture.address,
+                channels["movement_speed"], 200,
+            )
+            return
         speed = round(200.0 * clamp(idle_amount, 0.0, 1.0))
         _set_relative(frame, fixture.universe, fixture.address, channels["movement_speed"], speed)
-        beat_pulse = 0.0 if observation is None else observation.beat_pulse
-        strobe = (
-            round(clamp(80 + 135 * beat_pulse + 60 * strobe_feedback, 0.0, 255.0))
-            if (
-                idle_amount < 1.0
-                and strobe_feedback > 0.25
-                and beat_pulse >= 0.78
-                and decision.expression.energy >= 0.70
+        strobe_request = (
+            0.0
+            if idle_amount >= 1.0
+            else _strobe_request(
+                observation,
+                decision.expression.energy,
+                strobe_feedback,
+                choreography_strobe,
+                automatic=False,
             )
-            else 0
         )
+        strobe = _direct_strobe_dmx(strobe_request)
         _set_relative(
             frame,
             fixture.universe,
@@ -145,7 +220,11 @@ def apply_auxiliary_fixture(
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
     strobe_feedback: float = 0.0,
+    choreography_strobe: float = 0.0,
     palette_bias: float = 0.0,
+    enabled: bool = True,
+    motion_tuning: MotionTuning | None = None,
+    motion_timestamp_s: float | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -159,7 +238,11 @@ def apply_auxiliary_fixture(
             idle_amount,
             motion_feedback,
             strobe_feedback,
+            choreography_strobe,
             palette_bias,
+            enabled,
+            motion_tuning,
+            motion_timestamp_s,
         )
         return
     dimmer = profile.channels.get("dimmer")
@@ -181,11 +264,38 @@ def _apply_generic_multi_effect(
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
     strobe_feedback: float = 0.0,
+    choreography_strobe: float = 0.0,
     palette_bias: float = 0.0,
+    enabled: bool = True,
+    motion_tuning: MotionTuning | None = None,
+    motion_timestamp_s: float | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     assert profile is not None
     channels = profile.channels
+    if not enabled:
+        values = {
+            "body_rotation": 128,
+            "body_rotation_speed": 255,
+            "arm_1_motor": 128,
+            "arm_2_motor": 128,
+            "master_dimmer": 0,
+            "strobe": 0,
+            "red_laser": 0,
+            "green_laser": 0,
+            "strip_program": 0,
+            "strip_speed": 0,
+            "macro": 0,
+        }
+        for prefix in ("magic_ball", "arm_beams"):
+            for color_name in ("red", "green", "blue", "white"):
+                values[f"{prefix}_{color_name}"] = 0
+        for channel_name, value in values.items():
+            _set_relative(
+                frame, fixture.universe, fixture.address,
+                channels[channel_name], value,
+            )
+        return
     if idle_amount >= 1.0:
         rgbw = rgb_to_rgbw(expression_rgb(decision, palette_bias))
         values = {
@@ -213,7 +323,11 @@ def _apply_generic_multi_effect(
                 max(0, min(255, int(value))),
             )
         return
-    timestamp = decision.timestamp_s
+    timestamp = (
+        decision.timestamp_s
+        if motion_timestamp_s is None
+        else motion_timestamp_s
+    )
     motion = decision.expression.motion
     energy = decision.expression.energy
     beat_pulse = 0.0 if observation is None else observation.beat_pulse
@@ -226,8 +340,12 @@ def _apply_generic_multi_effect(
         0.0,
         1.0,
     )
+    tuning = motion_tuning
+    cycle_beats = tuning.cycle_beats if tuning is not None else 4.0
     if beat_confidence >= 0.12:
-        pattern_phase = bar_phase
+        pattern_phase = (
+            timestamp * (observation.bpm or 120.0) / 60.0 / cycle_beats
+        ) % 1.0
     else:
         assumed_bpm = (
             120.0
@@ -257,7 +375,7 @@ def _apply_generic_multi_effect(
     # locked to the same beat grid as the movers instead of free-running from
     # the process clock.
     motion_phase = (
-        bar_phase * math.tau
+        pattern_phase * math.tau
         if beat_confidence >= 0.12
         else timestamp * (observation.bpm or 120.0) / 60.0 * math.tau / 4.0
     )
@@ -275,17 +393,26 @@ def _apply_generic_multi_effect(
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase * 1.5), math.cos(motion_phase * 1.5)
     else:  # counter-rotating circles
         body_motion, arm_1_motion, arm_2_motion = math.cos(motion_phase), math.sin(motion_phase * .75), -math.sin(motion_phase * .75)
-    body = round(128.0 + 127.0 * motion_scale * body_motion)
-    arm_1 = round(128.0 + 127.0 * motion_scale * arm_1_motion)
-    arm_2 = round(128.0 + 127.0 * motion_scale * arm_2_motion)
+    body_scale = tuning.body_size if tuning is not None else 1.0
+    arm_scale_motion = tuning.arm_size if tuning is not None else 1.0
+    body = round(128.0 + 127.0 * motion_scale * body_scale * body_motion)
+    arm_1 = round(128.0 + 127.0 * motion_scale * arm_scale_motion * arm_1_motion)
+    arm_2 = round(128.0 + 127.0 * motion_scale * arm_scale_motion * arm_2_motion)
     # This fixture's CH2 is inverted: zero is fastest and 255 is slowest.
     body_speed = round(235.0 - 210.0 * activity)
-    strobe = 0
-    # The center unit keeps Party Parrot's beat-flash behavior; mover strobes
-    # remain explicitly off unless requested. This is the fixture that owns
-    # the center beat chase, rather than every light flashing together.
-    if beat_pulse >= 0.78 and energy >= 0.70 and strobe_feedback > -0.2:
-        strobe = round(clamp(70.0 + 150.0 * beat_pulse * activity + 80.0 * strobe_feedback, 0.0, 255.0))
+    # Channel 6 is the fixture's internal strobe-rate control. Keep it active
+    # for the requested interval; do not pulse the channel itself for a single
+    # analysis frame. The fixture then produces a clean, regular strobe at the
+    # requested rate instead of an irregular software flicker.
+    strobe = _multi_effect_strobe_dmx(
+        _strobe_request(
+            observation,
+            energy,
+            strobe_feedback,
+            choreography_strobe,
+            automatic=True,
+        )
+    )
 
     values = {
         "body_rotation": body,

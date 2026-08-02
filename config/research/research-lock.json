@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-07-31T00:00:00-04:00",
+  "target": {
+    "os": "Ubuntu 26.04 LTS",
+    "architecture": "x86_64",
+    "cpu": "Intel Core i5-8400",
+    "gpu_policy": "cpu-only",
+    "ram_gib": 16
+  },
+  "policies": {
+    "live_process_imports_heavy_ml": false,
+    "teachers_run_offline": true,
+    "download_songformdb_feature_repository": false,
+    "download_unlicensed_song_audio": false,
+    "ccmusic_requires_explicit_user_gate_acceptance": true,
+    "party_parrot_mutation": false
+  },
+  "sources": [
+    {
+      "id": "edm98",
+      "url": "https://github.com/25ohms/EDM-98.git",
+      "revision": "2dd942f2f9e71ffd826346828eeaba1dd3ece56a",
+      "destination": "state/training/research/sources/edm98"
+    },
+    {
+      "id": "muq",
+      "url": "https://github.com/tencent-ailab/MuQ.git",
+      "revision": "28847ea50cd31ac4b8b6a7dacc051ad7d1c7606a",
+      "destination": "state/training/research/sources/muq"
+    },
+    {
+      "id": "musicfm",
+      "url": "https://github.com/minzwon/musicfm.git",
+      "revision": "b83ebedb401bcef639b26b05c0c8bee1dc2dfe71",
+      "destination": "state/training/research/sources/musicfm"
+    },
+    {
+      "id": "songformer",
+      "url": "https://github.com/ASLP-lab/SongFormer.git",
+      "revision": "139b2aa3b14bd1c6d961d0994e9fc975f1ef7fd5",
+      "destination": "state/training/research/sources/songformer"
+    },
+    {
+      "id": "harmonix",
+      "url": "https://github.com/urinieto/harmonixset.git",
+      "revision": "64abeb509429e73d74559fb98e621dac866efea1",
+      "destination": "state/training/research/sources/harmonix"
+    },
+    {
+      "id": "salami",
+      "url": "https://github.com/DDMAL/salami-data-public.git",
+      "revision": "8e4f95d18a3ab628c53011fa5a43e9d3be27965d",
+      "destination": "state/training/research/sources/salami"
+    },
+    {
+      "id": "ccmusic-model-card-only",
+      "url": "https://huggingface.co/ccmusic-database/song_structure",
+      "revision": "09ea9c573b959e1c9c464f93a2a2b63ab78b9f18",
+      "destination": "state/training/research/sources/ccmusic",
+      "note": "This repository is only a model card. The gated dataset has a separate revision below."
+    }
+  ],
+  "environments": {
+    "edmformer": {
+      "python": "3.12",
+      "observed_python": "3.12.13",
+      "path": "state/training/research/environments/edmformer",
+      "constraints": "config/research/edmformer-constraints.txt",
+      "freeze": "config/research/edmformer-freeze.txt",
+      "pytorch_index": "https://download.pytorch.org/whl/cpu",
+      "editable_sources": [
+        "state/training/research/sources/muq",
+        "state/training/research/sources/edm98"
+      ]
+    },
+    "songformer": {
+      "python": "3.10.20",
+      "path": "state/training/research/environments/songformer",
+      "constraints": "config/research/songformer-inference-constraints.txt",
+      "freeze": "config/research/songformer-inference-freeze.txt",
+      "pytorch_index": "https://download.pytorch.org/whl/cpu",
+      "editable_sources": [
+        "state/training/research/sources/muq"
+      ],
+      "note": "Inference-only CPU adaptation. The upstream batch runner itself remains CUDA-oriented."
+    }
+  },
+  "assets": [
+    {
+      "id": "edmformer-checkpoint",
+      "url": "https://github.com/25ohms/EDM-98/raw/2dd942f2f9e71ffd826346828eeaba1dd3ece56a/data/checkpoints/model.pt",
+      "destination": "state/training/research/sources/edm98/data/checkpoints/model.pt",
+      "size": 417979984,
+      "sha256": "1412e207645e9a71adc09777714dd251ce7805cada9bf19518d2e455a977e165",
+      "required": true
+    },
+    {
+      "id": "musicfm-msd-checkpoint",
+      "url": "https://github.com/25ohms/EDM-98/raw/2dd942f2f9e71ffd826346828eeaba1dd3ece56a/data/checkpoints/pretrained_msd.pt",
+      "destination": "state/training/research/sources/edm98/data/checkpoints/pretrained_msd.pt",
+      "size": 1316802088,
+      "sha256": "218b483a0256ddef736267425fabb166fd97008983696bb9270def464b47bded",
+      "required": true
+    },
+    {
+      "id": "musicfm-msd-stats",
+      "url": "https://raw.githubusercontent.com/25ohms/EDM-98/2dd942f2f9e71ffd826346828eeaba1dd3ece56a/data/checkpoints/msd_stats.json",
+      "destination": "state/training/research/sources/edm98/data/checkpoints/msd_stats.json",
+      "size": 2277,
+      "sha256": "c36c61ab10ca4d2e7fdfefc3fcc15205316bec276a06a47baa3641a62c546f22",
+      "required": true
+    },
+    {
+      "id": "musicfm-wav2vec2-config",
+      "url": "https://huggingface.co/facebook/wav2vec2-conformer-rope-large-960h-ft/resolve/6b36ef01c6443c67ae7ed0822876d091ab50e4aa/config.json",
+      "destination": "state/training/research/models/musicfm/wav2vec2-conformer-rope-large-960h-ft-config.json",
+      "size": 2239,
+      "sha256": "7a63cb5706c9a37483f1973a3c226d54eb504ce15cf62cb52637019540c8a75d",
+      "required": true,
+      "model_revision": "6b36ef01c6443c67ae7ed0822876d091ab50e4aa",
+      "note": "Configuration only; MusicFM constructs an uninitialized conformer then loads its own pinned MSD checkpoint."
+    },
+    {
+      "id": "muq-large-msd-safetensors",
+      "url": "https://huggingface.co/OpenMuQ/MuQ-large-msd-iter/resolve/0562a57814f6f8bbd9fdea0a25921a2fce1a841a/model.safetensors",
+      "destination": "state/training/research/models/muq/model.safetensors",
+      "size": 1333825096,
+      "sha256": "273febab2be02872c37d2c37e48a9d6c52c1c9392f3eeeabd498efa281ccb7a6",
+      "required": true,
+      "model_revision": "0562a57814f6f8bbd9fdea0a25921a2fce1a841a"
+    },
+    {
+      "id": "muq-large-msd-config",
+      "url": "https://huggingface.co/OpenMuQ/MuQ-large-msd-iter/resolve/0562a57814f6f8bbd9fdea0a25921a2fce1a841a/config.json",
+      "destination": "state/training/research/models/muq/config.json",
+      "size": 3133,
+      "sha256": "237335ee27d8fb951ce778701a12a79e06c51ae636dd786f97e45f51ce532543",
+      "required": true,
+      "model_revision": "0562a57814f6f8bbd9fdea0a25921a2fce1a841a"
+    },
+    {
+      "id": "songformer-head",
+      "url": "https://huggingface.co/ASLP-lab/SongFormer/resolve/a75880ed1b7375ac71860ec6c4fc9c899cf99515/SongFormer.safetensors",
+      "destination": "state/training/research/models/songformer/SongFormer.safetensors",
+      "size": 104468437,
+      "sha256": "87f17bfbed37014c6af4314abd9eb6971a94e3a95e9fc70f9e5ee33bdacb487b",
+      "required": true,
+      "model_revision": "a75880ed1b7375ac71860ec6c4fc9c899cf99515"
+    }
+  ],
+  "selective_dataset_assets": [
+    {
+      "id": "songformdb-hx-labels",
+      "url": "https://huggingface.co/datasets/ASLP-lab/SongFormDB/resolve/4fc4b4709ceb020616431b3e9ebce84519a37326/data/HX/SongFormDB-HX.jsonl",
+      "destination": "state/training/research/sources/songform-labels/songformdb/SongFormDB-HX.jsonl",
+      "size": 543806,
+      "sha256": "7e67a866c440d36fe4f6bffe823dfeeb7ac14256dd8791d000413212ca392eb5"
+    },
+    {
+      "id": "songformdb-ext-labels",
+      "url": "https://huggingface.co/datasets/ASLP-lab/SongFormDB/resolve/4fc4b4709ceb020616431b3e9ebce84519a37326/data/Ext/SongFormDB-Ext.jsonl",
+      "destination": "state/training/research/sources/songform-labels/songformdb/SongFormDB-Ext.jsonl",
+      "size": 3098166,
+      "sha256": "81a31d87d63828491279e2f0610d43ad52e1ab04864441a4575e2dda670c64cf"
+    },
+    {
+      "id": "songformdb-hook-labels",
+      "url": "https://huggingface.co/datasets/ASLP-lab/SongFormDB/resolve/4fc4b4709ceb020616431b3e9ebce84519a37326/data/Hook/SongFormDB-Hook.jsonl",
+      "destination": "state/training/research/sources/songform-labels/songformdb/SongFormDB-Hook.jsonl",
+      "size": 2565630,
+      "sha256": "5f40fc4f9e3094ec97df872fdc1597130bfdd550612e3ee58a0669bdcec2d8fe"
+    },
+    {
+      "id": "songformdb-gem-labels",
+      "url": "https://huggingface.co/datasets/ASLP-lab/SongFormDB/resolve/4fc4b4709ceb020616431b3e9ebce84519a37326/data/Gem/SongFormDB-Gem.jsonl",
+      "destination": "state/training/research/sources/songform-labels/songformdb/SongFormDB-Gem.jsonl",
+      "size": 4064831,
+      "sha256": "f6f68368c90fcdaab7cf471f73087e2867ce4acf1ae0ce82c9eebe20243b76be"
+    },
+    {
+      "id": "songformbench-labels",
+      "url": "https://huggingface.co/datasets/ASLP-lab/SongFormBench/resolve/acd574ecbf666be535b0d051b71936f6ec9956ec/data/SongFormBench.jsonl",
+      "destination": "state/training/research/sources/songform-labels/songformbench/SongFormBench.jsonl",
+      "size": 256312,
+      "sha256": "a58ee6409152dab54a8bf160665b366944c1e139b2be269165862f0b75668bce"
+    }
+  ],
+  "datasets": {
+    "edm98": {
+      "access": "metadata included in pinned source; song audio external",
+      "license": "metadata MIT; repository/model materials CC-BY-4.0; MuQ weights CC-BY-NC-4.0",
+      "audio_download_enabled": false
+    },
+    "harmonix": {
+      "access": "annotations included in pinned source; audio external",
+      "license": "repository MIT; audio and mel archive separate",
+      "audio_download_enabled": false
+    },
+    "salami": {
+      "access": "annotations included in pinned source; audio external",
+      "license": "annotations CC0; audio separate",
+      "audio_download_enabled": false
+    },
+    "songformdb": {
+      "revision": "4fc4b4709ceb020616431b3e9ebce84519a37326",
+      "access": "label JSONL only",
+      "license": "CC-BY-4.0",
+      "full_repository_download_enabled": false,
+      "reported_full_repository_bytes": 262081980546
+    },
+    "songformbench": {
+      "revision": "acd574ecbf666be535b0d051b71936f6ec9956ec",
+      "access": "label JSONL only for initial provisioning",
+      "license": "CC-BY-4.0",
+      "full_repository_download_enabled": false,
+      "reported_full_repository_bytes": 5329643617
+    },
+    "ccmusic-song-structure": {
+      "revision": "be72c4d67e0c99c8b68a37eb1df649c40ea8e4e3",
+      "repository": "ccmusic-database/song_structure",
+      "access": "Hugging Face automatic gate; requires accepted terms and either standard cached login or HF_TOKEN",
+      "license": "CC-BY-NC-ND-4.0 wrapper; underlying linked audio rights not granted",
+      "download_enabled_by_default": false,
+      "reported_download_bytes": 2308839939,
+      "reported_repository_bytes": 4636510271,
+      "expected_rows": 300,
+      "time_unit": "centiseconds",
+    "minimal_export": {
+      "schema": "lumen.ccmusic.authorized_annotations.v1",
+      "transport": "DuckDB HTTP range projection of pinned Hugging Face Parquet",
+      "destination": "state/training/research/sources/ccmusic/authorized-annotations",
+        "retained_fields": [
+          "label.onset_time",
+          "label.offset_time",
+          "label.structure"
+        ],
+        "excluded_fields": [
+          "audio",
+          "mel"
+      ],
+      "arrow_download_enabled": false,
+      "expected_export_rows": 300,
+      "expected_export_segments": 2918,
+      "expected_source_repairs": 2,
+      "expected_timeline_discontinuities": 13
+    },
+    "parquet_projection": {
+      "revision": "6ac1a082ca649072518d9fcd7fbf448a1e844266",
+      "engine": "duckdb==1.5.5",
+      "projected_column": "label",
+      "projected_label_compressed_bytes": 34197,
+      "media_columns_selected": false,
+      "files": [
+        {
+          "path": "default/train/0000.parquet",
+          "size": 894708606
+        },
+        {
+          "path": "default/train/0001.parquet",
+          "size": 505166036
+        },
+        {
+          "path": "default/train/0002.parquet",
+          "size": 915092957
+        }
+      ],
+      "total_bytes": 2314967599,
+      "httpfs_extension": {
+        "version": "1.5.5",
+        "platform": "linux_amd64",
+        "size": 21570542,
+        "sha256": "887c392b1e49128d11667c81e3698d8b00dfdeb456771acf66d05a0f74f7b7d8"
+      }
+    },
+      "arrow_layout": [
+        {
+          "path": "default/train/data-00000-of-00005.arrow",
+          "size": 459036352
+        },
+        {
+          "path": "default/train/data-00001-of-00005.arrow",
+          "size": 437979680
+        },
+        {
+          "path": "default/train/data-00002-of-00005.arrow",
+          "size": 507293416
+        },
+        {
+          "path": "default/train/data-00003-of-00005.arrow",
+          "size": 481762440
+        },
+        {
+          "path": "default/train/data-00004-of-00005.arrow",
+          "size": 435470784
+        }
+      ],
+      "arrow_total_bytes": 2321542672
+    }
+  }
+}

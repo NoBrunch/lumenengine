@@ -76,6 +76,10 @@ class RealtimeAudioAnalyzer:
         self._level_envelope = 0.005
         self._beat_envelope = 0.0
         self._previous_spectrum: np.ndarray | None = None
+        self._previous_chroma: np.ndarray | None = None
+        self._previous_bands: tuple[float, float, float] | None = None
+        self._rhythm_density = 0.0
+        self._arrangement_change = 0.0
         self._previous_bass_level = 0.0
         self._flux_history: deque[float] = deque(maxlen=420)
         self._bass_rise_history: deque[float] = deque(maxlen=420)
@@ -134,7 +138,15 @@ class RealtimeAudioAnalyzer:
                 (rms - self._level_envelope)
                 / max(0.01, self._level_envelope),
             )
-            low, mid, high, spectral_onset = self._spectral_features(mono)
+            (
+                low,
+                mid,
+                high,
+                spectral_onset,
+                spectral_flux,
+                spectral_brightness,
+                harmonic_change,
+            ) = self._spectral_features(mono)
             onset = clamp(
                 0.76 * spectral_onset
                 + 0.16 * rise * 3.0
@@ -147,6 +159,9 @@ class RealtimeAudioAnalyzer:
             loudness = 0.0
             onset = 0.0
             spectral_onset = 0.0
+            spectral_flux = 0.0
+            spectral_brightness = 0.0
+            harmonic_change = 0.0
             low = mid = high = 0.0
             self._level_envelope += 0.02 * (
                 max(self._noise_floor, rms) - self._level_envelope
@@ -182,6 +197,36 @@ class RealtimeAudioAnalyzer:
             else max(0.0, min(0.25, timestamp - self._last_timestamp))
         )
         self._last_timestamp = timestamp
+        rhythm_alpha = 1.0 - math.exp(-max(0.001, elapsed) / 2.0)
+        self._rhythm_density += rhythm_alpha * (
+            clamp(0.65 * onset + 0.35 * beat_state.confidence, 0.0, 1.0)
+            - self._rhythm_density
+        )
+        band_change = 0.0
+        if self._previous_bands is not None:
+            band_change = min(
+                1.0,
+                sum(
+                    abs(value - previous)
+                    for value, previous in zip(
+                        (low, mid, high), self._previous_bands
+                    )
+                )
+                * 1.8,
+            )
+        self._previous_bands = (low, mid, high)
+        arrangement_evidence = clamp(
+            0.35 * spectral_flux
+            + 0.35 * harmonic_change
+            + 0.20 * band_change
+            + 0.10 * abs(onset - self._rhythm_density),
+            0.0,
+            1.0,
+        )
+        arrangement_alpha = 1.0 - math.exp(-max(0.001, elapsed) / 0.8)
+        self._arrangement_change += arrangement_alpha * (
+            arrangement_evidence - self._arrangement_change
+        )
         self._beat_envelope *= math.exp(-elapsed / 0.14)
         if beat_state.beat:
             self._beat_envelope = 1.0
@@ -220,6 +265,11 @@ class RealtimeAudioAnalyzer:
             section=section,
             section_confidence=section_confidence,
             novelty=novelty,
+            spectral_flux=spectral_flux,
+            spectral_brightness=spectral_brightness,
+            rhythm_density=clamp(self._rhythm_density, 0.0, 1.0),
+            harmonic_change=harmonic_change,
+            arrangement_change=clamp(self._arrangement_change, 0.0, 1.0),
         )
 
     def _classify_section(
@@ -384,14 +434,14 @@ class RealtimeAudioAnalyzer:
     def _spectral_proportions(
         self, samples: list[float]
     ) -> tuple[float, float, float]:
-        low, mid, high, _onset = self._spectral_features(samples)
+        low, mid, high, *_rest = self._spectral_features(samples)
         return low, mid, high
 
     def _spectral_features(
         self, samples: list[float]
-    ) -> tuple[float, float, float, float]:
+    ) -> tuple[float, float, float, float, float, float, float]:
         if len(samples) < 8:
-            return 0.0, 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
         values = np.asarray(samples, dtype=np.float64) / 32768.0
         values -= float(np.mean(values))
         magnitude = np.abs(np.fft.rfft(values * np.hanning(len(values))))
@@ -444,7 +494,39 @@ class RealtimeAudioAnalyzer:
         flux = self._normalize_feature(raw_flux, self._flux_history)
         bass = self._normalize_feature(bass_rise, self._bass_rise_history)
         onset = clamp(0.68 * flux + 0.32 * bass, 0.0, 1.0)
-        return low, mid, high, onset
+        audible = (frequencies >= 40.0) & (frequencies <= 12_000.0)
+        audible_power = power[audible]
+        brightness = (
+            clamp(
+                float(np.sum(frequencies[audible] * audible_power))
+                / max(1e-12, float(np.sum(audible_power)))
+                / 8_000.0,
+                0.0,
+                1.0,
+            )
+            if np.any(audible)
+            else 0.0
+        )
+        chroma = np.zeros(12, dtype=np.float64)
+        harmonic_mask = (frequencies >= 55.0) & (frequencies <= 5_000.0)
+        harmonic_frequencies = frequencies[harmonic_mask]
+        harmonic_power = power[harmonic_mask]
+        for frequency, value in zip(harmonic_frequencies, harmonic_power):
+            note = int(round(69.0 + 12.0 * math.log2(float(frequency) / 440.0)))
+            chroma[note % 12] += float(value)
+        chroma_norm = float(np.linalg.norm(chroma))
+        if chroma_norm > 1e-12:
+            chroma /= chroma_norm
+        harmonic_change = 0.0
+        if self._previous_chroma is not None and chroma_norm > 1e-12:
+            harmonic_change = clamp(
+                1.0 - float(np.dot(chroma, self._previous_chroma)),
+                0.0,
+                1.0,
+            )
+        if chroma_norm > 1e-12:
+            self._previous_chroma = chroma
+        return low, mid, high, onset, flux, brightness, harmonic_change
 
     @staticmethod
     def _normalize_feature(value: float, history: deque[float]) -> float:

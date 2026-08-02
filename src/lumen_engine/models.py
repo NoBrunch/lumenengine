@@ -212,6 +212,11 @@ class MusicalObservation:
     section: str | None = None
     section_confidence: float = 0.0
     novelty: float = 0.0
+    spectral_flux: float = 0.0
+    spectral_brightness: float = 0.0
+    rhythm_density: float = 0.0
+    harmonic_change: float = 0.0
+    arrangement_change: float = 0.0
 
     def __post_init__(self) -> None:
         bounded = (
@@ -226,6 +231,11 @@ class MusicalObservation:
             "beat_confidence",
             "section_confidence",
             "novelty",
+            "spectral_flux",
+            "spectral_brightness",
+            "rhythm_density",
+            "harmonic_change",
+            "arrangement_change",
         )
         for name in bounded:
             value = getattr(self, name)
@@ -288,3 +298,8 @@ class Feedback:
     confidence: float | None = None
     bpm: float | None = None
     routine: str | None = None
+    # Link the teaching moment to the exact local PCM timeline used to train
+    # future models. These remain optional for feedback imported from sessions
+    # recorded before training capture existed.
+    capture_session_id: str | None = None
+    audio_frame_index: int | None = None

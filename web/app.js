@@ -30,6 +30,8 @@ const app = {
   spotifyHistoryIndex: -1,
   calibrationActive: false,
   calibrationCaptures: {},
+  rehearsalTimer: null,
+  motionTimer: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -133,12 +135,13 @@ function selectedFixture() {
 }
 
 function setPage(name) {
-  if (!["performance", "rig", "audio", "memory", "music", "system"].includes(name)) return;
+  if (!["performance", "rehearsal", "rig", "audio", "memory", "music", "system"].includes(name)) return;
   app.page = name;
   $$(".workspace-page").forEach((page) => page.classList.toggle("active", page.dataset.page === name));
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.nav === name));
   if (name === "rig") window.setTimeout(drawRig, 30);
   if (name === "performance") window.setTimeout(drawPerformanceRoom, 30);
+  if (name === "rehearsal") window.setTimeout(drawMotionPath, 30);
   if (name === "audio") window.setTimeout(drawScope, 30);
   if (name === "music") refreshSpotifyConsole(false);
 }
@@ -168,6 +171,7 @@ async function initialize() {
     drawPerformanceRoom();
     drawRig();
     drawScope();
+    drawMotionPath();
   });
 }
 
@@ -187,6 +191,8 @@ async function pollStatus() {
       renderSystem(app.system);
       updateComponentStatuses();
     }
+    const researchRunning = Boolean(app.bootstrap?.research?.worker?.running);
+    if (app.page === "audio" && app.pollCount % (researchRunning ? 20 : 200) === 0) await refreshResearch();
     if (app.pollCount % 100 === 0 && app.system?.spotify?.token_present) {
       refreshSpotifyConsole(false);
     }
@@ -212,9 +218,11 @@ function renderBootstrap() {
   setText("patch-channel-count", footprint);
   renderFixtureList();
   renderFeedbackTargets();
+  renderRehearsal(app.status?.rehearsal || {});
   if (!app.selectedFixtureId && fixtures().length) selectFixture(fixtures()[0].id);
   renderSystem(app.system);
   renderOperatorSettings(app.bootstrap.settings || {});
+  renderResearch(app.bootstrap.research || {});
   renderMemory(app.memory);
   buildDmxHeatmap();
   renderServiceDetails();
@@ -228,13 +236,262 @@ function renderFeedbackTargets() {
   if (fixtures().filter((fixture) => fixture.kind === "moving").length > 1) {
     options.push('<option value="group:movers">Both movers</option>');
   }
-  for (const fixture of fixtures()) {
-    options.push(`<option value="fixture:${escapeHtml(fixture.id)}">${escapeHtml(fixture.name || fixture.id)} · ${fixture.kind === "moving" ? "Mover" : "Effect"}</option>`);
+  for (const fixture of fixtures().filter((item) => item.kind !== "moving")) {
+    options.push(`<option value="fixture:${escapeHtml(fixture.id)}">${escapeHtml(fixture.name || fixture.id)} · Effect</option>`);
   }
   ["feedback-scope", "remote-feedback-scope"].forEach((id) => {
     const select = $(id);
     if (select) select.innerHTML = options.join("");
   });
+}
+
+function renderRehearsal(rehearsal = {}) {
+  const routines = rehearsal.routines || [];
+  const container = $("rehearsal-routines");
+  if (container && container.dataset.signature !== routines.map((item) => item.id).join("|")) {
+    container.dataset.signature = routines.map((item) => item.id).join("|");
+    container.innerHTML = routines.map((item) => `<button class="routine-card" data-rehearsal-routine="${escapeHtml(item.id)}"><b>${escapeHtml(item.name)}</b><span>${escapeHtml(item.description)}</span></button>`).join("");
+  }
+  $$('[data-rehearsal-routine]').forEach((button) => {
+    button.classList.toggle("active", button.dataset.rehearsalRoutine === rehearsal.routine);
+  });
+  const selected = routines.find((item) => item.id === rehearsal.routine) || {};
+  const scopeSelect = $("rehearsal-scope");
+  if (scopeSelect) {
+    const scopeOptions = [
+      '<option value="movers">Both movers</option>',
+      ...fixtures().filter((fixture) => fixture.kind === "moving").map((fixture) => `<option value="fixture:${escapeHtml(fixture.id)}">${escapeHtml(fixture.name)} · DMX ${fixture.address}</option>`),
+      '<option value="center">Center effect</option>',
+      '<option value="overall">Whole rig</option>',
+    ];
+    const signature = scopeOptions.join("");
+    if (scopeSelect.dataset.signature !== signature) {
+      scopeSelect.dataset.signature = signature;
+      scopeSelect.innerHTML = signature;
+    }
+  }
+  setText("rehearsal-routine-name", selected.name || label(rehearsal.routine || "figure_eight"));
+  setText("rehearsal-routine-description", selected.description || "Select a movement to inspect it in isolation.");
+  setText("rehearsal-preferred-summary", `${selected.name || label(rehearsal.routine)} · ${label(rehearsal.scope || "movers")}`);
+  const running = Boolean(app.status?.engine?.running && app.status?.engine?.mode === "rehearsal");
+  setText("rehearsal-state", running ? "RUNNING" : "STOPPED");
+  setText("rehearsal-output-badge", rehearsal.output === "live" ? "LIVE RIG" : "VIRTUAL PREVIEW");
+  const tour = $("rehearsal-tour");
+  if (tour) {
+    tour.textContent = `Tour: ${rehearsal.tour ? "on" : "off"}`;
+    tour.classList.toggle("active", Boolean(rehearsal.tour));
+  }
+  const values = {
+    "rehearsal-output": rehearsal.output,
+    "rehearsal-scope": rehearsal.scope,
+    "rehearsal-bpm": rehearsal.bpm,
+    "rehearsal-size": Number(rehearsal.size) * 100,
+    "rehearsal-intensity": Number(rehearsal.intensity) * 100,
+    "rehearsal-strobe": Number(rehearsal.strobe) * 100,
+    "rehearsal-palette": rehearsal.palette,
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const element = $(id);
+    if (element && document.activeElement !== element && value !== undefined) element.value = value;
+  }
+  if ($("rehearsal-isolate")) $("rehearsal-isolate").checked = rehearsal.isolate !== false;
+  setText("rehearsal-bpm-value", `${Math.round(Number(rehearsal.bpm || 120))} BPM`);
+  setText("rehearsal-size-value", percent(rehearsal.size));
+  setText("rehearsal-intensity-value", percent(rehearsal.intensity));
+  setText("rehearsal-strobe-value", Number(rehearsal.strobe || 0) ? percent(rehearsal.strobe) : "Off");
+  if ($("rehearsal-output")) $("rehearsal-output").disabled = running;
+  if ($("rehearsal-start")) $("rehearsal-start").disabled = running;
+  if ($("rehearsal-stop")) $("rehearsal-stop").disabled = !running;
+  renderMotionEditor(rehearsal.motion_editor || {});
+}
+
+function renderMotionEditor(editor = {}) {
+  const values = editor.values || {};
+  const controls = {
+    "motion-cycle": values.cycle_beats,
+    "motion-pan-size": Number(values.pan_size) * 100,
+    "motion-tilt-size": Number(values.tilt_size) * 100,
+    "motion-pan-center": Number(values.pan_center) * 100,
+    "motion-tilt-center": Number(values.tilt_center) * 100,
+    "motion-relationship": values.relationship,
+    "motion-direction": values.direction,
+    "motion-body-size": Number(values.body_size) * 100,
+    "motion-arm-size": Number(values.arm_size) * 100,
+  };
+  for (const [id, value] of Object.entries(controls)) {
+    const element = $(id);
+    if (element && document.activeElement !== element && value !== undefined) element.value = value;
+  }
+  setText("motion-cycle-value", `${Number(values.cycle_beats || 0).toFixed(0)} beats`);
+  setText("motion-pan-size-value", percent(values.pan_size));
+  setText("motion-tilt-size-value", percent(values.tilt_size));
+  setText("motion-pan-center-value", percent(values.pan_center));
+  setText("motion-tilt-center-value", percent(values.tilt_center));
+  setText("motion-body-size-value", percent(values.body_size));
+  setText("motion-arm-size-value", percent(values.arm_size));
+  setText("motion-editor-status", editor.modified ? "CUSTOM · SAVED" : "DEFAULT · SAVED");
+  const velocity = editor.velocity || [];
+  const worst = velocity.reduce((current, item) => Math.max(
+    current,
+    Number(item.required_pan_deg_s || 0) / Math.max(1, Number(item.maximum_pan_deg_s || 1)),
+    Number(item.required_tilt_deg_s || 0) / Math.max(1, Number(item.maximum_tilt_deg_s || 1)),
+  ), 0);
+  setText("motion-velocity-status", editor.velocity_feasible === false ? `TOO FAST · ${Math.round(worst * 100)}%` : `VELOCITY OK · ${Math.round(worst * 100)}%`);
+  $("motion-velocity-status")?.classList.toggle("warn", editor.velocity_feasible === false);
+  drawMotionPath(editor.paths || []);
+}
+
+function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || []) {
+  const configured = configureCanvas($("motion-path-canvas"));
+  if (!configured) return;
+  const { context: ctx, width, height } = configured;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#071012";
+  ctx.fillRect(0, 0, width, height);
+  const pad = 28;
+  ctx.strokeStyle = "rgba(93, 126, 124, .22)";
+  ctx.lineWidth = 1;
+  for (let index = 0; index <= 4; index += 1) {
+    const x = pad + (width - pad * 2) * index / 4;
+    const y = pad + (height - pad * 2) * index / 4;
+    ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, height - pad); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(width - pad, y); ctx.stroke();
+  }
+  ctx.fillStyle = "#708783";
+  ctx.font = "10px DejaVu Sans Mono";
+  ctx.fillText("LEFT", pad, height - 9); ctx.fillText("RIGHT", width - pad - 32, height - 9);
+  ctx.save(); ctx.translate(11, pad + 20); ctx.rotate(-Math.PI / 2); ctx.fillText("TILT", 0, 0); ctx.restore();
+  const colors = ["#68d9cd", "#d7a85e"];
+  paths.forEach((path, fixtureIndex) => {
+    ctx.strokeStyle = colors[fixtureIndex] || "#b8c8c5";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    path.forEach(([pan, tilt], index) => {
+      const x = pad + Number(pan) * (width - pad * 2);
+      const y = height - pad - Number(tilt) * (height - pad * 2);
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    if (path.length) {
+      const cycle = Number(app.status?.rehearsal?.motion_editor?.values?.cycle_beats || 1);
+      const beats = Number(app.status?.engine?.uptime_s || 0) * Number(app.status?.rehearsal?.bpm || 120) / 60;
+      const marker = path[Math.floor((beats % cycle) / cycle * (path.length - 1))];
+      if (marker) {
+        ctx.fillStyle = colors[fixtureIndex];
+        ctx.beginPath();
+        ctx.arc(pad + marker[0] * (width - pad * 2), height - pad - marker[1] * (height - pad * 2), 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  });
+}
+
+function motionFormValues() {
+  return {
+    cycle_beats: Number($("motion-cycle")?.value || 8),
+    pan_size: Number($("motion-pan-size")?.value || 0) / 100,
+    tilt_size: Number($("motion-tilt-size")?.value || 0) / 100,
+    pan_center: Number($("motion-pan-center")?.value || 50) / 100,
+    tilt_center: Number($("motion-tilt-center")?.value || 50) / 100,
+    relationship: $("motion-relationship")?.value || "synchronized",
+    direction: Number($("motion-direction")?.value || 1),
+    body_size: Number($("motion-body-size")?.value || 0) / 100,
+    arm_size: Number($("motion-arm-size")?.value || 0) / 100,
+  };
+}
+
+async function patchMotionRoutine(values, action = null) {
+  try {
+    const body = { routine: app.status?.rehearsal?.routine, values };
+    if (action) body.action = action;
+    app.status = await api("/api/motion-routine", { method: "POST", body });
+    renderStatus();
+  } catch (error) {
+    toast("Motion edit failed", error.message, "error");
+  }
+}
+
+function queueMotionRoutine() {
+  window.clearTimeout(app.motionTimer);
+  setText("motion-editor-status", "SAVING…");
+  app.motionTimer = window.setTimeout(() => patchMotionRoutine(motionFormValues()), 110);
+}
+
+function rehearsalFormValues() {
+  return {
+    output: $("rehearsal-output")?.value || "virtual",
+    scope: $("rehearsal-scope")?.value || "movers",
+    bpm: Number($("rehearsal-bpm")?.value || 120),
+    size: Number($("rehearsal-size")?.value || 100) / 100,
+    intensity: Number($("rehearsal-intensity")?.value || 68) / 100,
+    strobe: Number($("rehearsal-strobe")?.value || 0) / 100,
+    palette: $("rehearsal-palette")?.value || "party_vivid",
+    isolate: Boolean($("rehearsal-isolate")?.checked),
+  };
+}
+
+async function patchRehearsal(values, quiet = false) {
+  try {
+    app.status = await api("/api/rehearsal", { method: "POST", body: values });
+    renderStatus();
+  } catch (error) {
+    if (!quiet) toast("Rehearsal change failed", error.message, "error");
+  }
+}
+
+function queueRehearsal(values) {
+  window.clearTimeout(app.rehearsalTimer);
+  app.rehearsalTimer = window.setTimeout(() => patchRehearsal(values, true), 90);
+}
+
+async function startRehearsal() {
+  try {
+    app.status = await api("/api/rehearsal", { method: "POST", body: rehearsalFormValues() });
+    app.status = await api("/api/engine/start", { method: "POST", body: { mode: "rehearsal" } });
+    renderStatus();
+    toast("Rehearsal started", app.status.rehearsal.output === "live" ? "The selected routine is on the physical rig." : "Virtual DMX preview is active.", "success");
+  } catch (error) {
+    toast("Rehearsal could not start", error.message, "error");
+  }
+}
+
+function stepRehearsal(direction) {
+  const rehearsal = app.status?.rehearsal || {};
+  const routines = rehearsal.routines || [];
+  const index = Math.max(0, routines.findIndex((item) => item.id === rehearsal.routine));
+  const next = routines[(index + direction + routines.length) % routines.length];
+  if (next) patchRehearsal({ routine: next.id, tour: false });
+}
+
+async function teachRehearsal(kind) {
+  const rehearsal = app.status?.rehearsal || {};
+  const labelValue = kind === "musical_context" ? $("rehearsal-context-label")?.value : rehearsal.routine;
+  const centerFixture = fixtures().find((fixture) => fixture.kind === "auxiliary");
+  const selectedFixtureId = rehearsal.scope?.startsWith("fixture:") ? rehearsal.scope.slice(8) : null;
+  const scope = rehearsal.scope === "movers" ? "group" : rehearsal.scope === "center" || selectedFixtureId ? "fixture" : "overall";
+  try {
+    const result = await api("/api/training/annotation", {
+      method: "POST",
+      body: {
+        kind,
+        label: labelValue,
+        scope,
+        group_id: scope === "group" ? "movers" : null,
+        fixture_id: scope === "fixture" ? selectedFixtureId || centerFixture?.id || null : null,
+        intensity: 1,
+      },
+    });
+    toast(kind === "musical_context" ? "Song context saved" : "Routine placed", `${label(labelValue)}${result.linked_to_audio ? " · linked to PCM" : " · saved at the current song position"}`, "success");
+  } catch (error) {
+    toast("Rehearsal teaching failed", error.message, "error");
+  }
+}
+
+async function undoLastFeedback() {
+  if (!app.memory) app.memory = await api("/api/memory");
+  const latest = app.memory?.recent_feedback?.[0];
+  if (!latest) return toast("Nothing to undo", "No feedback has been recorded yet.");
+  await deleteFeedback(latest.id);
 }
 
 function renderStatus() {
@@ -255,6 +512,42 @@ function renderStatus() {
   setText("analysis-timing", observation?.bpm ? `${Number(observation.bpm).toFixed(1)} BPM · ${percent(observation.beat_confidence)} lock` : "Searching for tempo");
   const branch = status.solutions?.[0]?.branch || "No fixture solution";
   setText("analysis-resolution", branch.replaceAll("/", " → "));
+  const structure = status.structure_model || {};
+  const student = structure.prediction;
+  const selectedByStudent = student && student.selected_axis === "student_energy";
+  const acceptedStudentAxes = student
+    ? Object.entries(student.accepted_axes || {}).filter(([, accepted]) => accepted).map(([axis]) => axis)
+    : [];
+  if (structure.state === "error") {
+    setText("analysis-structure", "Model load error");
+    setText("analysis-structure-detail", structure.error || "The saved student artifact could not be loaded.");
+  } else if (selectedByStudent) {
+    const selectedConfidence = Number(
+      student.confidence?.[student.selected_axis === "student_functional" ? "functional" : "energy"] || 0,
+    );
+    setText("analysis-structure", `${label(student.selected_section)} · ${percent(selectedConfidence)}`);
+    setText(
+      "analysis-structure-detail",
+      `Accepted ${label(student.selected_axis)} context is influencing expression and motion; choreography changes remain phrase-boundary decisions.`,
+    );
+  } else if (structure.state === "active") {
+    if (acceptedStudentAxes.length) {
+      setText("analysis-structure", `Live energy · ${acceptedStudentAxes.map(label).join(" + ")}`);
+      setText(
+        "analysis-structure-detail",
+        "Accepted functional/content context can rank phrase-level routines; the live analyzer remains responsible for energy because no student energy label passed its gate.",
+      );
+    } else {
+      setText("analysis-structure", "Live analyzer fallback");
+      setText(
+        "analysis-structure-detail",
+        "The student is active, but its current labels are below the confidence gate and cannot steer choreography or motion.",
+      );
+    }
+  } else {
+    setText("analysis-structure", "Live analyzer only");
+    setText("analysis-structure-detail", "No validated streaming student is active; Lumen is using its live authored analyzer.");
+  }
 
   setText("engine-status", "");
   const engineStatus = $("engine-status");
@@ -270,6 +563,22 @@ function renderStatus() {
   setText("remote-output-state", status.output ? `${status.output.backend} · ${status.output.frames_sent || 0} frames` : "No output active");
   setText("audio-device-name", engine.audio_device);
   renderAudioDiagnostics(status.audio, engine);
+  renderTrainingDataset(status.training || {}, engine);
+  const researchSnapshot = app.bootstrap?.research || {};
+  const researchBusy = Boolean(
+    researchSnapshot.worker?.running || researchSnapshot.preparation?.running
+  );
+  if ($("research-import-button")) {
+    $("research-import-button").disabled = running || researchBusy;
+  }
+  if ($("research-run-button")) {
+    $("research-run-button").disabled = running || researchBusy;
+  }
+  if ($("research-train-button")) {
+    $("research-train-button").disabled = running
+      || researchBusy
+      || !Boolean(researchSnapshot.training?.train_ready);
+  }
 
   for (const id of ["rail-state", "footer-state"]) {
     const element = $(id);
@@ -282,6 +591,7 @@ function renderStatus() {
 
   renderEngineButtons(engine);
   renderControls(controls);
+  renderRehearsal(status.rehearsal || {});
   renderMedia(status.media, observation);
   renderExpression(decision, expression, observation);
   renderDmx(status);
@@ -352,6 +662,309 @@ function renderAudioDiagnostics(audio = {}, engine = {}) {
     void heartbeat?.offsetWidth;
     heartbeat?.classList.add("tick");
     app.lastAudioPacketCount = packetCount;
+  }
+}
+
+function formatBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let amount = bytes;
+  let unit = -1;
+  do {
+    amount /= 1024;
+    unit += 1;
+  } while (amount >= 1024 && unit < units.length - 1);
+  return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`;
+}
+
+function renderTrainingDataset(training = {}, engine = {}) {
+  const current = training.current || {};
+  const history = training.history || {};
+  const state = current.state || (training.enabled ? "armed" : "disabled");
+  const recording = Boolean(current.recording);
+  setText("training-state", recording ? "RECORDING PCM" : label(state));
+  setText(
+    "training-detail",
+    recording
+      ? `${formatUptime(current.duration_s)} captured · ${current.codec || "PCM16 WAV"} · ${Number(current.feature_rate_hz || 10).toFixed(0)} semantic frames/s`
+      : training.enabled
+        ? "Armed for the next Monitor or Live session."
+        : "Audio collection is disabled in settings.",
+  );
+  setText("training-duration", formatUptime(current.duration_s || 0));
+  setText("training-segments", Number(current.segments ?? history.segments ?? 0).toLocaleString());
+  setText("training-features", Number((history.feature_frames || 0) + (current.semantic_frames || 0)).toLocaleString());
+  setText("training-feedback", Number((history.linked_feedback || 0) + (training.current_linked_feedback || 0)).toLocaleString());
+  setText("training-annotations", Number((history.annotations || 0) + (training.current_annotations || 0)).toLocaleString());
+  setText("training-size", formatBytes(training.total_bytes || history.bytes || 0));
+  setText("training-free", formatBytes(training.disk_free_bytes || 0));
+  setText("training-dropped", Number(current.dropped_frames || history.dropped_frames || 0).toLocaleString());
+  setText("training-path", training.path || "state/training");
+  setText("training-export-path", training.last_export || "No manifest built yet");
+  const indicator = $("training-record-indicator");
+  if (indicator) indicator.classList.toggle("recording", recording);
+  const exportButton = $("training-export-button");
+  if (exportButton) exportButton.disabled = recording || !Number(history.sessions || 0);
+  const settingsButton = $("save-training-settings-button");
+  if (settingsButton) settingsButton.disabled = Boolean(engine.running);
+}
+
+function renderResearch(research = {}) {
+  const database = research.database || {};
+  const training = research.training || {};
+  const planned = Number(training.recordings_planned || 0);
+  const processed = Number(training.recordings_processed || 0);
+  const captured = Number(training.recordings_captured ?? planned);
+  const eligible = Number(training.recordings_eligible ?? planned);
+  const partial = Number(training.recordings_partial || 0);
+  const unknown = Number(training.recordings_unknown || 0);
+  const jobsComplete = Number(training.eligible_teacher_jobs_complete ?? training.teacher_jobs_complete ?? 0);
+  const jobsTotal = Number(training.eligible_teacher_jobs ?? training.teacher_jobs_total ?? 0);
+  const heldout = Number(training.split_counts?.validation || 0) + Number(training.split_counts?.test || 0);
+  const model = training.model || {};
+  const workerError = research.worker?.last_result?.error || "";
+  const modelErrors = model.runtime_error ? 1 : 0;
+  const errors = Number(training.teacher_errors?.length || 0)
+    + Number(training.provenance_errors?.length || 0)
+    + modelErrors
+    + Number(Boolean(workerError));
+  const captureDetails = [`${captured.toLocaleString()} total`];
+  if (partial) captureDetails.push(`${partial.toLocaleString()} partial`);
+  if (unknown) captureDetails.push(`${unknown.toLocaleString()} unidentified`);
+  setText("research-captured", captureDetails.join(" · "));
+  setText("research-recordings", `${processed.toLocaleString()} / ${eligible.toLocaleString()}`);
+  setText("research-jobs", `${jobsComplete.toLocaleString()} / ${jobsTotal.toLocaleString()}`);
+  setText("research-progress", `${Math.round(Number(training.progress || 0) * 100)}%`);
+  setText("research-examples", Number(training.usable_examples || 0).toLocaleString());
+  setText("research-heldout", heldout.toLocaleString());
+  setText("research-errors", errors.toLocaleString());
+  const evaluation = model.evaluation || {};
+  const candidateIsCurrent = model.candidate_provenance_current !== false;
+  const staleCandidate = Boolean(model.candidate && !candidateIsCurrent);
+  const latestCandidateRejected = Boolean(model.candidate && candidateIsCurrent && evaluation.activated === false);
+  setText(
+    "research-student-state",
+    model.runtime_state === "error"
+      ? "Load error"
+      : model.active && latestCandidateRejected
+        ? "Active · latest candidate rejected"
+        : model.active
+          ? "Active"
+          : latestCandidateRejected
+            ? "Candidate rejected"
+            : staleCandidate
+              ? "Candidate stale · retrain"
+            : model.candidate
+              ? "Candidate awaiting validation"
+              : "Awaiting training",
+  );
+  const blockers = training.blockers || [];
+  const workerProgress = research.worker?.progress || {};
+  const recoveredJobs = research.worker?.recovered_jobs || [];
+  const recoveryNote = recoveredJobs.length
+    ? ` Recovered ${recoveredJobs.length.toLocaleString()} interrupted job${recoveredJobs.length === 1 ? "" : "s"}; completed work was preserved.`
+    : "";
+  const preparationRunning = Boolean(research.preparation?.running);
+  const cancelRequested = Boolean(research.worker?.cancel_requested);
+  const readiness = $("research-readiness");
+  if (readiness) {
+    if (preparationRunning) {
+      readiness.textContent = "Preparing the most recent capture: verifying continuity, song identity, and full-song eligibility before teacher jobs are queued.";
+      readiness.className = "research-readiness active";
+    } else if (research.worker?.running) {
+      const done = Number(workerProgress.processed || 0);
+      const batch = Number(workerProgress.planned || 0);
+      const eta = training.estimated_remaining_seconds == null
+        ? "estimating time after the first completion"
+        : `about ${formatUptime(training.estimated_remaining_seconds)} remaining`;
+      const jobName = label(workerProgress.current_job_type || "offline job");
+      const resources = workerProgress.resources || {};
+      const memoryStatus = Number(resources.rss_bytes || 0) > 0
+        ? ` Memory ${formatBytes(resources.rss_bytes)}${Number(resources.memory_limit_bytes || 0) > 0 ? ` of ${formatBytes(resources.memory_limit_bytes)} limit` : ""}.`
+        : "";
+      readiness.textContent = cancelRequested
+        ? `Pausing ${jobName} at its cancellation checkpoint. Completed jobs are retained and the unfinished job will return to the queue.${recoveryNote}`
+        : `Running ${jobName}: ${done} of ${batch} jobs finished, ${eta}.${memoryStatus} You may pause and resume without losing completed work.${recoveryNote}`;
+      readiness.className = "research-readiness active";
+    } else if (workerError) {
+      readiness.textContent = `The analysis controller stopped unexpectedly: ${workerError}. The recording queue remains durable; press Analyze new recordings to retry after reviewing the error below.`;
+      readiness.className = "research-readiness";
+    } else if (latestCandidateRejected) {
+      const reasons = evaluation.gate_reasons || [];
+      readiness.textContent = model.active
+        ? `The validated model remains active; the latest candidate was rejected${reasons.length ? `: ${reasons.join("; ")}` : "."}`
+        : `The candidate did not pass held-out validation${reasons.length ? `: ${reasons.join("; ")}` : ". Analyze more complete songs before retraining."}`;
+      readiness.textContent += recoveryNote;
+      readiness.className = "research-readiness";
+    } else if (staleCandidate) {
+      readiness.textContent = "The saved candidate was trained from an older manifest. Train again so validation uses the current trusted examples and song splits.";
+      readiness.textContent += recoveryNote;
+      readiness.className = "research-readiness";
+    } else if (training.train_ready) {
+      readiness.textContent = training.collection_complete
+        ? "Ready to train. Lumen has trusted training songs and separate held-out songs for validation."
+        : `Ready for a preliminary train-and-validate pass. ${Number(training.teacher_jobs_remaining || 0)} teacher jobs remain; retrain after more analysis for broader musical coverage.`;
+      readiness.textContent += recoveryNote;
+      readiness.className = "research-readiness ready";
+    } else {
+      readiness.textContent = blockers.length ? `Not ready: ${blockers.join("; ")}.` : "Analyze captured songs to begin.";
+      readiness.textContent += recoveryNote;
+      readiness.className = "research-readiness";
+    }
+  }
+  const errorList = $("research-error-list");
+  if (errorList) {
+    const items = [
+      ...(training.teacher_errors || []),
+      ...(training.provenance_errors || []),
+      ...(workerError ? [{ job_type: "Analysis controller", error: workerError }] : []),
+      ...(model.runtime_error ? [{ job_type: "Streaming student", error: model.runtime_error }] : []),
+    ];
+    errorList.innerHTML = items.slice(0, 8).map((item) =>
+      `<div><b>${escapeHtml(item.job_type || item.teacher_run_id || "Analysis")}</b><span>${escapeHtml(item.error || "Unknown error")}</span></div>`
+    ).join("");
+    errorList.classList.toggle("visible", items.length > 0);
+  }
+  const labelBalance = $("research-label-balance");
+  if (labelBalance) {
+    const axes = training.label_balance || {};
+    labelBalance.innerHTML = ["functional", "energy", "content"].map((axis) => {
+      const labels = Object.entries(axes[axis] || {}).sort((a, b) => b[1] - a[1]);
+      const content = labels.length
+        ? labels.map(([name, count]) => `${escapeHtml(label(name))} ${Number(count).toLocaleString()}`).join(" · ")
+        : "Awaiting teacher labels";
+      return `<div><b>${escapeHtml(label(axis))}</b><span>${content}</span></div>`;
+    }).join("");
+  }
+  const runButton = $("research-run-button");
+  const engineRunning = Boolean(app.status?.engine?.running);
+  if (runButton) {
+    runButton.disabled = engineRunning || preparationRunning || Boolean(research.worker?.running);
+    runButton.textContent = preparationRunning
+      ? "Preparing capture…"
+      : research.worker?.running
+        ? cancelRequested ? "Pausing analysis…" : "Analysis running…"
+        : "Analyze new recordings";
+  }
+  const cancelButton = $("research-cancel-button");
+  if (cancelButton) {
+    cancelButton.disabled = !Boolean(research.worker?.running) || cancelRequested;
+    cancelButton.textContent = cancelRequested ? "Pausing…" : "Pause analysis";
+  }
+  if ($("research-train-button")) {
+    $("research-train-button").disabled = engineRunning || preparationRunning || Boolean(research.worker?.running) || !training.train_ready;
+  }
+  if ($("research-import-button")) {
+    $("research-import-button").disabled = engineRunning || preparationRunning || Boolean(research.worker?.running);
+  }
+  const list = $("research-components");
+  if (!list) return;
+  list.innerHTML = (research.components || []).map((component) => {
+    const annotation = component.annotations || {};
+    const environment = component.environment_status || {};
+    const state = annotation.state || component.source?.state || "unknown";
+    const className = state === "ready" || state === "imported" || state === "not_applicable"
+      ? ""
+      : state.includes("awaiting") || state === "missing"
+        ? "warn"
+        : "error";
+    const detail = annotation.message
+      || (component.environment
+        ? `Teacher environment: ${environment.state || "unknown"}`
+        : component.role || "");
+    return `<div class="research-component ${className}">
+      <b>${escapeHtml(component.display_name || component.component_id)}</b>
+      <span>${escapeHtml(label(state))}</span>
+      <small>${escapeHtml(detail)}</small>
+    </div>`;
+  }).join("");
+}
+
+async function refreshResearch() {
+  try {
+    const research = await api("/api/research");
+    app.bootstrap.research = research;
+    renderResearch(research);
+  } catch (error) {
+    toast("Research status failed", error.message, "error");
+  }
+}
+
+async function importResearchAnnotations() {
+  const button = $("research-import-button");
+  if (button) button.disabled = true;
+  try {
+    const result = await api("/api/research/import-annotations", {
+      method: "POST",
+      body: { components: ["edm98", "harmonix", "ccmusic", "salami"] },
+    });
+    await refreshResearch();
+    const imported = (result.results || [])
+      .filter((item) => item.state === "imported")
+      .map((item) => `${item.component_id}: ${Number(item.timelines || 0).toLocaleString()}`)
+      .join(" · ");
+    toast("Annotations normalized", imported || "No importable annotations found.", "success");
+  } catch (error) {
+    toast("Annotation import failed", error.message, "error");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function runResearchJob() {
+  const button = $("research-run-button");
+  if (button?.disabled) return;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Preparing capture…";
+  }
+  try {
+    const result = await api("/api/research/analyze", {
+      method: "POST",
+      body: {},
+    });
+    const research = result.research;
+    app.bootstrap.research = research;
+    renderResearch(research);
+    if (result.started === false) {
+      toast("Analysis already current", result.message || "No structure jobs are queued.", "success");
+    } else {
+      toast("Recording analysis started", "Both structure teachers run in a resumable offline batch.", "success");
+    }
+  } catch (error) {
+    toast("Research job could not start", error.message, "error");
+  } finally {
+    await refreshResearch();
+  }
+}
+
+async function cancelResearch() {
+  try {
+    const research = await api("/api/research/cancel", { method: "POST", body: {} });
+    app.bootstrap.research = research;
+    renderResearch(research);
+    toast("Analysis pausing", "The current teacher process will stop and its job will return to the queue.", "success");
+  } catch (error) {
+    toast("Analysis could not pause", error.message, "error");
+  }
+}
+
+async function trainStructureStudent() {
+  try {
+    const result = await api("/api/research/train-student", {
+      method: "POST",
+      body: { epochs: 30 },
+    });
+    app.bootstrap.research = result.research;
+    renderResearch(result.research);
+    toast(
+      "CPU student training started",
+      `${Number(result.queued.examples || 0).toLocaleString()} aligned examples`,
+      "success",
+    );
+  } catch (error) {
+    toast("Student training could not start", error.message, "error");
   }
 }
 
@@ -899,18 +1512,20 @@ function selectFixture(id) {
       const value = fixture.calibration[input.dataset.calibration];
       if (value !== undefined) input.value = value;
     });
-    $$('[data-calibration-slider]').forEach((slider) => {
-      if (fixture.calibration[slider.dataset.calibrationSlider] !== undefined) slider.value = fixture.calibration[slider.dataset.calibrationSlider];
+    const points = calibrationPointsFor(fixture);
+    Object.entries(points).forEach(([key, value]) => {
+      const input = $(`[data-calibration="${key}"]`);
+      if (input) input.value = value;
     });
-    updateCalibrationSliderReadouts();
+    renderCalibrationPoints();
   }
   if (fixture.kind === "moving") {
-    const pan = Math.max(0, Math.min(255, Number(fixture.calibration?.home_pan_dmx ?? 128)));
-    const tilt = Math.max(0, Math.min(255, Number(fixture.calibration?.home_tilt_dmx ?? 128)));
+    const points = calibrationPointsFor(fixture);
+    const pan = points.home_pan_dmx;
+    const tilt = points.home_tilt_dmx;
     if ($("calibration-pan")) $("calibration-pan").value = pan;
     if ($("calibration-tilt")) $("calibration-tilt").value = tilt;
-    setText("calibration-pan-value", pan);
-    setText("calibration-tilt-value", tilt);
+    updateCalibrationJogReadouts();
   }
   const channelMap = $("fixture-channel-map");
   if (channelMap) {
@@ -921,30 +1536,130 @@ function selectFixture(id) {
   drawRig();
 }
 
-function updateCalibrationSliderReadouts() {
-  const value = (key) => Math.round(Number($(`[data-calibration="${key}"]`)?.value || 0));
-  setText("pan-range-readout", `${value("pan_min_deg")}° – ${value("pan_max_deg")}°`);
-  setText("tilt-range-readout", `${value("tilt_min_deg")}° – ${value("tilt_max_deg")}°`);
+function calibrationPointsFor(fixture) {
+  const calibration = fixture?.calibration || {};
+  const options = fixture?.source_metadata?.options || {};
+  const coarse = (value, fallback) => Math.max(
+    0,
+    Math.min(255, Math.round(Number(value ?? fallback))),
+  );
+  const panMinimum = Number(calibration.pan_dmx_min_u16 ?? 0) / 257;
+  const panMaximum = Number(calibration.pan_dmx_max_u16 ?? 65535) / 257;
+  const tiltMinimum = Number(calibration.tilt_dmx_min_u16 ?? 0) / 257;
+  const tiltMaximum = Number(calibration.tilt_dmx_max_u16 ?? 65535) / 257;
+  const panReversed = Number(calibration.pan_direction ?? 1) < 0;
+  const tiltReversed = Number(calibration.tilt_direction ?? 1) < 0;
+  return {
+    pan_left_dmx: coarse(
+      calibration.pan_left_dmx ?? options.room_pan_left_dmx,
+      panReversed ? panMaximum : panMinimum,
+    ),
+    pan_right_dmx: coarse(
+      calibration.pan_right_dmx ?? options.room_pan_right_dmx,
+      panReversed ? panMinimum : panMaximum,
+    ),
+    tilt_high_dmx: coarse(
+      calibration.tilt_high_dmx ?? options.room_tilt_high_dmx,
+      tiltReversed ? tiltMinimum : tiltMaximum,
+    ),
+    tilt_low_dmx: coarse(
+      calibration.tilt_low_dmx ?? options.room_tilt_low_dmx,
+      tiltReversed ? tiltMaximum : tiltMinimum,
+    ),
+    home_pan_dmx: coarse(
+      calibration.home_pan_dmx ?? options.home_pan_dmx,
+      (panMinimum + panMaximum) / 2,
+    ),
+    home_tilt_dmx: coarse(
+      calibration.home_tilt_dmx ?? options.home_tilt_dmx,
+      (tiltMinimum + tiltMaximum) / 2,
+    ),
+  };
 }
 
-function setCalibrationRange(kind) {
-  if (kind === "reset") {
-    if (app.selectedFixtureId) selectFixture(app.selectedFixtureId);
-    return;
-  }
-  const limits = kind === "wide"
-    ? ["pan_min_deg", 0, "pan_max_deg", 540, "tilt_min_deg", 0, "tilt_max_deg", 270]
-    : kind === "center"
-      ? ["pan_min_deg", 90, "pan_max_deg", 450, "tilt_min_deg", 35, "tilt_max_deg", 235]
-      : null;
-  if (!limits) return;
-  for (let i = 0; i < limits.length; i += 2) {
-    const input = $(`[data-calibration="${limits[i]}"]`);
-    if (input) input.value = limits[i + 1];
-    const slider = $(`[data-calibration-slider="${limits[i]}"]`);
-    if (slider) slider.value = limits[i + 1];
-  }
-  updateCalibrationSliderReadouts();
+function calibrationFieldNumber(name, fallback = 0) {
+  return Number($(`[data-calibration="${name}"]`)?.value ?? fallback);
+}
+
+function fixtureTravelLabel(value) {
+  const position = Math.max(0, Math.min(255, Math.round(Number(value))));
+  return `${Math.round(position / 255 * 100)}%`;
+}
+
+function renderCalibrationPoints() {
+  const bindings = {
+    "capture-pan-left": "pan_left_dmx",
+    "capture-pan-home": "home_pan_dmx",
+    "capture-pan-right": "pan_right_dmx",
+    "capture-tilt-high": "tilt_high_dmx",
+    "capture-tilt-home": "home_tilt_dmx",
+    "capture-tilt-low": "tilt_low_dmx",
+  };
+  Object.entries(bindings).forEach(([id, key]) => {
+    setText(id, fixtureTravelLabel(calibrationFieldNumber(key, 128)));
+  });
+  const panDirection = calibrationFieldNumber("pan_direction", 1) < 0 ? "reversed" : "normal";
+  const tiltDirection = calibrationFieldNumber("tilt_direction", 1) < 0 ? "reversed" : "normal";
+  setText(
+    "calibration-direction-note",
+    `Software axis detection: pan ${panDirection}; tilt ${tiltDirection}. Reversed is valid and does not require turning the fixture.`,
+  );
+}
+
+function updateCalibrationJogReadouts() {
+  setText("calibration-pan-value", fixtureTravelLabel($("calibration-pan")?.value || 128));
+  setText("calibration-tilt-value", fixtureTravelLabel($("calibration-tilt")?.value || 128));
+  setText("calibration-speed-value", $("calibration-speed")?.value || 192);
+}
+
+function deriveCalibrationAxis(axis, previous) {
+  const fixture = selectedFixture();
+  const profile = profileFor(fixture?.profile_key);
+  const totalDegrees = Number(axis === "pan" ? profile?.pan_degrees : profile?.tilt_degrees) || (axis === "pan" ? 540 : 270);
+  const firstKey = axis === "pan" ? "pan_left_dmx" : "tilt_low_dmx";
+  const secondKey = axis === "pan" ? "pan_right_dmx" : "tilt_high_dmx";
+  const homeKey = axis === "pan" ? "home_pan_dmx" : "home_tilt_dmx";
+  const endpointA = calibrationFieldNumber(firstKey, 0);
+  const endpointB = calibrationFieldNumber(secondKey, 255);
+  if (endpointA === endpointB) throw new Error(`${axis === "pan" ? "Left and right" : "High and low"} positions must differ.`);
+  const rawMinimum = Math.min(endpointA, endpointB);
+  const rawMaximum = Math.max(endpointA, endpointB);
+  const direction = endpointB >= endpointA ? 1 : -1;
+  const oldDirection = previous.direction || 1;
+  const oldHomeAngle = previous.home / 255 * totalDegrees;
+  const canonicalHome = (oldHomeAngle - previous.offset) / oldDirection;
+  const newHomeAngle = calibrationFieldNumber(homeKey, 128) / 255 * totalDegrees;
+  const set = (key, value) => { const input = $(`[data-calibration="${key}"]`); if (input) input.value = value; };
+  set(`${axis}_dmx_min_u16`, Math.round(rawMinimum * 257));
+  set(`${axis}_dmx_max_u16`, Math.round(rawMaximum * 257));
+  set(`${axis}_min_deg`, rawMinimum / 255 * totalDegrees);
+  set(`${axis}_max_deg`, rawMaximum / 255 * totalDegrees);
+  set(`${axis}_direction`, direction);
+  set(`${axis}_offset_deg`, newHomeAngle - direction * canonicalHome);
+}
+
+function captureCalibrationPoint(kind) {
+  const axis = kind.startsWith("pan_") ? "pan" : "tilt";
+  const previous = {
+    direction: calibrationFieldNumber(`${axis}_direction`, 1),
+    offset: calibrationFieldNumber(`${axis}_offset_deg`, 0),
+    home: calibrationFieldNumber(axis === "pan" ? "home_pan_dmx" : "home_tilt_dmx", 128),
+  };
+  const value = Number($(axis === "pan" ? "calibration-pan" : "calibration-tilt").value);
+  const fieldByKind = {
+    pan_left: "pan_left_dmx",
+    pan_home: "home_pan_dmx",
+    pan_right: "pan_right_dmx",
+    tilt_high: "tilt_high_dmx",
+    tilt_home: "home_tilt_dmx",
+    tilt_low: "tilt_low_dmx",
+  };
+  const field = $(`[data-calibration="${fieldByKind[kind]}"]`);
+  if (!field) return;
+  field.value = value;
+  deriveCalibrationAxis(axis, previous);
+  app.calibrationCaptures[kind] = value;
+  renderCalibrationPoints();
 }
 
 function selectedMoverId() {
@@ -959,7 +1674,12 @@ async function sendCalibration(active, values = {}) {
     if (active && !app.status?.engine?.running) {
       app.status = await api("/api/engine/start", { method: "POST", body: { mode: "live" } });
     }
-    await api("/api/calibration", { method: "POST", body: { fixture_id: fixtureId, active, ...values } });
+    const position = active ? {
+      pan_dmx: Number($("calibration-pan")?.value || 128),
+      tilt_dmx: Number($("calibration-tilt")?.value || 128),
+      speed: Number($("calibration-speed")?.value || 192),
+    } : {};
+    await api("/api/calibration", { method: "POST", body: { fixture_id: fixtureId, active, ...position, ...values } });
     app.calibrationActive = active;
     setText("calibration-toggle", active ? "Stop calibration" : "Start calibration");
     ["calibration-pan", "calibration-tilt", "calibration-speed"].forEach((id) => { if ($(id)) $(id).disabled = !active; });
@@ -970,8 +1690,8 @@ async function sendCalibration(active, values = {}) {
 function calibrationJog() {
   if (!app.calibrationActive) return;
   sendCalibration(true, {
-    pan_dmx: Number($("calibration-pan")?.value || 32768),
-    tilt_dmx: Number($("calibration-tilt")?.value || 32768),
+    pan_dmx: Number($("calibration-pan")?.value || 128),
+    tilt_dmx: Number($("calibration-tilt")?.value || 128),
     speed: Number($("calibration-speed")?.value || 192),
   });
 }
@@ -1026,17 +1746,39 @@ async function saveSelectedFixture() {
     });
   }
   setText("rig-save-state", "Saving…");
+  const resumeMode = app.status?.engine?.running
+    ? (app.status.engine.mode || "live")
+    : null;
   try {
     if (app.calibrationActive) await sendCalibration(false);
+    if (app.status?.engine?.running) {
+      app.status = await api("/api/engine/stop", { method: "POST", body: {} });
+      const deadline = Date.now() + 8000;
+      while (app.status?.engine?.running && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100));
+        app.status = await api("/api/status");
+      }
+      if (app.status?.engine?.running) {
+        throw new Error("The engine did not finish stopping in time to save the rig.");
+      }
+    }
     app.bootstrap = await api("/api/rig/fixture", { method: "POST", body: payload });
     app.status = app.bootstrap.status;
     app.memory = app.bootstrap.memory;
     app.system = app.bootstrap.system;
+    if (resumeMode) {
+      app.status = await api("/api/engine/start", { method: "POST", body: { mode: resumeMode } });
+    }
     setText("rig-save-state", "Saved to active rig");
     renderFixtureList($("fixture-filter")?.value || "");
     selectFixture(fixture.id);
     toast("Fixture saved", `${payload.name} is now part of the active Lumen rig.`, "success");
   } catch (error) {
+    if (resumeMode && !app.status?.engine?.running) {
+      try {
+        app.status = await api("/api/engine/start", { method: "POST", body: { mode: resumeMode } });
+      } catch (_resumeError) { /* The original save error is the useful message. */ }
+    }
     setText("rig-save-state", "Save failed");
     toast("Could not save fixture", error.message, "error");
   }
@@ -1484,6 +2226,8 @@ function renderSystem(system) {
 
 function renderOperatorSettings(settings) {
   if ($("audio-device-input")) $("audio-device-input").value = settings.audio_device || "default";
+  if ($("training-capture-enabled")) $("training-capture-enabled").checked = settings.training_capture_enabled !== false;
+  if ($("training-max-gb")) $("training-max-gb").value = Number(settings.training_max_gb || 100);
   if ($("spotify-client-id")) {
     $("spotify-client-id").value = "";
     $("spotify-client-id").placeholder = settings.spotify_client_id_masked
@@ -1588,6 +2332,30 @@ async function sendFeedback(labelValue, value, note = null, surface = "desktop")
   }
 }
 
+async function sendTrainingAnnotation(kind, labelValue, surface = "desktop") {
+  const selector = $(surface === "remote" ? "remote-feedback-scope" : "feedback-scope");
+  const selected = selector?.value || "overall";
+  const [scope, fixtureId, groupId] = selected.startsWith("fixture:")
+    ? ["fixture", selected.slice(8), null]
+    : selected.startsWith("group:")
+      ? ["group", null, selected.slice(6)]
+      : ["overall", null, null];
+  const note = $(surface === "remote" ? "remote-feedback-note" : "feedback-note")?.value.trim() || null;
+  try {
+    const result = await api("/api/training/annotation", {
+      method: "POST",
+      body: { kind, label: labelValue, scope, fixture_id: fixtureId, group_id: groupId, note, intensity: 1 },
+    });
+    toast(
+      "Training label saved",
+      `${label(labelValue)}${result.linked_to_audio ? " · linked to PCM" : " · no active PCM link"}`,
+      "success",
+    );
+  } catch (error) {
+    toast("Training label could not be saved", error.message, "error");
+  }
+}
+
 async function rescanSystem() {
   try {
     toast("Scanning hardware", "Refreshing ALSA, FTDI, network, and Spotify state.");
@@ -1611,6 +2379,36 @@ async function saveAudioDevice() {
     toast("Audio input saved", `Lumen will capture from ${audioDevice}.`, "success");
   } catch (error) {
     toast("Audio input was not changed", error.message, "error");
+  }
+}
+
+async function saveTrainingSettings() {
+  try {
+    const result = await api("/api/settings", {
+      method: "POST",
+      body: {
+        training_capture_enabled: Boolean($("training-capture-enabled")?.checked),
+        training_max_gb: Number($("training-max-gb")?.value || 100),
+      },
+    });
+    app.status = result.status;
+    app.bootstrap.settings = result.settings;
+    renderOperatorSettings(result.settings);
+    renderStatus();
+    toast("Training capture settings saved", "They apply when Monitor or Live mode starts.", "success");
+  } catch (error) {
+    toast("Training settings were not changed", error.message, "error");
+  }
+}
+
+async function exportTrainingData() {
+  try {
+    const result = await api("/api/training/export", { method: "POST", body: {} });
+    if (app.status?.training) app.status.training.last_export = result.path;
+    renderStatus();
+    toast("Training manifest built", result.path, "success");
+  } catch (error) {
+    toast("Training export failed", error.message, "error");
   }
 }
 
@@ -1642,44 +2440,85 @@ function installHandlers() {
   $("spotify-back-button")?.addEventListener("click", () => navigateSpotifyHistory(-1));
   $("spotify-forward-button")?.addEventListener("click", () => navigateSpotifyHistory(1));
   $("fresh-gesture-button")?.addEventListener("click", requestFreshGesture);
+  $("rehearsal-routines")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-rehearsal-routine]");
+    if (button) patchRehearsal({ routine: button.dataset.rehearsalRoutine, tour: false });
+  });
+  $("rehearsal-start")?.addEventListener("click", startRehearsal);
+  $("rehearsal-stop")?.addEventListener("click", stopEngine);
+  $("rehearsal-previous")?.addEventListener("click", () => stepRehearsal(-1));
+  $("rehearsal-next")?.addEventListener("click", () => stepRehearsal(1));
+  $("rehearsal-tour")?.addEventListener("click", () => patchRehearsal({ tour: !Boolean(app.status?.rehearsal?.tour) }));
+  $("rehearsal-restart")?.addEventListener("click", async () => {
+    if (app.status?.engine?.mode === "rehearsal" && app.status?.engine?.running) {
+      await stopEngine();
+      window.setTimeout(startRehearsal, 250);
+    } else startRehearsal();
+  });
+  ["rehearsal-output", "rehearsal-scope", "rehearsal-palette", "rehearsal-isolate"].forEach((id) => {
+    $(id)?.addEventListener("change", () => patchRehearsal(rehearsalFormValues()));
+  });
+  ["rehearsal-bpm", "rehearsal-size", "rehearsal-intensity", "rehearsal-strobe"].forEach((id) => {
+    $(id)?.addEventListener("input", () => {
+      setText("rehearsal-bpm-value", `${$("rehearsal-bpm").value} BPM`);
+      setText("rehearsal-size-value", `${$("rehearsal-size").value}%`);
+      setText("rehearsal-intensity-value", `${$("rehearsal-intensity").value}%`);
+      setText("rehearsal-strobe-value", Number($("rehearsal-strobe").value) ? `${$("rehearsal-strobe").value}%` : "Off");
+      queueRehearsal(rehearsalFormValues());
+    });
+  });
+  $$('[data-motion-control]').forEach((input) => {
+    input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {
+      const values = motionFormValues();
+      setText("motion-cycle-value", `${values.cycle_beats.toFixed(0)} beats`);
+      setText("motion-pan-size-value", percent(values.pan_size));
+      setText("motion-tilt-size-value", percent(values.tilt_size));
+      setText("motion-pan-center-value", percent(values.pan_center));
+      setText("motion-tilt-center-value", percent(values.tilt_center));
+      setText("motion-body-size-value", percent(values.body_size));
+      setText("motion-arm-size-value", percent(values.arm_size));
+      queueMotionRoutine();
+    });
+  });
+  $("motion-reset-defaults")?.addEventListener("click", () => patchMotionRoutine({}, "reset"));
+  $("rehearsal-context-button")?.addEventListener("click", () => teachRehearsal("musical_context"));
+  $("rehearsal-use-here")?.addEventListener("click", () => teachRehearsal("preferred_action"));
 
   $$("[data-control]").forEach((input) => {
     input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => queueControl(input.dataset.control, input.tagName === "SELECT" ? input.value : Number(input.value) / 100));
   });
-  $$('[data-calibration-slider]').forEach((slider) => {
-    slider.addEventListener('input', () => {
-      const field = $(`[data-calibration="${slider.dataset.calibrationSlider}"]`);
-      if (field) field.value = slider.value;
-      updateCalibrationSliderReadouts();
-    });
-  });
-  $$('[data-calibration-preset]').forEach((button) => {
-    button.addEventListener('click', () => setCalibrationRange(button.dataset.calibrationPreset));
-  });
   $("calibration-toggle")?.addEventListener("click", () => sendCalibration(!app.calibrationActive));
   ["calibration-pan", "calibration-tilt", "calibration-speed"].forEach((id) => {
     $(id)?.addEventListener("input", () => {
-      setText(`${id}-value`, $(id).value);
+      updateCalibrationJogReadouts();
       calibrationJog();
     });
   });
   $$('[data-calibration-capture]').forEach((button) => {
     button.addEventListener('click', () => {
-      const kind = button.dataset.calibrationCapture;
-      const pan = Number($("calibration-pan").value);
-      const tilt = Number($("calibration-tilt").value);
-      app.calibrationCaptures[kind] = { pan, tilt };
-      if (kind === "left") $("[data-calibration=pan_dmx_min_u16]").value = pan * 257;
-      if (kind === "right") $("[data-calibration=pan_dmx_max_u16]").value = pan * 257;
-      if (kind === "home") {
-        $("[data-calibration=home_pan_dmx]").value = pan;
-        $("[data-calibration=home_tilt_dmx]").value = tilt;
+      try {
+        captureCalibrationPoint(button.dataset.calibrationCapture);
+      } catch (error) {
+        toast("Calibration point rejected", error.message, "error");
       }
-      if (kind === "left" || kind === "right") {
-        // Tilt captures are taken independently with the same jog controls.
-        $("[data-calibration=tilt_dmx_min_u16]").value = kind === "left" ? tilt * 257 : $("[data-calibration=tilt_dmx_min_u16]").value;
-        $("[data-calibration=tilt_dmx_max_u16]").value = kind === "right" ? tilt * 257 : $("[data-calibration=tilt_dmx_max_u16]").value;
+    });
+  });
+  $$('[data-calibration-preview]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!app.calibrationActive) {
+        toast("Start calibration first", "The selected mover must be in its visible calibration state.", "error");
+        return;
       }
+      const kind = button.dataset.calibrationPreview;
+      const fieldByKind = {
+        pan_left: "pan_left_dmx", pan_home: "home_pan_dmx", pan_right: "pan_right_dmx",
+        tilt_high: "tilt_high_dmx", tilt_home: "home_tilt_dmx", tilt_low: "tilt_low_dmx",
+      };
+      const axis = kind.startsWith("pan_") ? "pan" : "tilt";
+      const slider = $(axis === "pan" ? "calibration-pan" : "calibration-tilt");
+      if (slider) slider.value = calibrationFieldNumber(fieldByKind[kind], 128);
+      updateCalibrationJogReadouts();
+      calibrationJog();
     });
   });
   $$("[data-preset]").forEach((button) => button.addEventListener("click", () => applyPreset(button.dataset.preset)));
@@ -1690,6 +2529,8 @@ function installHandlers() {
     const note = $("feedback-note").value.trim();
     if (note) sendFeedback("operator_note", 0, note, "desktop");
   });
+  $("feedback-undo-button")?.addEventListener("click", undoLastFeedback);
+  $("remote-feedback-undo")?.addEventListener("click", undoLastFeedback);
   $("remote-feedback-note-button")?.addEventListener("click", () => {
     const note = $("remote-feedback-note").value.trim();
     if (note) sendFeedback("operator_note", 0, note, "remote");
@@ -1697,6 +2538,18 @@ function installHandlers() {
   $("remote-note-open")?.addEventListener("click", () => {
     $("remote-note-box").classList.toggle("hidden");
     if (!$("remote-note-box").classList.contains("hidden")) $("remote-feedback-note").focus();
+  });
+  $("feedback-context-button")?.addEventListener("click", () => {
+    sendTrainingAnnotation("musical_context", $("feedback-context-label")?.value, "desktop");
+  });
+  $("feedback-action-button")?.addEventListener("click", () => {
+    sendTrainingAnnotation("preferred_action", $("feedback-action-label")?.value, "desktop");
+  });
+  $("remote-context-button")?.addEventListener("click", () => {
+    sendTrainingAnnotation("musical_context", $("remote-context-label")?.value, "remote");
+  });
+  $("remote-action-button")?.addEventListener("click", () => {
+    sendTrainingAnnotation("preferred_action", $("remote-action-label")?.value, "remote");
   });
   $("feedback-history")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-delete-feedback]");
@@ -1738,6 +2591,13 @@ function installHandlers() {
     else startEngine("monitor");
   });
   $("save-audio-device-button")?.addEventListener("click", saveAudioDevice);
+  $("save-training-settings-button")?.addEventListener("click", saveTrainingSettings);
+  $("training-export-button")?.addEventListener("click", exportTrainingData);
+  $("research-refresh-button")?.addEventListener("click", refreshResearch);
+  $("research-import-button")?.addEventListener("click", importResearchAnnotations);
+  $("research-run-button")?.addEventListener("click", runResearchJob);
+  $("research-cancel-button")?.addEventListener("click", cancelResearch);
+  $("research-train-button")?.addEventListener("click", trainStructureStudent);
   $("spotify-connect-button")?.addEventListener("click", connectSpotify);
   $("spotify-refresh-button")?.addEventListener("click", () => refreshSpotifyConsole(true));
   $("remote-spotify-refresh")?.addEventListener("click", () => refreshSpotifyConsole(true));
@@ -1916,8 +2776,8 @@ async function requestFreshGesture() {
 
 function handleHotkey(event) {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName) || event.target?.isContentEditable) return;
-  if (/^[1-6]$/.test(event.key)) {
-    setPage(["performance", "rig", "audio", "memory", "music", "system"][Number(event.key) - 1]);
+  if (/^[1-7]$/.test(event.key)) {
+    setPage(["performance", "rehearsal", "rig", "audio", "memory", "music", "system"][Number(event.key) - 1]);
     event.preventDefault();
   } else if (event.key.toLowerCase() === "b") {
     toggleBlackout();
