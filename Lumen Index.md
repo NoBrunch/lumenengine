@@ -757,12 +757,30 @@ as `lumen-structure-student.candidate.npz`. Each axis has its own held-out gate:
 only approved axes are persisted as live-capable. Classification heads must
 beat their held-out majority baseline by a nonzero margin. Boundary approval
 requires useful precision as well as F1, preventing a transition detector that
-fires constantly from entering Live. Energy is the only student
+fires constantly from entering Live. Automatic activation additionally
+requires at least five independent test-song groups; a smaller test population
+may be used for diagnostics but is too volatile to authorize Live. Energy must
+also beat a balanced-accuracy gate calculated from the recall of every energy
+class present in the test songs, so a model cannot pass merely by predicting a
+dominant `drop` label. Energy is the only student
 axis allowed to replace Live's section decision, so a proven energy head can be
 activated while a failed functional head remains explicitly quarantined.
 Unapproved functional/content predictions cannot enter choreography ranking,
 and an unapproved boundary head cannot accelerate the stable decoder. The
 candidate remains inspectable with exact per-axis reasons.
+
+EDMFormer's active techno contract supplies energy, content, and boundary
+supervision. Pop-style functional form is marked **not applicable** instead of
+being counted as a failed EDMFormer output. Lumen still retains the functional
+head for explicit non-EDM research, but it is not expected to qualify the
+techno student.
+
+Boundary training uses a versioned 1.5-second causal target window immediately
+after each teacher transition. Qualification does not demand exact 10-Hz frame
+overlap: predicted transition clusters are collapsed into events and matched
+one-to-one to teacher events within ±1.5 seconds, with a two-second refractory
+period. The report retains frame metrics for diagnosis while activation uses
+event precision and event F1.
 
 The console describes this as an **unseen-song qualification test**. It shows
 the held-out energy/content accuracy against each majority-baseline threshold,
@@ -775,6 +793,13 @@ Analyze and Train with unchanged inputs. Review or correct a held-out timeline
 only when its labels are actually wrong, then retrain after trusted data or the
 student implementation changes; a failed gate can also expose insufficient
 song diversity or model generalization rather than operator annotation error.
+An expandable unseen-song result list identifies every test song and reports
+its energy accuracy, balanced energy accuracy, boundary-event F1, review state,
+and example count. The analyzed-song database's **Split** column remains the
+route to open that song's full timeline. Stable provider/song identity keeps
+every repeated capture in one partition, and newly captured songs assigned to
+`test` remain excluded from weight fitting even after their labels are reviewed
+for correctness.
 
 Candidate and active evaluation reports are separate. A rejected candidate
 writes `lumen-structure-student.candidate.evaluation.json`. A current-gate

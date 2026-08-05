@@ -79,6 +79,7 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self,
     ) -> None:
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn(
             "did not generalize to unseen songs",
@@ -89,7 +90,14 @@ class OperatorInterfaceContractTests(unittest.TestCase):
             "expected to help",
             script,
         )
-        self.assertIn("functional sections have no held-out examples", script)
+        self.assertIn(
+            "functional sections are not applicable to the EDMFormer "
+            "techno student",
+            script,
+        )
+        self.assertIn('id="research-song-results"', html)
+        self.assertIn("boundaryMetrics.event_f1", script)
+        self.assertIn("energy.balanced_accuracy", script)
         self.assertNotIn(
             "Analyze more complete songs before retraining",
             script,

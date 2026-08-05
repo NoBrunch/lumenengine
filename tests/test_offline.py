@@ -193,6 +193,17 @@ class OfflineResearchTests(unittest.TestCase):
             (model_root / "lumen-structure-student.candidate.npz").write_bytes(
                 b"candidate"
             )
+            (
+                model_root
+                / "lumen-structure-student.candidate.evaluation.json"
+            ).write_text(
+                json.dumps({
+                    "activation_gate_version": (
+                        STUDENT_ACTIVATION_GATE_VERSION
+                    )
+                }),
+                encoding="utf-8",
+            )
             (model_root / "lumen-structure-student.npz").write_bytes(
                 b"old-active"
             )
@@ -248,6 +259,11 @@ class OfflineResearchTests(unittest.TestCase):
             )
             self.assertTrue(current["model"]["active_artifact_exists"])
             self.assertFalse(current["model"]["active"])
+            self.assertFalse(current["activation_ready"])
+            self.assertIn(
+                "5 more independent test songs",
+                current["activation_blockers"][0],
+            )
 
             with patch(
                 "lumen_engine.offline.trusted_student_examples",
@@ -1701,6 +1717,10 @@ class OfflineResearchTests(unittest.TestCase):
                     "output_path": str(model_path),
                     "epochs": 5,
                     "require_activation_gate": True,
+                    "source_scope": (
+                        "active_database_completed_teacher_runs"
+                    ),
+                    "applicable_axes": ["energy", "content", "boundary"],
                 },
             )
             result = OfflineResearchWorker(
@@ -1722,6 +1742,14 @@ class OfflineResearchTests(unittest.TestCase):
                 )
             )
             self.assertFalse(candidate_report["activated"])
+            self.assertIn("functional", candidate_report["not_applicable_axes"])
+            self.assertEqual(
+                candidate_report["axis_gate_reasons"]["functional"], []
+            )
+            self.assertIn(
+                "at least 5 are required",
+                " ".join(candidate_report["gate_reasons"]),
+            )
 
     def test_failed_energy_head_does_not_discard_proven_functional_head(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1729,10 +1757,12 @@ class OfflineResearchTests(unittest.TestCase):
             store = SongMemoryStore(root / "lumen.sqlite3")
             examples = root / "examples.jsonl"
             rows = []
-            for split, count, group in (
-                ("train", 120, "training-song"),
-                ("test", 40, "heldout-song"),
-            ):
+            populations = [("train", 120, "training-song")]
+            populations.extend(
+                ("test", 40, f"heldout-song-{index}")
+                for index in range(5)
+            )
+            for split, count, group in populations:
                 for index in range(count):
                     # Alternate the separable functional classes so the
                     # temporal student must learn the feature, not memorize a
@@ -1785,6 +1815,7 @@ class OfflineResearchTests(unittest.TestCase):
             self.assertIn("functional", trained["approved_axes"])
             self.assertNotIn("energy", trained["approved_axes"])
             self.assertNotIn("boundary", trained["approved_axes"])
+            self.assertEqual(len(trained["song_evaluation"]["test"]), 5)
             self.assertTrue(model_path.is_file())
             loaded = StreamingStructureStudent.load(model_path)
             self.assertIn("functional", loaded.approved_axes)

@@ -42,6 +42,8 @@ FEATURE_NAMES = (
 
 CONTEXT_SECONDS = (0.5, 2.0, 8.0, 30.0, 60.0)
 ELAPSED_CONTEXT_SECONDS = (30.0, 60.0, 120.0, 240.0, 480.0)
+BOUNDARY_EVENT_TOLERANCE_MS = 1_500
+BOUNDARY_EVENT_REFRACTORY_MS = 2_000
 
 LABELS = {
     "functional": tuple(value.value for value in FunctionalSection),
@@ -617,44 +619,56 @@ class StreamingStructureStudent:
         return float(np.mean(losses))
 
     def evaluate(self, examples: Iterable[dict[str, Any]]) -> dict[str, Any]:
+        rows = list(examples)
         counts = {axis: 0 for axis in LABELS}
         correct = {axis: 0 for axis in LABELS}
         target_counts = {axis: {} for axis in LABELS}
+        predicted_counts = {axis: {} for axis in LABELS}
+        true_positive_counts = {axis: {} for axis in LABELS}
         boundary_counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
-        self.reset()
-        previous_group: str | None = None
-        previous_offset_ms: int | None = None
-        for row in examples:
-            group = _context_sequence_key(row)
-            offset_ms = _context_offset_ms(row)
-            if previous_group is not None and (
-                group != previous_group
-                or (
-                    offset_ms is not None
-                    and previous_offset_ms is not None
-                    and offset_ms <= previous_offset_ms
+        event_counts = {"tp": 0, "fp": 0, "fn": 0}
+        for sequence in _causal_sequences(rows):
+            self.reset()
+            target_events: set[int] = set()
+            predicted_events: list[int] = []
+            previous_target_boundary = False
+            previous_predicted_boundary = False
+            last_predicted_event_ms = -BOUNDARY_EVENT_REFRACTORY_MS
+            for row_index, row in enumerate(sequence):
+                offset_ms = _context_offset_ms(row)
+                effective_offset_ms = (
+                    offset_ms if offset_ms is not None else row_index * 100
                 )
-            ):
-                self.reset()
-            previous_group = group
-            previous_offset_ms = offset_ms
-            prediction = self.predict(
-                row["features"],
-                timestamp_s=(
-                    offset_ms / 1000.0 if offset_ms is not None else None
-                ),
-            )
-            for axis in LABELS:
-                target = row.get(axis)
-                if target is None:
+                prediction = self.predict(
+                    row["features"],
+                    timestamp_s=(
+                        offset_ms / 1000.0
+                        if offset_ms is not None
+                        else None
+                    ),
+                )
+                for axis in LABELS:
+                    target = row.get(axis)
+                    if target is None:
+                        continue
+                    target = _canonical_label(axis, target)
+                    if target == "unknown":
+                        continue
+                    predicted = str(getattr(prediction, axis))
+                    counts[axis] += 1
+                    target_counts[axis][target] = (
+                        target_counts[axis].get(target, 0) + 1
+                    )
+                    predicted_counts[axis][predicted] = (
+                        predicted_counts[axis].get(predicted, 0) + 1
+                    )
+                    if predicted == target:
+                        correct[axis] += 1
+                        true_positive_counts[axis][target] = (
+                            true_positive_counts[axis].get(target, 0) + 1
+                        )
+                if "boundary" not in row:
                     continue
-                target = _canonical_label(axis, target)
-                if target == "unknown":
-                    continue
-                counts[axis] += 1
-                target_counts[axis][target] = target_counts[axis].get(target, 0) + 1
-                correct[axis] += int(getattr(prediction, axis) == target)
-            if "boundary" in row:
                 target_boundary = float(row["boundary"]) >= 0.5
                 predicted_boundary = prediction.boundary_probability >= 0.5
                 key = (
@@ -664,8 +678,64 @@ class StreamingStructureStudent:
                     else "tn"
                 )
                 boundary_counts[key] += 1
-        result = {
-            axis: {
+                if target_boundary:
+                    distance = row.get("milliseconds_since_boundary")
+                    if distance is not None:
+                        target_events.add(
+                            effective_offset_ms - max(0, int(distance))
+                        )
+                    elif not previous_target_boundary:
+                        target_events.add(effective_offset_ms)
+                if (
+                    predicted_boundary
+                    and not previous_predicted_boundary
+                    and effective_offset_ms - last_predicted_event_ms
+                    >= BOUNDARY_EVENT_REFRACTORY_MS
+                ):
+                    predicted_events.append(effective_offset_ms)
+                    last_predicted_event_ms = effective_offset_ms
+                previous_target_boundary = target_boundary
+                previous_predicted_boundary = predicted_boundary
+            matched, false_positives, false_negatives = (
+                _match_boundary_events(
+                    sorted(target_events),
+                    predicted_events,
+                    tolerance_ms=BOUNDARY_EVENT_TOLERANCE_MS,
+                )
+            )
+            event_counts["tp"] += matched
+            event_counts["fp"] += false_positives
+            event_counts["fn"] += false_negatives
+        classification: dict[str, dict[str, Any]] = {}
+        for axis, labels in LABELS.items():
+            per_class: dict[str, dict[str, Any]] = {}
+            recalls: list[float] = []
+            f1_values: list[float] = []
+            for label in labels:
+                support = int(target_counts[axis].get(label, 0))
+                if support <= 0:
+                    continue
+                predicted = int(predicted_counts[axis].get(label, 0))
+                true_positive = int(
+                    true_positive_counts[axis].get(label, 0)
+                )
+                recall = _safe_ratio(true_positive, support)
+                precision = _safe_ratio(true_positive, predicted)
+                f1 = _safe_ratio(
+                    2.0 * precision * recall, precision + recall
+                )
+                recalls.append(recall)
+                f1_values.append(f1)
+                per_class[label] = {
+                    "support": support,
+                    "predicted": predicted,
+                    "correct": true_positive,
+                    "precision": precision,
+                    "recall": recall,
+                    "f1": f1,
+                }
+            present_classes = len(per_class)
+            classification[axis] = {
                 "examples": counts[axis],
                 "accuracy": (
                     correct[axis] / counts[axis]
@@ -677,14 +747,32 @@ class StreamingStructureStudent:
                     if counts[axis] and target_counts[axis]
                     else None
                 ),
+                "balanced_accuracy": (
+                    sum(recalls) / len(recalls) if recalls else None
+                ),
+                "balanced_baseline": (
+                    1.0 / present_classes if present_classes else None
+                ),
+                "macro_f1": (
+                    sum(f1_values) / len(f1_values)
+                    if f1_values
+                    else None
+                ),
+                "present_classes": present_classes,
+                "per_class": per_class,
             }
-            for axis in LABELS
-        }
+        result = classification
         precision = _safe_ratio(
             boundary_counts["tp"], boundary_counts["tp"] + boundary_counts["fp"]
         )
         recall = _safe_ratio(
             boundary_counts["tp"], boundary_counts["tp"] + boundary_counts["fn"]
+        )
+        event_precision = _safe_ratio(
+            event_counts["tp"], event_counts["tp"] + event_counts["fp"]
+        )
+        event_recall = _safe_ratio(
+            event_counts["tp"], event_counts["tp"] + event_counts["fn"]
         )
         result["boundary"] = {
             **boundary_counts,
@@ -692,6 +780,17 @@ class StreamingStructureStudent:
             "precision": precision,
             "recall": recall,
             "f1": _safe_ratio(2.0 * precision * recall, precision + recall),
+            "event_tp": event_counts["tp"],
+            "event_fp": event_counts["fp"],
+            "event_fn": event_counts["fn"],
+            "event_precision": event_precision,
+            "event_recall": event_recall,
+            "event_f1": _safe_ratio(
+                2.0 * event_precision * event_recall,
+                event_precision + event_recall,
+            ),
+            "event_tolerance_ms": BOUNDARY_EVENT_TOLERANCE_MS,
+            "event_refractory_ms": BOUNDARY_EVENT_REFRACTORY_MS,
         }
         return result
 
@@ -1089,6 +1188,37 @@ def _sigmoid(value: float) -> float:
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
     return float(numerator / denominator) if denominator else 0.0
+
+
+def _match_boundary_events(
+    target_events_ms: list[int],
+    predicted_events_ms: list[int],
+    *,
+    tolerance_ms: int,
+) -> tuple[int, int, int]:
+    """Match transition events one-to-one inside a timing tolerance."""
+
+    available = set(range(len(predicted_events_ms)))
+    matches = 0
+    for target_ms in target_events_ms:
+        candidates = [
+            index
+            for index in available
+            if abs(predicted_events_ms[index] - target_ms) <= tolerance_ms
+        ]
+        if not candidates:
+            continue
+        selected = min(
+            candidates,
+            key=lambda index: abs(predicted_events_ms[index] - target_ms),
+        )
+        available.remove(selected)
+        matches += 1
+    return (
+        matches,
+        len(predicted_events_ms) - matches,
+        len(target_events_ms) - matches,
+    )
 
 
 def _class_weights(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:

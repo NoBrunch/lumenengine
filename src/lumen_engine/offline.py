@@ -54,9 +54,13 @@ APPLIANCE_OFFLINE_MEMORY_FILE = Path(
     "/etc/lumen-appliance/offline-memory-gib"
 )
 STUDENT_AUDIO_FEATURE_VERSION = "realtime_audio_analyzer_causal_10hz_v2"
-STUDENT_EXAMPLE_VERSION = "teacher_timeline_examples_v3"
-STUDENT_ACTIVATION_GATE_VERSION = "heldout_axis_gate_v2"
+STUDENT_EXAMPLE_VERSION = "teacher_timeline_examples_v4"
+STUDENT_ACTIVATION_GATE_VERSION = "heldout_song_event_gate_v3"
 MIN_CLASSIFIER_BASELINE_MARGIN = 0.005
+MIN_BALANCED_ACCURACY_MARGIN = 0.05
+MIN_ACTIVATION_TEST_GROUPS = 5
+BOUNDARY_TARGET_WINDOW_MS = 1_500
+EDMFORMER_STUDENT_AXES = frozenset({"energy", "content", "boundary"})
 
 
 class OfflineJobCancelled(RuntimeError):
@@ -1479,6 +1483,9 @@ class OfflineResearchWorker:
             )
             for split in ("train", "validation", "test")
         }
+        song_evaluation = _student_song_evaluation(
+            model, examples, store=self.store
+        )
         output_path = Path(
             str(
                 payload.get("output_path")
@@ -1498,20 +1505,52 @@ class OfflineResearchWorker:
             else "validation"
         )
         held_out = evaluation[held_out_name]
+        all_axes = {*LABELS.keys(), "boundary"}
+        declared_applicable_axes = payload.get("applicable_axes")
+        if (
+            declared_applicable_axes is None
+            and payload.get("source_scope")
+            == "active_database_completed_teacher_runs"
+        ):
+            declared_applicable_axes = EDMFORMER_STUDENT_AXES
+        applicable_axes = {
+            str(axis)
+            for axis in (declared_applicable_axes or all_axes)
+            if str(axis) in all_axes
+        }
+        if not applicable_axes:
+            applicable_axes = set(all_axes)
+        not_applicable_axes = all_axes - applicable_axes
         gate_reasons: list[str] = []
         axis_gate_reasons: dict[str, list[str]] = {
-            axis: [] for axis in (*LABELS.keys(), "boundary")
+            axis: [] for axis in all_axes
         }
+        test_group_count = int(
+            statistics["split_group_counts"].get("test") or 0
+        )
+        test_population_reliable = (
+            test_group_count >= MIN_ACTIVATION_TEST_GROUPS
+        )
         if gated:
             energy = held_out["energy"]
             functional = held_out["functional"]
             content = held_out["content"]
             boundary = held_out["boundary"]
-            if int(energy["examples"] or 0) < 10:
+            if not test_population_reliable:
+                gate_reasons.append(
+                    "held-out test contains "
+                    f"{test_group_count} independent songs; at least "
+                    f"{MIN_ACTIVATION_TEST_GROUPS} are required"
+                )
+            if "energy" in applicable_axes and int(
+                energy["examples"] or 0
+            ) < 10:
                 axis_gate_reasons["energy"].append(
                     "held-out set has fewer than 10 energy frames"
                 )
-            elif float(energy.get("majority_baseline") or 0.0) >= 0.999:
+            elif "energy" in applicable_axes and float(
+                energy.get("majority_baseline") or 0.0
+            ) >= 0.999:
                 axis_gate_reasons["energy"].append(
                     "held-out energy set does not contain multiple classes"
                 )
@@ -1521,29 +1560,47 @@ class OfflineResearchWorker:
                 + MIN_CLASSIFIER_BASELINE_MARGIN,
             )
             if (
-                not axis_gate_reasons["energy"]
+                "energy" in applicable_axes
+                and not axis_gate_reasons["energy"]
                 and float(energy.get("accuracy") or 0.0) < energy_floor
             ):
                 axis_gate_reasons["energy"].append(
                     "held-out energy accuracy did not meet its baseline gate"
+                )
+            balanced_energy_floor = max(
+                0.25,
+                float(energy.get("balanced_baseline") or 0.0)
+                + MIN_BALANCED_ACCURACY_MARGIN,
+            )
+            if (
+                "energy" in applicable_axes
+                and not axis_gate_reasons["energy"]
+                and float(energy.get("balanced_accuracy") or 0.0)
+                < balanced_energy_floor
+            ):
+                axis_gate_reasons["energy"].append(
+                    "held-out energy balanced accuracy did not meet its "
+                    "per-class gate"
                 )
             functional_floor = max(
                 0.25,
                 float(functional.get("majority_baseline") or 0.0)
                 + MIN_CLASSIFIER_BASELINE_MARGIN,
             )
-            if int(functional["examples"] or 0) < 10:
+            if "functional" in applicable_axes and int(
+                functional["examples"] or 0
+            ) < 10:
                 axis_gate_reasons["functional"].append(
                     "held-out set has fewer than 10 functional frames"
                 )
-            elif (
+            elif "functional" in applicable_axes and (
                 float(functional.get("majority_baseline") or 0.0) >= 0.999
             ):
                 axis_gate_reasons["functional"].append(
                     "held-out functional set does not contain multiple "
                     "classes"
                 )
-            elif (
+            elif "functional" in applicable_axes and (
                 float(functional.get("accuracy") or 0.0)
                 < functional_floor
             ):
@@ -1556,56 +1613,66 @@ class OfflineResearchWorker:
                 float(content.get("majority_baseline") or 0.0)
                 + MIN_CLASSIFIER_BASELINE_MARGIN,
             )
-            if int(content["examples"] or 0) < 10:
+            if "content" in applicable_axes and int(
+                content["examples"] or 0
+            ) < 10:
                 axis_gate_reasons["content"].append(
                     "held-out set has fewer than 10 content frames"
                 )
-            elif float(content.get("majority_baseline") or 0.0) >= 0.999:
+            elif "content" in applicable_axes and float(
+                content.get("majority_baseline") or 0.0
+            ) >= 0.999:
                 axis_gate_reasons["content"].append(
                     "held-out content set does not contain multiple classes"
                 )
-            elif float(content.get("accuracy") or 0.0) < content_floor:
+            elif "content" in applicable_axes and float(
+                content.get("accuracy") or 0.0
+            ) < content_floor:
                 axis_gate_reasons["content"].append(
                     "held-out content-role accuracy did not meet its "
                     "baseline gate"
                 )
-            boundary_positives = int(boundary["tp"]) + int(boundary["fn"])
-            if int(boundary.get("examples") or 0) < 10:
+            boundary_positives = int(
+                boundary.get("event_tp") or 0
+            ) + int(boundary.get("event_fn") or 0)
+            if "boundary" in applicable_axes and int(
+                boundary.get("examples") or 0
+            ) < 10:
                 axis_gate_reasons["boundary"].append(
                     "held-out set has fewer than 10 boundary frames"
                 )
-            elif boundary_positives < 5:
+            elif "boundary" in applicable_axes and boundary_positives < 5:
                 axis_gate_reasons["boundary"].append(
                     "held-out set has fewer than 5 positive boundaries"
                 )
-            elif (
-                float(boundary.get("f1") or 0.0) < 0.20
-                or float(boundary.get("precision") or 0.0) < 0.12
+            elif "boundary" in applicable_axes and (
+                float(boundary.get("event_f1") or 0.0) < 0.20
+                or float(boundary.get("event_precision") or 0.0) < 0.12
             ):
                 axis_gate_reasons["boundary"].append(
-                    "held-out boundary detection did not meet its "
+                    "held-out boundary events did not meet their tolerant "
                     "precision/F1 gate"
                 )
         approved_axes = {
             axis
-            for axis, reasons in axis_gate_reasons.items()
+            for axis in applicable_axes
+            for reasons in (axis_gate_reasons[axis],)
             if not reasons
         }
+        if gated and not test_population_reliable:
+            approved_axes.clear()
         # Each semantic axis has an independent held-out gate. Energy is the
         # only head allowed to replace Live's energy-section decision, but a
         # failed energy head must not discard a proven functional/content head
         # that can still provide non-authoritative planning context. Persist
         # only the approved heads in the artifact; Live already checks this
         # set before accepting any prediction.
-        if gated and not approved_axes:
+        if gated and not approved_axes and not gate_reasons:
             gate_reasons.append(
                 "no student axis passed its held-out activation gate"
             )
         activated = not gated or bool(approved_axes)
-        model.approved_axes = approved_axes if gated else {
-            *LABELS.keys(),
-            "boundary",
-        }
+        model.approved_axes = approved_axes if gated else set(all_axes)
         model.save(candidate_path)
         cancel_check()
         report = {
@@ -1614,10 +1681,14 @@ class OfflineResearchWorker:
             "axis_gate_reasons": axis_gate_reasons,
             "approved_axes": sorted(model.approved_axes),
             "inactive_axes": sorted(
-                {*LABELS.keys(), "boundary"} - model.approved_axes
+                applicable_axes - model.approved_axes
             ),
+            "not_applicable_axes": sorted(not_applicable_axes),
             "held_out_split": held_out_name,
             "evaluation": evaluation,
+            "song_evaluation": song_evaluation,
+            "minimum_test_song_groups": MIN_ACTIVATION_TEST_GROUPS,
+            "test_population_reliable": test_population_reliable,
             "training": training,
             "source_sha256": _hash_file(examples_path),
             "source_scope": payload.get("source_scope"),
@@ -1734,11 +1805,15 @@ class OfflineResearchWorker:
             "axis_gate_reasons": axis_gate_reasons,
             "approved_axes": sorted(model.approved_axes),
             "inactive_axes": sorted(
-                {*LABELS.keys(), "boundary"} - model.approved_axes
+                applicable_axes - model.approved_axes
             ),
+            "not_applicable_axes": sorted(not_applicable_axes),
             "held_out_split": held_out_name,
             "training": training,
             "evaluation": evaluation,
+            "song_evaluation": song_evaluation,
+            "minimum_test_song_groups": MIN_ACTIVATION_TEST_GROUPS,
+            "test_population_reliable": test_population_reliable,
             "split_counts": statistics["split_counts"],
             "split_group_counts": statistics["split_group_counts"],
             "label_balance": statistics["label_balance"],
@@ -2126,7 +2201,7 @@ def _apply_operator_consensus_rows(
                     events
                     and 0
                     <= position_ms - int(segment["start_ms"])
-                    <= 1_500
+                    <= BOUNDARY_TARGET_WINDOW_MS
                 ):
                     row["boundary"] = 1
                     row["boundary_supervised"] = True
@@ -2214,6 +2289,61 @@ def _student_example_statistics(
         },
         "label_balance": label_balance,
     }
+
+
+def _student_song_evaluation(
+    model: StreamingStructureStudent,
+    rows: list[dict[str, Any]],
+    *,
+    store: SongMemoryStore,
+) -> dict[str, list[dict[str, Any]]]:
+    """Evaluate each validation/test song independently and identify it."""
+
+    catalog = {
+        str(item["recording_id"]): item
+        for item in store.structure_timeline_catalog()
+    }
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        split = str(row.get("split") or "train")
+        if split not in {"validation", "test"}:
+            continue
+        group = str(
+            row.get("split_group_id") or row.get("recording_id") or ""
+        )
+        if not group:
+            continue
+        grouped.setdefault((split, group), []).append(row)
+    result: dict[str, list[dict[str, Any]]] = {
+        "validation": [],
+        "test": [],
+    }
+    for (split, group), group_rows in sorted(grouped.items()):
+        recording_ids = sorted({
+            str(row["recording_id"])
+            for row in group_rows
+            if row.get("recording_id")
+        })
+        identity = next(
+            (
+                catalog[recording_id]
+                for recording_id in recording_ids
+                if recording_id in catalog
+            ),
+            {},
+        )
+        result[split].append(
+            {
+                "split_group_id": group,
+                "recording_ids": recording_ids,
+                "title": identity.get("title") or group,
+                "artists": list(identity.get("artists") or []),
+                "review_status": identity.get("review_status"),
+                "examples": len(group_rows),
+                "metrics": model.evaluate(group_rows),
+            }
+        )
+    return result
 
 
 def enqueue_student_training(
@@ -2318,6 +2448,11 @@ def enqueue_student_training(
                 else "stored_semantic_frames"
             ),
             "require_activation_gate": not bool(example_paths),
+            "applicable_axes": (
+                sorted(EDMFORMER_STUDENT_AXES)
+                if not example_paths
+                else sorted({*LABELS.keys(), "boundary"})
+            ),
         },
         priority=50,
     )
@@ -2948,6 +3083,13 @@ def training_readiness(
         blockers.append(
             "at least two complete training songs are required"
         )
+    test_song_groups = int(trusted["split_group_counts"]["test"] or 0)
+    activation_blockers: list[str] = []
+    if test_song_groups < MIN_ACTIVATION_TEST_GROUPS:
+        activation_blockers.append(
+            f"{MIN_ACTIVATION_TEST_GROUPS - test_song_groups} more "
+            "independent test songs are required for activation"
+        )
     average_elapsed = sum(elapsed) / len(elapsed) if elapsed else None
     model_root = Path(research_root).resolve() / "models"
     active_model = model_root / "lumen-structure-student.npz"
@@ -3010,6 +3152,9 @@ def training_readiness(
         trained_run_ids
     ) and trained_run_ids == trusted_run_ids and (
         trained_consensus_revision == trusted_consensus_revision
+    ) and isinstance(evaluation, dict) and (
+        evaluation.get("activation_gate_version")
+        == STUDENT_ACTIVATION_GATE_VERSION
     )
     active_provenance_current = bool(
         active_model.is_file()
@@ -3019,6 +3164,8 @@ def training_readiness(
         == TEACHER_NORMALIZATION_VERSION
         and active_evaluation.get("edmformer_preprocessing_version")
         == EDMFORMER_PREPROCESSING_VERSION
+        and active_evaluation.get("activation_gate_version")
+        == STUDENT_ACTIVATION_GATE_VERSION
         and str(active_evaluation.get("operator_consensus_revision") or "")
         == trusted_consensus_revision
     )
@@ -3080,6 +3227,9 @@ def training_readiness(
         "teacher_errors": failures,
         "train_ready": not blockers,
         "blockers": blockers,
+        "activation_ready": not activation_blockers,
+        "activation_blockers": activation_blockers,
+        "minimum_test_song_groups": MIN_ACTIVATION_TEST_GROUPS,
         "model": {
             "active": active_provenance_current,
             "active_artifact_exists": active_model.is_file(),
@@ -3507,7 +3657,7 @@ def build_student_examples(
             boundary_distance_ms = recording_offset_ms - int(target["start_ms"])
             is_boundary = int(
                 int(target["start_ms"]) > 0
-                and 0 <= boundary_distance_ms < 1_500
+                and 0 <= boundary_distance_ms < BOUNDARY_TARGET_WINDOW_MS
             )
             features = semantic_frame_features(frame["payload"])
             example = {
@@ -3548,6 +3698,7 @@ def build_student_examples(
             )
             example["boundary_provenance"] = {
                 "source": "teacher_timeline_transition",
+                "target_window_ms": BOUNDARY_TARGET_WINDOW_MS,
                 "teacher_run_id": timeline.get("teacher_run_id"),
                 "timeline_id": timeline_id,
                 "confidence_calibrated": bool(

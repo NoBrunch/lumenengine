@@ -40,7 +40,11 @@ from lumen_engine.student import (
     StudentPrediction,
     StreamingStructureStudent,
 )
-from lumen_engine.offline import EDMFORMER_JOB, SONGFORMER_JOB
+from lumen_engine.offline import (
+    EDMFORMER_JOB,
+    SONGFORMER_JOB,
+    STUDENT_ACTIVATION_GATE_VERSION,
+)
 from lumen_engine.runtime import PerformanceRuntime
 
 
@@ -920,6 +924,9 @@ class ControlApplicationTests(unittest.TestCase):
             json.dumps(
                 {
                     "activated": False,
+                    "activation_gate_version": (
+                        STUDENT_ACTIVATION_GATE_VERSION
+                    ),
                     "teacher_normalization_version": (
                         TEACHER_NORMALIZATION_VERSION
                     ),
@@ -1376,6 +1383,9 @@ class ControlApplicationTests(unittest.TestCase):
                 ),
                 "edmformer_preprocessing_version": (
                     EDMFORMER_PREPROCESSING_VERSION
+                ),
+                "activation_gate_version": (
+                    STUDENT_ACTIVATION_GATE_VERSION
                 ),
             }),
             encoding="utf-8",

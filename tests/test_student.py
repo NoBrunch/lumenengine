@@ -212,6 +212,75 @@ class StreamingStudentTests(unittest.TestCase):
         self.assertEqual(metrics["content"]["examples"], 0)
         self.assertEqual(metrics["energy"]["examples"], 1)
 
+    def test_evaluation_reports_balanced_per_class_metrics(self) -> None:
+        examples = []
+        for index in range(10):
+            examples.append({
+                "features": [0.1] * len(FEATURE_NAMES),
+                "energy": "drop" if index < 9 else "build",
+                "split_group_id": "imbalanced-song",
+                "recording_offset_ms": index * 100,
+            })
+        model = StreamingStructureStudent(hidden_size=8, seed=17)
+        metrics = model.evaluate(examples)["energy"]
+
+        self.assertEqual(metrics["present_classes"], 2)
+        self.assertAlmostEqual(metrics["balanced_baseline"], 0.5)
+        self.assertIn("drop", metrics["per_class"])
+        self.assertIn("build", metrics["per_class"])
+        self.assertIsNotNone(metrics["balanced_accuracy"])
+        self.assertIsNotNone(metrics["macro_f1"])
+
+    def test_boundary_events_use_timing_tolerance_not_frame_overlap(
+        self,
+    ) -> None:
+        class FixedBoundaryStudent(StreamingStructureStudent):
+            def predict(self, features, *, timestamp_s=None):
+                boundary = 0.9 if 2.2 <= float(timestamp_s or 0.0) < 2.4 else 0.1
+                return StudentPrediction(
+                    functional="unknown",
+                    energy="groove",
+                    content="instrumental",
+                    confidence={
+                        "functional": 1.0,
+                        "energy": 1.0,
+                        "content": 1.0,
+                    },
+                    probabilities={
+                        "functional": {"unknown": 1.0},
+                        "energy": {"groove": 1.0},
+                        "content": {"instrumental": 1.0},
+                    },
+                    boundary_probability=boundary,
+                )
+
+        rows = []
+        for index in range(31):
+            offset_ms = index * 100
+            target = 1_000 <= offset_ms < 2_000
+            rows.append({
+                "features": [0.2] * len(FEATURE_NAMES),
+                "energy": "groove",
+                "content": "instrumental",
+                "boundary": int(target),
+                "milliseconds_since_boundary": (
+                    offset_ms - 1_000 if target else 0
+                ),
+                "recording_id": "timing-song",
+                "capture_session_id": "capture-one",
+                "recording_offset_ms": offset_ms,
+            })
+
+        boundary = FixedBoundaryStudent(hidden_size=8).evaluate(rows)[
+            "boundary"
+        ]
+
+        self.assertEqual(boundary["f1"], 0.0)
+        self.assertEqual(boundary["event_tp"], 1)
+        self.assertEqual(boundary["event_fp"], 0)
+        self.assertEqual(boundary["event_fn"], 0)
+        self.assertEqual(boundary["event_f1"], 1.0)
+
     def test_reported_final_loss_is_the_restored_frozen_model_loss(self) -> None:
         examples = []
         for group_index, energy in enumerate(("build", "release")):

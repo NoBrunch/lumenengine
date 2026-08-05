@@ -83,6 +83,7 @@ from lumen_engine.offline import (
     OfflineResearchWorker,
     ResearchJobCoordinator,
     SONGFORMER_JOB,
+    STUDENT_ACTIVATION_GATE_VERSION,
     STUDENT_TRAIN_JOB,
     enqueue_student_training,
     training_readiness,
@@ -644,6 +645,17 @@ class LumenApplication:
                     "The previous active student is disabled because it "
                     "predates the current full-song EDMFormer pipeline. "
                     "Current candidates are evaluated separately."
+                )
+                self._student_model_state = "obsolete"
+            elif (
+                evaluation.get("activation_gate_version")
+                != STUDENT_ACTIVATION_GATE_VERSION
+            ):
+                self._student_model_notice = (
+                    "The previous active student is disabled because it "
+                    "predates the current unseen-song and tolerant-boundary "
+                    "qualification gate. Current candidates are evaluated "
+                    "separately."
                 )
                 self._student_model_state = "obsolete"
             elif evaluation.get("activated") is not True:

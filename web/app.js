@@ -1580,6 +1580,9 @@ function renderResearch(research = {}) {
   setText("research-errors", errors.toLocaleString());
   const evaluation = model.evaluation || {};
   const modelNotice = model.runtime_notice || "";
+  const hasMetric = (value) => value !== null
+    && value !== undefined
+    && Number.isFinite(Number(value));
   const candidateIsCurrent = model.candidate_provenance_current !== false;
   const staleCandidate = Boolean(model.candidate && !candidateIsCurrent);
   const latestCandidateRejected = Boolean(model.candidate && candidateIsCurrent && evaluation.activated === false);
@@ -1644,23 +1647,26 @@ function renderResearch(research = {}) {
       const heldout = evaluation.evaluation?.[evaluation.held_out_split || "test"] || {};
       const energy = heldout.energy || {};
       const content = heldout.content || {};
-      const functional = heldout.functional || {};
       const boundary = heldout.boundary || {};
+      const notApplicable = new Set(evaluation.not_applicable_axes || []);
       const metricDetails = [];
-      const hasMetric = (value) => value !== null
-        && value !== undefined
-        && Number.isFinite(Number(value));
       if (hasMetric(energy.accuracy) && hasMetric(energy.majority_baseline)) {
         metricDetails.push(`energy ${(Number(energy.accuracy) * 100).toFixed(1)}% versus ${(Number(energy.majority_baseline) * 100 + 0.5).toFixed(1)}% required`);
+      }
+      if (hasMetric(energy.balanced_accuracy) && hasMetric(energy.balanced_baseline)) {
+        const balancedRequired = Math.max(25, Number(energy.balanced_baseline) * 100 + 5);
+        metricDetails.push(`energy balanced ${(Number(energy.balanced_accuracy) * 100).toFixed(1)}% versus ${balancedRequired.toFixed(1)}% required`);
       }
       if (hasMetric(content.accuracy) && hasMetric(content.majority_baseline)) {
         metricDetails.push(`content ${(Number(content.accuracy) * 100).toFixed(1)}% versus ${(Number(content.majority_baseline) * 100 + 0.5).toFixed(1)}% required`);
       }
-      if (!Number(functional.examples || 0)) {
-        metricDetails.push("functional sections have no held-out examples");
+      if (notApplicable.has("functional")) {
+        metricDetails.push("functional sections are not applicable to the EDMFormer techno student");
       }
-      if (hasMetric(boundary.precision) && hasMetric(boundary.f1)) {
-        metricDetails.push(`boundaries ${(Number(boundary.precision) * 100).toFixed(1)}% precision / ${(Number(boundary.f1) * 100).toFixed(1)}% F1`);
+      const boundaryPrecision = boundary.event_precision ?? boundary.precision;
+      const boundaryF1 = boundary.event_f1 ?? boundary.f1;
+      if (hasMetric(boundaryPrecision) && hasMetric(boundaryF1)) {
+        metricDetails.push(`boundary events ${(Number(boundaryPrecision) * 100).toFixed(1)}% precision / ${(Number(boundaryF1) * 100).toFixed(1)}% F1 at ±${Number(boundary.event_tolerance_ms || 0).toLocaleString()} ms`);
       }
       const resultDetail = metricDetails.length
         ? ` ${heldoutName} results: ${metricDetails.join("; ")}.`
@@ -1672,11 +1678,15 @@ function renderResearch(research = {}) {
       readiness.textContent += recoveryNote;
       readiness.className = "research-readiness";
     } else if (staleCandidate) {
-      readiness.textContent = "The saved candidate was trained from an older manifest. Train again so validation uses the current trusted examples and song splits.";
+      readiness.textContent = training.activation_ready === false
+        ? `The saved candidate predates the current qualification gate. Activation remains locked: ${(training.activation_blockers || []).join("; ")}. Collect complete, identified, previously unseen songs before the next qualifying train; a diagnostic pass may still be run now.`
+        : "The saved candidate was trained from an older manifest or qualification gate. Train again so validation uses the current trusted examples, song splits, and event metrics.";
       readiness.textContent += recoveryNote;
       readiness.className = "research-readiness";
     } else if (training.train_ready) {
-      readiness.textContent = training.collection_complete
+      readiness.textContent = training.activation_ready === false
+        ? `Ready for a diagnostic training pass, but activation will remain locked: ${(training.activation_blockers || []).join("; ")}. Capture complete, identified, previously unseen songs to grow the final test population.`
+        : training.collection_complete
         ? "Ready to train. Lumen has trusted training songs and separate held-out songs for validation."
         : `Ready for a preliminary train-and-validate pass. ${Number(training.teacher_jobs_remaining || 0)} teacher jobs remain; retrain after more analysis for broader musical coverage.`;
       readiness.textContent += recoveryNote;
@@ -1686,6 +1696,37 @@ function renderResearch(research = {}) {
       readiness.textContent += recoveryNote;
       readiness.className = "research-readiness";
     }
+  }
+  const songResults = $("research-song-results");
+  const songResultsList = $("research-song-results-list");
+  const evaluatedSongs = evaluation.song_evaluation?.[evaluation.held_out_split || "test"] || [];
+  if (songResults && songResultsList) {
+    songResults.classList.toggle("visible", evaluatedSongs.length > 0);
+    if (latestCandidateRejected && evaluatedSongs.length) songResults.open = true;
+    setText(
+      "research-song-results-summary",
+      `${evaluatedSongs.length.toLocaleString()} ${label(evaluation.held_out_split || "held-out")} songs · independent qualification details`,
+    );
+    songResultsList.innerHTML = evaluatedSongs.map((song) => {
+      const metrics = song.metrics || {};
+      const energyMetrics = metrics.energy || {};
+      const boundaryMetrics = metrics.boundary || {};
+      const artist = (song.artists || []).join(", ") || "Unknown artist";
+      const energyAccuracy = hasMetric(energyMetrics.accuracy)
+        ? `${(Number(energyMetrics.accuracy) * 100).toFixed(1)}% accuracy`
+        : "no energy labels";
+      const balanced = hasMetric(energyMetrics.balanced_accuracy)
+        ? `${(Number(energyMetrics.balanced_accuracy) * 100).toFixed(1)}% balanced`
+        : "balanced score unavailable";
+      const eventF1 = hasMetric(boundaryMetrics.event_f1)
+        ? `${(Number(boundaryMetrics.event_f1) * 100).toFixed(1)}% boundary-event F1`
+        : "boundary score unavailable";
+      return `<div class="research-song-result">
+        <b>${escapeHtml(song.title || song.split_group_id || "Unidentified song")}</b>
+        <span>${escapeHtml(artist)} · ${escapeHtml(label(song.review_status || "not reviewed"))}</span>
+        <small>Energy ${energyAccuracy} · ${balanced} · ${eventF1} · ${Number(song.examples || 0).toLocaleString()} frames</small>
+      </div>`;
+    }).join("");
   }
   const errorList = $("research-error-list");
   if (errorList) {

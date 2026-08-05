@@ -16,11 +16,29 @@ result. Git commit history remains the detailed engineering log.
   retrain only after trusted inputs or the student implementation changes.
 - Corrected active-artifact reporting so a disabled previous model remains
   visible without being presented as active.
+- Replaced frame-exact boundary qualification with one-to-one musical event
+  matching at a documented ±1.5-second tolerance while preserving frame
+  metrics for diagnosis.
+
+### Added
+
+- Per-song validation/test results with recording identity, review state,
+  energy accuracy, balanced energy accuracy, boundary-event F1, and example
+  count in the research console.
+- A five-independent-test-song activation minimum and explicit diagnostic-only
+  state while the final test population is smaller.
+- Per-class classification precision, recall, F1, support, macro F1, and
+  balanced accuracy in student evaluation reports.
+- An EDMFormer-specific applicability contract: energy, content, and boundary
+  are evaluated; pop-style functional form is reported as not applicable.
+- Versioned 1.5-second causal transition targets and a new v3 activation gate,
+  preventing models approved under older evaluation rules from controlling
+  Live.
 
 ### Verification
 
 - `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`
-- 336 tests passed on 2026-08-05.
+- 338 tests passed on 2026-08-05.
 - `node --check web/app.js` and `git diff --check` passed.
 
 ## 0.7.2 - 2026-08-04
