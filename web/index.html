@@ -728,6 +728,34 @@
                   <summary>ALSA hardware report</summary>
                   <div class="hardware-report" id="audio-hardware-report">Hardware scan pending.</div>
                 </details>
+                <section class="audio-expression-state" aria-labelledby="audio-expression-heading">
+                  <div class="audio-expression-heading">
+                    <div>
+                      <span>LIVE INTERPRETATION</span>
+                      <h4 id="audio-expression-heading">Expressive state</h4>
+                    </div>
+                    <span id="audio-expression-confidence" class="panel-badge">0% CONFIDENCE</span>
+                  </div>
+                  <div class="audio-expression-gesture">
+                    <span>CURRENT GESTURE</span>
+                    <strong id="audio-expression-gesture">Standing by</strong>
+                    <p id="audio-expression-reason">Start Monitor, Perform, or Demo to begin interpretation.</p>
+                  </div>
+                  <div class="audio-expression-meters">
+                    <div class="meter-row">
+                      <span>Energy</span><div><i id="audio-meter-energy"></i></div><b id="audio-value-energy">0.00</b>
+                    </div>
+                    <div class="meter-row">
+                      <span>Tension</span><div><i id="audio-meter-tension"></i></div><b id="audio-value-tension">0.00</b>
+                    </div>
+                    <div class="meter-row">
+                      <span>Motion</span><div><i id="audio-meter-motion"></i></div><b id="audio-value-motion">0.00</b>
+                    </div>
+                    <div class="meter-row">
+                      <span>Intimacy</span><div><i id="audio-meter-intimacy"></i></div><b id="audio-value-intimacy">0.50</b>
+                    </div>
+                  </div>
+                </section>
               </section>
               <section class="panel interpretation-panel">
                 <div class="panel-titlebar"><h3>Interpretation path</h3><span class="beat-receive-lamp" id="beat-receive-lamp">BEAT</span></div>

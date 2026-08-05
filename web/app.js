@@ -2301,6 +2301,9 @@ function renderExpression(decision, expression, observation, tempoClock = {}) {
   setText("current-gesture", gesture);
   setText("decision-reason", reason);
   setText("expression-confidence", `${percent(confidence)} CONFIDENCE`);
+  setText("audio-expression-gesture", gesture);
+  setText("audio-expression-reason", reason);
+  setText("audio-expression-confidence", `${percent(confidence)} CONFIDENCE`);
   setText("remote-gesture", gesture);
   setText("remote-reason", reason);
   setText("remote-confidence", percent(confidence));
@@ -2310,6 +2313,8 @@ function renderExpression(decision, expression, observation, tempoClock = {}) {
   for (const name of ["energy", "tension", "motion", "intimacy"]) {
     setWidth(`meter-${name}`, expression[name]);
     setText(`value-${name}`, Number(expression[name]).toFixed(2));
+    setWidth(`audio-meter-${name}`, expression[name]);
+    setText(`audio-value-${name}`, Number(expression[name]).toFixed(2));
   }
 
   for (const [name, value] of [

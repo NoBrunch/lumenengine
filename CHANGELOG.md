@@ -22,6 +22,9 @@ result. Git commit history remains the detailed engineering log.
 
 ### Added
 
+- Mirrored the Performance Console's live expressive state beneath the ALSA
+  report in Audio Analysis, including gesture, decision reason, confidence,
+  energy, tension, motion, and intimacy from the same runtime decision.
 - Per-song validation/test results with recording identity, review state,
   energy accuracy, balanced energy accuracy, boundary-event F1, and example
   count in the research console.
@@ -38,7 +41,7 @@ result. Git commit history remains the detailed engineering log.
 ### Verification
 
 - `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`
-- 338 tests passed on 2026-08-05.
+- 339 tests passed on 2026-08-05.
 - `node --check web/app.js` and `git diff --check` passed.
 
 ## 0.7.2 - 2026-08-04

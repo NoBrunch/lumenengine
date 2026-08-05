@@ -1062,6 +1062,13 @@ full scale. If that count rises, reduce the Ubuntu ALSA Line input level a
 small amount (for example 3–6 dB) and leave the Chromecast output where it is.
 The goal is headroom below 0 dBFS, not a quieter listening system.
 
+Below the ALSA hardware report, Audio Analysis repeats the live **Expressive
+state** shown on the Performance Console: current gesture and explanation,
+decision confidence, energy, tension, motion, and intimacy. Both displays are
+driven by the same runtime decision; this second readout is a convenient way to
+compare the physical input proof with Lumen's interpretation without changing
+pages.
+
 ## Center fixture behavior
 
 The center multi-effect uses saturated

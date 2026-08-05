@@ -103,6 +103,24 @@ class OperatorInterfaceContractTests(unittest.TestCase):
             script,
         )
 
+    def test_audio_input_panel_mirrors_live_expressive_state(self) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('class="audio-expression-state"', html)
+        self.assertIn('id="audio-expression-gesture"', html)
+        self.assertIn('id="audio-expression-confidence"', html)
+        for axis in ("energy", "tension", "motion", "intimacy"):
+            self.assertIn(f'id="audio-meter-{axis}"', html)
+            self.assertIn(f'id="audio-value-{axis}"', html)
+        self.assertIn('setText("audio-expression-gesture", gesture)', script)
+        self.assertIn(
+            'setText("audio-expression-confidence", '
+            '`${percent(confidence)} CONFIDENCE`)',
+            script,
+        )
+        self.assertIn('setWidth(`audio-meter-${name}`, expression[name])', script)
+
 
 if __name__ == "__main__":
     unittest.main()
