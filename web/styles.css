@@ -191,10 +191,24 @@ a:focus-visible {
   height: 100vh;
   min-width: 1040px;
   display: grid;
+  grid-template-areas:
+    "titlebar"
+    "menubar"
+    "toolbar"
+    "task"
+    "workspace"
+    "statusbar";
   grid-template-rows: 51px 27px 72px auto minmax(0, 1fr) 25px;
   overflow: hidden;
   background: var(--bg-1);
 }
+
+.desktop-titlebar { grid-area: titlebar; }
+.desktop-menubar { grid-area: menubar; }
+.desktop-toolbar { grid-area: toolbar; }
+.operator-task { grid-area: task; }
+.desktop-workspace { grid-area: workspace; }
+.desktop-statusbar { grid-area: statusbar; }
 
 .operator-task {
   min-height: 44px;

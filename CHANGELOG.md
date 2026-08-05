@@ -10,6 +10,23 @@ result. Git commit history remains the detailed engineering log.
 - Before pushing a backup, move completed items into a dated version entry,
   run the complete test suite, and record the result.
 
+## 0.7.2 - 2026-08-04
+
+### Fixed
+
+- Pinned the title bar, menu, toolbar, optional task strip, workspace, and
+  status bar to named desktop-grid areas. Hiding the task strip can no longer
+  auto-place the status bar into the flexible workspace row and enlarge the
+  bottom status display.
+- Added a regression contract covering both the hidden idle task strip and its
+  visible active row.
+
+### Verification
+
+- `PATH="$PWD/.venv/bin:$PATH" PYTHONPATH=src python3 -m unittest discover -s tests -v`
+- 334 tests passed on 2026-08-04.
+- `node --check web/app.js` and `git diff --check` passed.
+
 ## 0.7.1 - 2026-08-04
 
 ### Added

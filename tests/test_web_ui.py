@@ -21,6 +21,20 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("Training and validating the structure model", script)
         self.assertIn("Analyzing recordings with EDMFormer", script)
 
+    def test_hidden_task_strip_cannot_displace_workspace_or_footer(self) -> None:
+        stylesheet = (ROOT / "web" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('"task"\n    "workspace"\n    "statusbar"', stylesheet)
+        self.assertIn(".operator-task { grid-area: task; }", stylesheet)
+        self.assertIn(".desktop-workspace { grid-area: workspace; }", stylesheet)
+        self.assertIn(".desktop-statusbar { grid-area: statusbar; }", stylesheet)
+        self.assertIn(
+            "grid-template-rows: 51px 27px 72px auto minmax(0, 1fr) 25px",
+            stylesheet,
+        )
+
     def test_every_button_receives_visible_press_confirmation(self) -> None:
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         stylesheet = (ROOT / "web" / "styles.css").read_text(
