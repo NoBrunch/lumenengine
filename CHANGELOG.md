@@ -6,9 +6,22 @@ result. Git commit history remains the detailed engineering log.
 
 ## Unreleased
 
-- Add new work here while it is in progress.
-- Before pushing a backup, move completed items into a dated version entry,
-  run the complete test suite, and record the result.
+### Fixed
+
+- Separated an obsolete previous student artifact from a rejected current
+  candidate in the research console. Expected model-version retirement is now
+  an informational notice instead of a load error.
+- Replaced the misleading instruction to repeat Analyze and Train with exact
+  unseen-song metrics and guidance to review/correct held-out timelines, then
+  retrain only after trusted inputs or the student implementation changes.
+- Corrected active-artifact reporting so a disabled previous model remains
+  visible without being presented as active.
+
+### Verification
+
+- `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`
+- 336 tests passed on 2026-08-05.
+- `node --check web/app.js` and `git diff --check` passed.
 
 ## 0.7.2 - 2026-08-04
 

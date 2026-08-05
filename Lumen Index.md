@@ -764,6 +764,18 @@ Unapproved functional/content predictions cannot enter choreography ranking,
 and an unapproved boundary head cannot accelerate the stable decoder. The
 candidate remains inspectable with exact per-axis reasons.
 
+The console describes this as an **unseen-song qualification test**. It shows
+the held-out energy/content accuracy against each majority-baseline threshold,
+the boundary precision and F1, and whether functional-section examples exist.
+A rejected current candidate is distinct from a previous active artifact that
+predates the full-song EDMFormer pipeline: the former is a completed model that
+failed qualification, while the latter is an informational obsolete-model
+notice rather than a load failure. The console does not prescribe repeating
+Analyze and Train with unchanged inputs. Review or correct a held-out timeline
+only when its labels are actually wrong, then retrain after trusted data or the
+student implementation changes; a failed gate can also expose insufficient
+song diversity or model generalization rather than operator annotation error.
+
 Candidate and active evaluation reports are separate. A rejected candidate
 writes `lumen-structure-student.candidate.evaluation.json`. A current-gate
 active model is preserved; an artifact approved by an obsolete gate is backed

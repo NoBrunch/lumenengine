@@ -1409,9 +1409,38 @@ class ControlApplicationTests(unittest.TestCase):
         self.application._load_student_model()
 
         self.assertIsNone(self.application._student_model)
+        self.assertEqual(self.application._student_model_state, "obsolete")
+        self.assertIsNone(self.application._student_model_error)
         self.assertIn("obsolete teacher normalization", (
-            self.application._student_model_error or ""
+            self.application._student_model_notice or ""
         ))
+
+    def test_obsolete_full_song_student_is_a_notice_not_load_error(self) -> None:
+        stale = StreamingStructureStudent()
+        stale.save(self.application._student_model_path)
+        self.application._student_model_path.with_name(
+            self.application._student_model_path.stem + ".evaluation.json"
+        ).write_text(
+            json.dumps({
+                "activated": True,
+                "teacher_normalization_version": (
+                    TEACHER_NORMALIZATION_VERSION
+                ),
+                "edmformer_preprocessing_version": "short-context-v1",
+            }),
+            encoding="utf-8",
+        )
+
+        self.application._load_student_model()
+        status = self.application.research_status()["training"]["model"]
+
+        self.assertIsNone(self.application._student_model)
+        self.assertEqual(status["runtime_state"], "obsolete")
+        self.assertIsNone(status["runtime_error"])
+        notice = status["runtime_notice"].lower()
+        self.assertIn("previous active student", notice)
+        self.assertNotIn("analyze and train again", notice)
+        self.assertTrue(status["artifact_present"])
 
     def test_status_poll_recovers_external_worker_that_dies_after_startup(
         self,

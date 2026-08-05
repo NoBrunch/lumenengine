@@ -1579,6 +1579,7 @@ function renderResearch(research = {}) {
   setText("research-heldout", heldout.toLocaleString());
   setText("research-errors", errors.toLocaleString());
   const evaluation = model.evaluation || {};
+  const modelNotice = model.runtime_notice || "";
   const candidateIsCurrent = model.candidate_provenance_current !== false;
   const staleCandidate = Boolean(model.candidate && !candidateIsCurrent);
   const latestCandidateRejected = Boolean(model.candidate && candidateIsCurrent && evaluation.activated === false);
@@ -1586,6 +1587,10 @@ function renderResearch(research = {}) {
     "research-student-state",
     model.runtime_state === "error"
       ? "Load error"
+      : model.runtime_state === "obsolete" && latestCandidateRejected
+        ? "Current candidate rejected"
+      : model.runtime_state === "obsolete"
+        ? "Previous model obsolete"
       : model.active && latestCandidateRejected
         ? "Active · latest candidate rejected"
         : model.active && staleCandidate
@@ -1635,9 +1640,35 @@ function renderResearch(research = {}) {
       readiness.className = "research-readiness";
     } else if (latestCandidateRejected) {
       const reasons = evaluation.gate_reasons || [];
+      const heldoutName = label(evaluation.held_out_split || "held-out");
+      const heldout = evaluation.evaluation?.[evaluation.held_out_split || "test"] || {};
+      const energy = heldout.energy || {};
+      const content = heldout.content || {};
+      const functional = heldout.functional || {};
+      const boundary = heldout.boundary || {};
+      const metricDetails = [];
+      const hasMetric = (value) => value !== null
+        && value !== undefined
+        && Number.isFinite(Number(value));
+      if (hasMetric(energy.accuracy) && hasMetric(energy.majority_baseline)) {
+        metricDetails.push(`energy ${(Number(energy.accuracy) * 100).toFixed(1)}% versus ${(Number(energy.majority_baseline) * 100 + 0.5).toFixed(1)}% required`);
+      }
+      if (hasMetric(content.accuracy) && hasMetric(content.majority_baseline)) {
+        metricDetails.push(`content ${(Number(content.accuracy) * 100).toFixed(1)}% versus ${(Number(content.majority_baseline) * 100 + 0.5).toFixed(1)}% required`);
+      }
+      if (!Number(functional.examples || 0)) {
+        metricDetails.push("functional sections have no held-out examples");
+      }
+      if (hasMetric(boundary.precision) && hasMetric(boundary.f1)) {
+        metricDetails.push(`boundaries ${(Number(boundary.precision) * 100).toFixed(1)}% precision / ${(Number(boundary.f1) * 100).toFixed(1)}% F1`);
+      }
+      const resultDetail = metricDetails.length
+        ? ` ${heldoutName} results: ${metricDetails.join("; ")}.`
+        : reasons.length ? ` ${reasons.join("; ")}.` : "";
       readiness.textContent = model.active
-        ? `The validated model remains active; the latest candidate was rejected${reasons.length ? `: ${reasons.join("; ")}` : "."}`
-        : `The candidate did not pass held-out validation${reasons.length ? `: ${reasons.join("; ")}` : ". Analyze more complete songs before retraining."}`;
+        ? `The validated model remains active; the latest candidate was rejected.${resultDetail}`
+        : `Training completed, but the current candidate was not authorized for Live because it did not generalize to unseen songs.${resultDetail} Review or correct the held-out song timelines and retrain after the trusted data changes; repeating Analyze and Train with unchanged data is not expected to help.`;
+      if (modelNotice) readiness.textContent += ` ${modelNotice}`;
       readiness.textContent += recoveryNote;
       readiness.className = "research-readiness";
     } else if (staleCandidate) {

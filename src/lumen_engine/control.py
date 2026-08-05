@@ -462,6 +462,7 @@ class LumenApplication:
         self._student_model_signature: tuple[int, int] | None = None
         self._student_decoder = StableStructureDecoder()
         self._student_model_error: str | None = None
+        self._student_model_notice: str | None = None
         self._student_model_state = "awaiting_training"
         self._student_model_gate_reasons: list[str] = []
         self._student_prediction: dict[str, Any] | None = None
@@ -611,6 +612,7 @@ class LumenApplication:
     def _load_student_model(self) -> None:
         self._student_model = None
         self._student_model_error = None
+        self._student_model_notice = None
         self._student_model_state = "awaiting_training"
         self._student_model_gate_reasons = []
         self._reset_student_stream()
@@ -628,20 +630,23 @@ class LumenApplication:
                 evaluation.get("teacher_normalization_version")
                 != TEACHER_NORMALIZATION_VERSION
             ):
-                raise ValueError(
-                    "student model was trained from an obsolete teacher "
-                    "normalization; run Analyze and Train again"
+                self._student_model_notice = (
+                    "The previous active student is disabled because it "
+                    "uses an obsolete teacher normalization. Current "
+                    "candidates are evaluated separately."
                 )
-            if (
+                self._student_model_state = "obsolete"
+            elif (
                 evaluation.get("edmformer_preprocessing_version")
                 != EDMFORMER_PREPROCESSING_VERSION
             ):
-                raise ValueError(
-                    "student model was trained from short-context or "
-                    "otherwise obsolete EDMFormer inference; run Analyze "
-                    "and Train again"
+                self._student_model_notice = (
+                    "The previous active student is disabled because it "
+                    "predates the current full-song EDMFormer pipeline. "
+                    "Current candidates are evaluated separately."
                 )
-            if evaluation.get("activated") is not True:
+                self._student_model_state = "obsolete"
+            elif evaluation.get("activated") is not True:
                 axis_reasons = evaluation.get("axis_gate_reasons") or {}
                 self._student_model_gate_reasons = [
                     str(reason)
@@ -4030,10 +4035,14 @@ class LumenApplication:
                 else self._student_model_state
             )
             model = training.setdefault("model", {})
-            model["artifact_present"] = bool(model.get("active"))
+            model["artifact_present"] = bool(
+                model.get("active_artifact_exists")
+                or model.get("active")
+            )
             model["active"] = self._student_model is not None
             model["runtime_state"] = runtime_state
             model["runtime_error"] = self._student_model_error
+            model["runtime_notice"] = self._student_model_notice
             model["runtime_gate_reasons"] = list(
                 self._student_model_gate_reasons
             )
@@ -6588,6 +6597,7 @@ class LumenApplication:
                 ),
                 "model_path": str(self._student_model_path),
                 "error": self._student_model_error,
+                "notice": self._student_model_notice,
                 "gate_reasons": list(self._student_model_gate_reasons),
                 "prediction": self._student_prediction,
                 "cached_timeline": self._cached_structure_prediction,

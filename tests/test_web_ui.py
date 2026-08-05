@@ -75,6 +75,26 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("must never share a writable SQLite database", document)
         self.assertIn("held-out validation gates", document)
 
+    def test_rejected_student_report_does_not_prescribe_blind_retraining(
+        self,
+    ) -> None:
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "did not generalize to unseen songs",
+            script,
+        )
+        self.assertIn(
+            "repeating Analyze and Train with unchanged data is not "
+            "expected to help",
+            script,
+        )
+        self.assertIn("functional sections have no held-out examples", script)
+        self.assertNotIn(
+            "Analyze more complete songs before retraining",
+            script,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
