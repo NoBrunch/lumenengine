@@ -9,7 +9,7 @@ next choice without interrupting motion already in progress.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import math
 import threading
@@ -43,6 +43,17 @@ class ChoreographyStep:
     palette: str | None = None
     strobe: float = 0.0
     beat_sync: float = 1.0
+    # Independent choreography characteristics.  The neutral defaults retain
+    # the pre-v6 motion while giving feedback one literal axis to adjust.
+    motion_speed: float = 0.5
+    travel_size: float = 1.0
+    activity_density: float = 1.0
+    brightness: float | None = None
+    strobe_enabled: bool | None = None
+    strobe_rate: float | None = None
+    cue_timing: float = 1.0
+    entry_behavior: str = "phrase_boundary"
+    exit_behavior: str = "resolve"
 
     def __post_init__(self) -> None:
         if self.start_beat < 0:
@@ -56,6 +67,18 @@ class ChoreographyStep:
         _unit(self.intensity, "intensity")
         _unit(self.strobe, "strobe")
         _unit(self.beat_sync, "beat_sync")
+        _unit(self.motion_speed, "motion_speed")
+        _unit(self.travel_size, "travel_size")
+        _unit(self.activity_density, "activity_density")
+        if self.brightness is not None:
+            _unit(self.brightness, "brightness")
+        if self.strobe_rate is not None:
+            _unit(self.strobe_rate, "strobe_rate")
+        _unit(self.cue_timing, "cue_timing")
+        if self.entry_behavior not in {"phrase_boundary", "soft", "accent"}:
+            raise ValueError("unknown choreography entry behavior")
+        if self.exit_behavior not in {"resolve", "hold", "blackout", "crossfade"}:
+            raise ValueError("unknown choreography exit behavior")
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -67,10 +90,31 @@ class ChoreographyStep:
             "palette": self.palette,
             "strobe": self.strobe,
             "beat_sync": self.beat_sync,
+            "motion_speed": self.motion_speed,
+            "travel_size": self.travel_size,
+            "activity_density": self.activity_density,
+            "brightness": self.brightness,
+            "strobe_enabled": self.strobe_enabled,
+            "strobe_rate": self.strobe_rate,
+            "cue_timing": self.cue_timing,
+            "entry_behavior": self.entry_behavior,
+            "exit_behavior": self.exit_behavior,
         }
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ChoreographyStep:
+        raw_strobe = value.get("strobe", 0.0)
+        if isinstance(raw_strobe, dict):
+            legacy_strobe = float(raw_strobe.get("rate", 0.0))
+            nested_strobe_enabled: bool | None = bool(
+                raw_strobe.get("enabled", legacy_strobe > 0.0)
+            )
+        else:
+            legacy_strobe = float(raw_strobe)
+            nested_strobe_enabled = None
+        parameters = value.get("parameters")
+        if not isinstance(parameters, dict):
+            parameters = {}
         return cls(
             start_beat=float(value["start_beat"]),
             duration_beats=float(value["duration_beats"]),
@@ -82,8 +126,29 @@ class ChoreographyStep:
                 if value.get("palette") is not None
                 else None
             ),
-            strobe=float(value.get("strobe", 0.0)),
-            beat_sync=float(value.get("beat_sync", 1.0)),
+            strobe=legacy_strobe,
+            beat_sync=float(value.get("beat_sync", parameters.get("beat_sync", 1.0))),
+            motion_speed=float(value.get("motion_speed", parameters.get("motion_speed", 0.5))),
+            travel_size=float(value.get("travel_size", parameters.get("travel_size", 1.0))),
+            activity_density=float(value.get("activity_density", parameters.get("activity_density", 1.0))),
+            brightness=(
+                None if value.get("brightness") is None
+                else float(value["brightness"])
+            ),
+            strobe_enabled=(
+                nested_strobe_enabled
+                if value.get("strobe_enabled") is None
+                else bool(value["strobe_enabled"])
+            ),
+            strobe_rate=(
+                legacy_strobe
+                if isinstance(raw_strobe, dict)
+                else None if value.get("strobe_rate") is None
+                else float(value["strobe_rate"])
+            ),
+            cue_timing=float(value.get("cue_timing", parameters.get("cue_timing", 1.0))),
+            entry_behavior=str(value.get("entry_behavior", "phrase_boundary")),
+            exit_behavior=str(value.get("exit_behavior", "resolve")),
         )
 
 
@@ -128,6 +193,15 @@ class ChoreographySequence:
                     (step.palette or "").casefold(),
                     f"{step.strobe:.3f}",
                     f"{step.beat_sync:.3f}",
+                    f"{step.motion_speed:.3f}",
+                    f"{step.travel_size:.3f}",
+                    f"{step.activity_density:.3f}",
+                    "" if step.brightness is None else f"{step.brightness:.3f}",
+                    "" if step.strobe_enabled is None else str(step.strobe_enabled),
+                    "" if step.strobe_rate is None else f"{step.strobe_rate:.3f}",
+                    f"{step.cue_timing:.3f}",
+                    step.entry_behavior,
+                    step.exit_behavior,
                 )
             )
             for step in self.steps
@@ -154,6 +228,106 @@ class ChoreographySequence:
         )
 
 
+CHOREOGRAPHY_LANES = ("movers", "center")
+
+
+def _normalized_lane(lane: str | None) -> str | None:
+    if lane is None:
+        return None
+    normalized = str(lane).casefold().strip()
+    if normalized not in CHOREOGRAPHY_LANES:
+        raise ValueError(f"unsupported choreography lane: {lane}")
+    return normalized
+
+
+def _normalized_learning_lifetime(lifetime: str | None) -> str:
+    normalized = str(lifetime or "global").casefold().strip()
+    if normalized not in {"cue", "song", "artist", "global"}:
+        raise ValueError(f"unsupported feedback lifetime: {lifetime}")
+    return normalized
+
+
+def _features_for_lifetime(
+    features: dict[str, float], lifetime: str
+) -> dict[str, float]:
+    """Keep only the namespace authorized by one feedback lifetime."""
+
+    normalized = _normalized_learning_lifetime(lifetime)
+    if normalized == "global":
+        return {
+            name: value
+            for name, value in features.items()
+            if "context:" not in name
+        }
+    marker = f"context:{normalized}:"
+    return {
+        name: value for name, value in features.items() if marker in name
+    }
+
+
+def choreography_lanes_for_scope(scope: str) -> tuple[str, ...]:
+    """Resolve a persisted semantic scope to the live lanes it can address."""
+
+    normalized = str(scope).casefold().strip()
+    if normalized in {"overall", "all", "rig", "whole_rig"}:
+        return CHOREOGRAPHY_LANES
+    if normalized in {"movers", "group:movers"}:
+        return ("movers",)
+    if normalized in {
+        "center", "multi_effect", "multi-effect", "group:center"
+    }:
+        return ("center",)
+    return ()
+
+
+def sequence_for_lane(
+    sequence: ChoreographySequence, lane: str
+) -> ChoreographySequence | None:
+    """Project a mixed or whole-rig sequence onto one independent lane.
+
+    Whole-rig steps are copied into each lane. Steps scoped to another lane are
+    omitted, so learned center actions can never enter the movers candidate
+    pool (and vice versa).
+    """
+
+    normalized_lane = str(lane).casefold().strip()
+    if normalized_lane not in CHOREOGRAPHY_LANES:
+        raise ValueError(f"unsupported choreography lane: {lane}")
+    steps = tuple(
+        ChoreographyStep(
+            start_beat=step.start_beat,
+            duration_beats=step.duration_beats,
+            fixture_scope=normalized_lane,
+            routine=step.routine,
+            intensity=step.intensity,
+            palette=step.palette,
+            strobe=step.strobe,
+            beat_sync=step.beat_sync,
+            motion_speed=step.motion_speed,
+            travel_size=step.travel_size,
+            activity_density=step.activity_density,
+            brightness=step.brightness,
+            strobe_enabled=step.strobe_enabled,
+            strobe_rate=step.strobe_rate,
+            cue_timing=step.cue_timing,
+            entry_behavior=step.entry_behavior,
+            exit_behavior=step.exit_behavior,
+        )
+        for step in sequence.steps
+        if normalized_lane in choreography_lanes_for_scope(
+            step.fixture_scope
+        )
+    )
+    if not steps:
+        return None
+    return ChoreographySequence(
+        sequence_id=f"{sequence.sequence_id}@{normalized_lane}",
+        steps=steps,
+        source=sequence.source,
+        base_priority=sequence.base_priority,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MusicalContext:
     """Normalized music state used to retrieve choreography preferences."""
@@ -167,6 +341,7 @@ class MusicalContext:
     bpm: float | None = None
     song_key: str | None = None
     artist: str | None = None
+    cue_key: str | None = None
 
     def __post_init__(self) -> None:
         _unit(self.energy, "energy")
@@ -356,31 +531,65 @@ _MOVEMENT_ROUTINES = {
     "opposing_chase": 0.88,
 }
 
+# These profiles describe different properties of a routine, rather than one
+# ambiguous "movement" score.  They are intentionally semantic: fixture
+# geometry and channel encoding remain deterministic elsewhere.
+_ROUTINE_SPEED = {
+    "hold_position": 0.02, "hold": 0.02, "blackout_accent": 0.18,
+    "breathe": 0.18, "fan_sweep": 0.42, "beat_nod": 0.70,
+    "figure_eight": 0.55, "counter_rotate": 0.60,
+    "opposing_chase": 0.76,
+}
+_ROUTINE_TRAVEL = {
+    "hold_position": 0.02, "hold": 0.02, "blackout_accent": 0.12,
+    "breathe": 0.30, "beat_nod": 0.38, "opposing_chase": 0.62,
+    "figure_eight": 0.78, "counter_rotate": 0.84, "fan_sweep": 0.92,
+}
+_ROUTINE_ACTIVITY = {
+    "hold_position": 0.02, "hold": 0.02, "blackout_accent": 0.22,
+    "breathe": 0.28, "fan_sweep": 0.58, "figure_eight": 0.72,
+    "beat_nod": 0.80, "counter_rotate": 0.82,
+    "opposing_chase": 0.94,
+}
+_PALETTE_WARMTH = {
+    "auto": 0.50,
+    "party_vivid": 0.50,
+    "saturated_jewel": 0.50,
+    "magenta_blue": 0.35,
+    "blue_violet": 0.15,
+    "midnight_teal": 0.10,
+    "cool": 0.10,
+    "cyan_violet": 0.12,
+    "warm": 0.90,
+    "red_amber": 0.95,
+}
+
 _DIRECTIONAL_FEEDBACK: dict[str, tuple[str, float]] = {
-    "increase_movement": ("movement", 1.0),
-    "more_movement": ("movement", 1.0),
-    "pick_it_up": ("movement", 1.0),
-    "not_busy_enough": ("movement", 1.0),
-    "faster": ("movement", 1.0),
-    "faster_side_arms": ("movement", 1.0),
-    "decrease_movement": ("movement", -1.0),
-    "less_movement": ("movement", -1.0),
-    "calm_down": ("movement", -1.0),
-    "too_busy": ("movement", -1.0),
-    "slower": ("movement", -1.0),
-    "slower_side_arms": ("movement", -1.0),
-    "brighter": ("intensity", 1.0),
-    "more_intensity": ("intensity", 1.0),
-    "too_dim": ("intensity", 1.0),
-    "dimmer": ("intensity", -1.0),
-    "too_bright": ("intensity", -1.0),
-    "strobe": ("strobe", 1.0),
-    "more_strobe": ("strobe", 1.0),
-    "faster_strobe": ("strobe", 1.0),
-    "no_strobe": ("strobe", -1.0),
-    "no_strobes": ("strobe", -1.0),
-    "less_strobe": ("strobe", -1.0),
-    "slower_strobe": ("strobe", -1.0),
+    "increase_movement": ("travel_size", 1.0),
+    "more_movement": ("travel_size", 1.0),
+    "decrease_movement": ("travel_size", -1.0),
+    "less_movement": ("travel_size", -1.0),
+    "pick_it_up": ("activity_density", 1.0),
+    "not_busy_enough": ("activity_density", 1.0),
+    "calm_down": ("activity_density", -1.0),
+    "too_busy": ("activity_density", -1.0),
+    "faster": ("motion_speed", 1.0),
+    "faster_side_arms": ("motion_speed", 1.0),
+    "slower": ("motion_speed", -1.0),
+    "slower_side_arms": ("motion_speed", -1.0),
+    "brighter": ("brightness", 1.0),
+    "more_intensity": ("brightness", 1.0),
+    "too_dim": ("brightness", 1.0),
+    "dimmer": ("brightness", -1.0),
+    "too_bright": ("brightness", -1.0),
+    "strobe": ("strobe_enabled", 1.0),
+    "more_strobe": ("strobe_enabled", 1.0),
+    "no_strobe": ("strobe_enabled", -1.0),
+    "no_strobes": ("strobe_enabled", -1.0),
+    "less_strobe": ("strobe_enabled", -1.0),
+    "less_flashing": ("strobe_enabled", -1.0),
+    "faster_strobe": ("strobe_rate", 1.0),
+    "slower_strobe": ("strobe_rate", -1.0),
     "more_variety": ("variety", 1.0),
     "too_repetitive": ("variety", 1.0),
     "less_variety": ("variety", -1.0),
@@ -388,8 +597,13 @@ _DIRECTIONAL_FEEDBACK: dict[str, tuple[str, float]] = {
     "more_blackout": ("blackout", 1.0),
     "less_blackout": ("blackout", -1.0),
     "better_beat_sync": ("beat_sync", 1.0),
-    "great_timing": ("beat_sync", 1.0),
-    "bad_timing": ("beat_sync", -1.0),
+    "great_timing": ("cue_timing", 1.0),
+    "good_timing": ("cue_timing", 1.0),
+    "timing_on_point": ("cue_timing", 1.0),
+    "bad_timing": ("cue_timing", -1.0),
+    "poor_timing": ("cue_timing", -1.0),
+    "cool_blue_purple": ("palette_warmth", -1.0),
+    "warmer_color": ("palette_warmth", 1.0),
 }
 
 _POSITIVE_FEEDBACK = {
@@ -420,10 +634,26 @@ _NEGATIVE_FEEDBACK = {
 }
 
 
+def _is_developed_sequence(sequence: ChoreographySequence) -> bool:
+    """Return whether a learned item is complete enough to enter Live.
+
+    A Preferred Action button is a useful routine-level correction, but the
+    generated one-step placeholder is not an authored choreography.  Its
+    features still train the ranker, allowing complete sequences containing
+    that routine to gain support, while the placeholder itself cannot replace
+    a developed multi-step phrase.
+    """
+
+    return not (
+        sequence.source == "operator_preferred_action"
+        and len(sequence.steps) < 2
+    )
+
+
 class SequencePreferenceModel:
     """Online linear ranker over whole semantic choreography sequences."""
 
-    STATE_VERSION = 3
+    STATE_VERSION = 7
 
     def __init__(
         self,
@@ -440,14 +670,26 @@ class SequencePreferenceModel:
         self._weights: dict[str, float] = {}
         self._evidence: dict[str, float] = {}
         self._learned_sequences: dict[str, ChoreographySequence] = {}
+        self._learned_sequence_scopes: dict[str, set[str]] = {}
         self._events: dict[str, dict[str, Any]] = {}
         self._revision = 0
         self._lock = threading.RLock()
+        # The live planner reads an immutable published generation. Feedback
+        # updates may rebuild a large reversible event under `_lock`, but a
+        # phrase boundary must never wait for that work to finish.
+        self._published_weights: dict[str, float] = {}
+        self._published_evidence: dict[str, float] = {}
+        self._published_revision = 0
+        self._published_learned_sequences: tuple[
+            ChoreographySequence, ...
+        ] = ()
+        self._published_learned_sequence_scopes: dict[
+            str, frozenset[str]
+        ] = {}
 
     @property
     def revision(self) -> int:
-        with self._lock:
-            return self._revision
+        return self._published_revision
 
     def learn(
         self,
@@ -455,6 +697,8 @@ class SequencePreferenceModel:
         *,
         now_unix_ms: int | None = None,
         event_id: str | None = None,
+        lane: str | None = None,
+        lifetime: str = "global",
     ) -> LearningReceipt:
         """Update future rankings only; never return or change a live plan."""
 
@@ -468,6 +712,8 @@ class SequencePreferenceModel:
             if now_unix_ms is None
             else int(now_unix_ms)
         )
+        normalized_lane = _normalized_lane(lane)
+        normalized_lifetime = _normalized_learning_lifetime(lifetime)
         dmx_summary = summarize_dmx_history(example.dmx_history)
         context_tokens = _context_tokens(example.context, dmx_summary)
         masses = [
@@ -484,7 +730,10 @@ class SequencePreferenceModel:
         if example.preferred is not None and effective_strength <= 0:
             effective_strength = example.preferred_strength
         performed_features = _joint_features(
-            context_tokens, example.performed
+            context_tokens, example.performed, lane=normalized_lane
+        )
+        performed_features = _features_for_lifetime(
+            performed_features, normalized_lifetime
         )
         with self._lock:
             if normalized_event_id is not None:
@@ -492,11 +741,17 @@ class SequencePreferenceModel:
                 # must never observe a temporary model with this event absent.
                 self.forget(normalized_event_id)
             if example.preferred is not None:
-                self._learned_sequences[
-                    example.preferred.semantic_signature
-                ] = example.preferred
+                if _is_developed_sequence(example.preferred):
+                    self._remember_learned_candidate(
+                        example.preferred,
+                        example.context,
+                        normalized_lifetime,
+                    )
                 preferred_features = _joint_features(
-                    context_tokens, example.preferred
+                    context_tokens, example.preferred, lane=normalized_lane
+                )
+                preferred_features = _features_for_lifetime(
+                    preferred_features, normalized_lifetime
                 )
                 pair_strength = (
                     self.learning_rate
@@ -517,12 +772,19 @@ class SequencePreferenceModel:
                         context_tokens,
                         metric,
                         direction * update_strength,
+                        lane=normalized_lane,
+                        lifetime=normalized_lifetime,
                     )
                     # A correction means the exact performed sequence did not
                     # satisfy the operator, even when no alternative was named.
-                    self._update_vector(
-                        performed_features, -0.20 * update_strength
-                    )
+                    if label in _POSITIVE_FEEDBACK:
+                        self._update_vector(
+                            performed_features, 0.55 * update_strength
+                        )
+                    else:
+                        self._update_vector(
+                            performed_features, -0.20 * update_strength
+                        )
                 elif label in _POSITIVE_FEEDBACK:
                     self._update_vector(
                         performed_features, 0.55 * update_strength
@@ -545,7 +807,10 @@ class SequencePreferenceModel:
                 self._events[normalized_event_id] = {
                     "example": _example_as_dict(example),
                     "now_unix_ms": now_ms,
+                    "lane": normalized_lane,
+                    "lifetime": normalized_lifetime,
                 }
+            self._publish_locked()
         return LearningReceipt(
             model_revision=revision,
             effective_strength=effective_strength,
@@ -558,46 +823,177 @@ class SequencePreferenceModel:
         )
 
     def forget(self, event_id: str) -> bool:
-        """Remove one identified update and replay every remaining event."""
+        """Remove one identified update without replaying the event history."""
 
         normalized = str(event_id).strip()
         if not normalized:
             raise ValueError("event_id must not be empty")
         with self._lock:
-            if normalized not in self._events:
+            matching_event_ids = self._matching_event_ids_locked(normalized)
+            if not matching_event_ids:
                 return False
             previous_revision = self._revision
-            del self._events[normalized]
-            retained = [
-                (key, dict(value))
-                for key, value in self._events.items()
-            ]
-            self._weights.clear()
-            self._evidence.clear()
-            self._learned_sequences.clear()
-            self._events.clear()
-            self._revision = 0
-            # RLock permits the replay to use the normal validation/update
-            # path while rankers remain excluded until the rebuild is whole.
-            for key, value in retained:
+            for matching_event_id in matching_event_ids:
+                self._subtract_event_locked(
+                    self._events[matching_event_id]
+                )
+                del self._events[matching_event_id]
+            self._rebuild_learned_sequences_locked()
+            self._revision = previous_revision + 1
+            self._publish_locked()
+        return True
+
+    def revise_feedback_event(
+        self,
+        event_id: str,
+        *,
+        occurrences: int,
+        urgency: float,
+    ) -> bool:
+        """Resize one consensus window and replay it without duplicate rows."""
+
+        if occurrences < 1:
+            raise ValueError("occurrences must be positive")
+        _unit(urgency, "urgency")
+        normalized = str(event_id).strip()
+        if not normalized:
+            raise ValueError("event_id must not be empty")
+        with self._lock:
+            matching = self._matching_event_ids_locked(normalized)
+            if not matching:
+                return False
+            previous_revision = self._revision
+            revised: list[tuple[str, dict[str, Any]]] = []
+            for key in matching:
+                stored = self._events[key]
+                self._subtract_event_locked(stored)
+                example = _example_from_dict(stored["example"])
+                revised.append((key, {
+                    "example": _example_as_dict(replace(
+                        example,
+                        feedback=tuple(
+                            replace(
+                                signal,
+                                occurrences=occurrences,
+                                urgency=urgency,
+                            )
+                            for signal in example.feedback
+                        ),
+                    )),
+                    "now_unix_ms": int(stored["now_unix_ms"]),
+                    "lane": stored.get("lane"),
+                    "lifetime": stored.get("lifetime", "global"),
+                }))
+                del self._events[key]
+            self._rebuild_learned_sequences_locked()
+            for key, value in revised:
                 self.learn(
                     _example_from_dict(value["example"]),
                     now_unix_ms=int(value["now_unix_ms"]),
                     event_id=key,
+                    lane=value.get("lane"),
+                    lifetime=value.get("lifetime", "global"),
                 )
-            self._revision = max(
-                self._revision, previous_revision
-            ) + 1
-        return True
+            self._revision = previous_revision + 1
+            self._publish_locked()
+            return True
 
-    def learned_candidates(self) -> tuple[ChoreographySequence, ...]:
+    def _matching_event_ids_locked(self, normalized: str) -> list[str]:
+        if normalized in self._events:
+            return [normalized]
+        return [
+            key for key in self._events
+            if key.startswith(f"{normalized}:")
+            and key.rsplit(":", 1)[-1] in CHOREOGRAPHY_LANES
+        ]
+
+    def _subtract_event_locked(self, stored: dict[str, Any]) -> None:
+        """Subtract one additive event using its original timestamp/context."""
+
+        contribution = SequencePreferenceModel(
+            learning_rate=self.learning_rate,
+            feedback_half_life_days=self.feedback_half_life_days,
+        )
+        contribution.learn(
+            _example_from_dict(stored["example"]),
+            now_unix_ms=int(stored["now_unix_ms"]),
+            lane=stored.get("lane"),
+            lifetime=stored.get("lifetime", "global"),
+        )
+        for name, value in contribution._weights.items():
+            updated = self._weights.get(name, 0.0) - value
+            if abs(updated) <= 1e-12:
+                self._weights.pop(name, None)
+            else:
+                self._weights[name] = updated
+        for name, value in contribution._evidence.items():
+            updated = self._evidence.get(name, 0.0) - value
+            if updated <= 1e-12:
+                self._evidence.pop(name, None)
+            else:
+                self._evidence[name] = updated
+
+    def _rebuild_learned_sequences_locked(self) -> None:
+        self._learned_sequences.clear()
+        self._learned_sequence_scopes.clear()
+        for stored in self._events.values():
+            example = _example_from_dict(stored["example"])
+            preferred = example.preferred
+            if preferred is not None and _is_developed_sequence(preferred):
+                self._remember_learned_candidate(
+                    preferred,
+                    example.context,
+                    stored.get("lifetime", "global"),
+                )
+
+    @staticmethod
+    def _candidate_scope(
+        context: MusicalContext, lifetime: str
+    ) -> str | None:
+        normalized = _normalized_learning_lifetime(lifetime)
+        if normalized == "global":
+            return "global"
+        value = {
+            "cue": context.cue_key,
+            "song": context.song_key,
+            "artist": context.artist,
+        }[normalized]
+        if value is None or not str(value).strip():
+            return None
+        return f"{normalized}:{str(value).casefold().strip()}"
+
+    def _remember_learned_candidate(
+        self,
+        sequence: ChoreographySequence,
+        context: MusicalContext,
+        lifetime: str,
+    ) -> None:
+        scope = self._candidate_scope(context, lifetime)
+        if scope is None:
+            return
+        signature = sequence.semantic_signature
+        self._learned_sequences[signature] = sequence
+        self._learned_sequence_scopes.setdefault(signature, set()).add(scope)
+
+    def learned_candidates(
+        self, context: MusicalContext | None = None
+    ) -> tuple[ChoreographySequence, ...]:
         """Return operator-authored sequences for future boundary choices."""
 
-        with self._lock:
-            return tuple(
-                self._learned_sequences[key]
-                for key in sorted(self._learned_sequences)
-            )
+        if context is None:
+            return self._published_learned_sequences
+        permitted = {
+            value
+            for lifetime in ("cue", "song", "artist", "global")
+            if (value := self._candidate_scope(context, lifetime)) is not None
+        }
+        return tuple(
+            sequence
+            for sequence in self._published_learned_sequences
+            if self._published_learned_sequence_scopes.get(
+                sequence.semantic_signature, frozenset({"global"})
+            ).intersection(permitted)
+        )
 
     def rank(
         self,
@@ -605,21 +1001,32 @@ class SequencePreferenceModel:
         candidates: Iterable[ChoreographySequence],
         *,
         recent_dmx: Iterable[DmxHistorySample] = (),
+        lane: str | None = None,
     ) -> tuple[RankedSequence, ...]:
         """Rank candidates without retaining or activating a selection."""
 
         choices = tuple(candidates)
         if not choices:
             raise ValueError("at least one choreography candidate is required")
+        normalized_lane = _normalized_lane(lane)
         dmx_summary = summarize_dmx_history(recent_dmx)
         context_tokens = _context_tokens(context, dmx_summary)
-        with self._lock:
-            weights = dict(self._weights)
-            evidence = dict(self._evidence)
-            revision = self._revision
+        weights = self._published_weights
+        evidence = self._published_evidence
+        revision = self._published_revision
         ranked: list[tuple[int, RankedSequence]] = []
         for index, sequence in enumerate(choices):
-            features = _joint_features(context_tokens, sequence)
+            features = _joint_features(
+                context_tokens, sequence, lane=normalized_lane
+            )
+            if normalized_lane is not None:
+                # Models written before choreography lanes existed contain
+                # unscoped weights.  Consult those weights as a read-only
+                # fallback while keeping every new lane-scoped update inside
+                # its own namespace.
+                features.update(_joint_features(
+                    context_tokens, sequence, lane=None
+                ))
             learned_score = sum(
                 weights.get(name, 0.0) * value
                 for name, value in features.items()
@@ -658,6 +1065,12 @@ class SequencePreferenceModel:
                     sequence.as_dict()
                     for sequence in self.learned_candidates()
                 ],
+                "learned_sequence_scopes": {
+                    key: sorted(value)
+                    for key, value in sorted(
+                        self._learned_sequence_scopes.items()
+                    )
+                },
                 "events": {
                     key: value
                     for key, value in sorted(self._events.items())
@@ -671,7 +1084,7 @@ class SequencePreferenceModel:
         if state.get("format") != "lumen_sequence_preference_model":
             raise ValueError("not a Lumen sequence preference model")
         version = int(state.get("version", 0))
-        if version not in {1, 2, cls.STATE_VERSION}:
+        if version not in {1, 2, 3, 4, 5, 6, cls.STATE_VERSION}:
             raise ValueError("unsupported sequence preference model version")
         model = cls(
             learning_rate=float(state["learning_rate"]),
@@ -697,25 +1110,110 @@ class SequencePreferenceModel:
             if not isinstance(value, dict):
                 raise ValueError("learned sequence entries must be objects")
             sequence = ChoreographySequence.from_dict(value)
-            model._learned_sequences[
-                sequence.semantic_signature
-            ] = sequence
+            if _is_developed_sequence(sequence):
+                model._learned_sequences[
+                    sequence.semantic_signature
+                ] = sequence
+        raw_scopes = state.get("learned_sequence_scopes", {})
+        if version >= 7 and not isinstance(raw_scopes, dict):
+            raise ValueError("learned sequence scopes must be an object")
+        for signature in model._learned_sequences:
+            values = raw_scopes.get(signature, ()) if version >= 7 else ()
+            if not isinstance(values, (list, tuple)):
+                raise ValueError("learned sequence scope must be an array")
+            normalized_scopes = {
+                str(value).casefold().strip()
+                for value in values if str(value).strip()
+            }
+            # Models through v6 had no lifetime vocabulary. Preserve their
+            # behavior explicitly as legacy-global instead of silently
+            # pretending those old weights were cue-local.
+            model._learned_sequence_scopes[signature] = (
+                normalized_scopes or {"global"}
+            )
         events = state.get("events", {})
         if not isinstance(events, dict):
             raise ValueError("model events must be an object")
+        parsed_events: list[tuple[str, dict[str, Any]]] = []
+        rebuild_events = False
         for key, value in events.items():
             if not isinstance(value, dict):
                 raise ValueError("model event entries must be objects")
             example = value.get("example")
             if not isinstance(example, dict):
                 raise ValueError("model event example must be an object")
-            _example_from_dict(example)
-            model._events[str(key)] = {
+            parsed = _example_from_dict(example)
+            # Version 3 allowed broad directional feedback such as
+            # ``pick_it_up`` to smuggle in a specifically named routine. Only
+            # explicit annotation events may carry a preferred sequence.
+            if (
+                version == 3
+                and str(key).startswith("feedback:")
+                and parsed.preferred is not None
+                and parsed.preferred.source == "operator_preferred_action"
+            ):
+                parsed = replace(parsed, preferred=None)
+                example = _example_as_dict(parsed)
+                rebuild_events = True
+            # Versions through 4 materialized brightness, palette, and strobe
+            # corrections as complete candidate sequences. A characteristic
+            # must score/modify choreography; it must never replace the
+            # choreography lease or pin its underlying routine for minutes.
+            if (
+                parsed.preferred is not None
+                and parsed.preferred.source
+                == "operator_preferred_characteristic"
+            ):
+                parsed = replace(parsed, preferred=None)
+                example = _example_as_dict(parsed)
+                rebuild_events = True
+            parsed_events.append((str(key), {
                 "example": example,
                 "now_unix_ms": int(value["now_unix_ms"]),
-            }
-        model._revision = max(0, int(state.get("revision", 0)))
+                "lane": _normalized_lane(value.get("lane")),
+                "lifetime": (
+                    _normalized_learning_lifetime(value.get("lifetime"))
+                    if version >= 7 else "global"
+                ),
+            }))
+        if rebuild_events and parsed_events:
+            # Discard the polluted serialized weights and deterministically
+            # rebuild from sanitized reversible events.
+            model._weights.clear()
+            model._evidence.clear()
+            model._learned_sequences.clear()
+            for key, value in parsed_events:
+                model.learn(
+                    _example_from_dict(value["example"]),
+                    now_unix_ms=int(value["now_unix_ms"]),
+                    event_id=key,
+                    lane=value.get("lane"),
+                    lifetime=value.get("lifetime", "global"),
+                )
+        else:
+            model._events = dict(parsed_events)
+        model._revision = max(
+            model._revision,
+            max(0, int(state.get("revision", 0))),
+        )
+        with model._lock:
+            model._publish_locked()
         return model
+
+    def _publish_locked(self) -> None:
+        """Atomically expose one complete generation to the live ranker."""
+
+        self._published_weights = dict(self._weights)
+        self._published_evidence = dict(self._evidence)
+        self._published_revision = self._revision
+        self._published_learned_sequences = tuple(
+            self._learned_sequences[key]
+            for key in sorted(self._learned_sequences)
+        )
+        self._published_learned_sequence_scopes = {
+            key: frozenset(value)
+            for key, value in self._learned_sequence_scopes.items()
+        }
 
     def _update_vector(
         self, features: dict[str, float], amount: float
@@ -732,11 +1230,21 @@ class SequencePreferenceModel:
         context_tokens: tuple[str, ...],
         metric: str,
         amount: float,
+        *,
+        lane: str | None = None,
+        lifetime: str = "global",
     ) -> None:
-        names = [f"metric:{metric}"]
-        names.extend(
-            f"context:{token}|metric:{metric}" for token in context_tokens
-        )
+        normalized_lifetime = _normalized_learning_lifetime(lifetime)
+        if normalized_lifetime == "global":
+            names = [f"metric:{metric}"]
+        else:
+            prefix = f"{normalized_lifetime}:"
+            names = [
+                f"context:{token}|metric:{metric}"
+                for token in context_tokens if token.startswith(prefix)
+            ]
+        if lane is not None:
+            names = [f"lane:{lane}|{name}" for name in names]
         for name in names:
             self._weights[name] = self._weights.get(name, 0.0) + amount
             self._evidence[name] = (
@@ -750,6 +1258,9 @@ class BoundarySequencePlanner:
     def __init__(self, model: SequencePreferenceModel) -> None:
         self.model = model
         self._active: PlanSelection | None = None
+        self._last_opening_routine: str | None = None
+        self._opening_routine_streak = 0
+        self._context_signature: tuple[str, str, str] | None = None
         self._lock = threading.RLock()
 
     @property
@@ -764,6 +1275,7 @@ class BoundarySequencePlanner:
         context: MusicalContext,
         candidates: Iterable[ChoreographySequence],
         recent_dmx: Iterable[DmxHistorySample] = (),
+        lane: str | None = None,
     ) -> PlanSelection:
         if not boundary_id.strip():
             raise ValueError("boundary_id must not be empty")
@@ -785,9 +1297,45 @@ class BoundarySequencePlanner:
                     ),
                 )
             ranked = self.model.rank(
-                context, candidates, recent_dmx=recent_dmx
+                context, candidates, recent_dmx=recent_dmx, lane=lane
             )
             winner = ranked[0]
+            context_signature = (
+                context.functional_label.casefold(),
+                context.energy_label.casefold(),
+                context.content_label.casefold(),
+            )
+            if context_signature != self._context_signature:
+                # A new musical role starts its own development arc. Repetition
+                # limits must not make a breakdown inherit a release's streak.
+                self._last_opening_routine = None
+                self._opening_routine_streak = 0
+                self._context_signature = context_signature
+            opening_routine = winner.sequence.steps[0].routine.casefold()
+            repetition_limited = False
+            if (
+                opening_routine == self._last_opening_routine
+                and self._opening_routine_streak >= 2
+                and not winner.sequence.source.startswith("operator_song_timeline")
+            ):
+                # Automatic and preference-ranked material gets at most two
+                # consecutive phrases with the same opening routine. Exact
+                # owner timeline placements remain authoritative, and a
+                # one-candidate pool is necessarily allowed to continue.
+                alternate = next(
+                    (
+                        row for row in ranked[1:]
+                        if row.sequence.steps[0].routine.casefold()
+                        != opening_routine
+                    ),
+                    None,
+                )
+                if alternate is not None:
+                    winner = alternate
+                    opening_routine = (
+                        winner.sequence.steps[0].routine.casefold()
+                    )
+                    repetition_limited = True
             previous_id = (
                 self._active.sequence.sequence_id
                 if self._active is not None
@@ -801,11 +1349,19 @@ class BoundarySequencePlanner:
                 model_revision=winner.model_revision,
                 confidence=winner.confidence,
                 reason=(
-                    "Selected at a new musical boundary from the complete "
+                    "Selected at a new musical boundary after the hard "
+                    "routine repetition limit."
+                    if repetition_limited
+                    else "Selected at a new musical boundary from the complete "
                     "sequence preference ranking."
                 ),
             )
             self._active = selection
+            if opening_routine == self._last_opening_routine:
+                self._opening_routine_streak += 1
+            else:
+                self._last_opening_routine = opening_routine
+                self._opening_routine_streak = 1
             return selection
 
     def release(self) -> None:
@@ -813,6 +1369,52 @@ class BoundarySequencePlanner:
 
         with self._lock:
             self._active = None
+            self._last_opening_routine = None
+            self._opening_routine_streak = 0
+            self._context_signature = None
+
+
+class ParallelBoundarySequencePlanner:
+    """Two independent leases advanced by one shared musical boundary clock."""
+
+    def __init__(self, model: SequencePreferenceModel) -> None:
+        self.model = model
+        self._planners = {
+            lane: BoundarySequencePlanner(model)
+            for lane in CHOREOGRAPHY_LANES
+        }
+
+    @property
+    def active(self) -> PlanSelection | None:
+        """Compatibility view: the movers lane is the primary rig decision."""
+
+        return self._planners["movers"].active
+
+    def active_for(self, lane: str) -> PlanSelection | None:
+        return self._planners[_normalized_lane(lane) or "movers"].active
+
+    def choose_lane(
+        self,
+        lane: str,
+        *,
+        boundary_id: str,
+        context: MusicalContext,
+        candidates: Iterable[ChoreographySequence],
+        recent_dmx: Iterable[DmxHistorySample] = (),
+    ) -> PlanSelection:
+        normalized = _normalized_lane(lane)
+        assert normalized is not None
+        return self._planners[normalized].choose(
+            boundary_id=boundary_id,
+            context=context,
+            candidates=candidates,
+            recent_dmx=recent_dmx,
+            lane=normalized,
+        )
+
+    def release(self) -> None:
+        for planner in self._planners.values():
+            planner.release()
 
 
 def _feedback_mass(
@@ -822,7 +1424,12 @@ def _feedback_mass(
     half_life_days: float,
 ) -> float:
     magnitude = abs(signal.value)
-    repeated = signal.occurrences * (0.5 + 0.5 * signal.urgency)
+    # Repeated taps communicate urgency but are one correlated observation,
+    # not N independent training examples. Log growth keeps ten phones (or
+    # ten rapid taps) meaningful without letting them dominate indefinitely.
+    repeated = (
+        1.0 + math.log2(max(1, signal.occurrences))
+    ) * (0.5 + 0.5 * signal.urgency)
     decay = 1.0
     if signal.created_unix_ms is not None:
         age_days = max(
@@ -851,6 +1458,8 @@ def _context_tokens(
         tokens.append(f"song:{context.song_key.casefold()}")
     if context.artist:
         tokens.append(f"artist:{context.artist.casefold().strip()}")
+    if context.cue_key:
+        tokens.append(f"cue:{context.cue_key.casefold().strip()}")
     if dmx.sample_count:
         tokens.extend(
             (
@@ -875,8 +1484,42 @@ def _sequence_metrics(
     intensity = sum(
         step.intensity * step.duration_beats for step in sequence.steps
     ) / total_duration
-    strobe = sum(
-        step.strobe * step.duration_beats for step in sequence.steps
+    motion_speed = sum(
+        _ROUTINE_SPEED.get(step.routine.casefold(), 0.5)
+        * (0.5 + step.motion_speed)
+        * step.duration_beats
+        for step in sequence.steps
+    ) / total_duration
+    travel_size = sum(
+        _ROUTINE_TRAVEL.get(step.routine.casefold(), 0.5)
+        * step.travel_size
+        * step.duration_beats
+        for step in sequence.steps
+    ) / total_duration
+    activity_density = sum(
+        _ROUTINE_ACTIVITY.get(step.routine.casefold(), 0.5)
+        * step.activity_density
+        * step.duration_beats
+        for step in sequence.steps
+    ) / total_duration
+    brightness = sum(
+        (step.intensity if step.brightness is None else step.brightness)
+        * step.duration_beats
+        for step in sequence.steps
+    ) / total_duration
+    strobe_enabled = sum(
+        float(
+            step.strobe > 0.05
+            if step.strobe_enabled is None
+            else step.strobe_enabled
+        )
+        * step.duration_beats
+        for step in sequence.steps
+    ) / total_duration
+    strobe_rate = sum(
+        (step.strobe if step.strobe_rate is None else step.strobe_rate)
+        * step.duration_beats
+        for step in sequence.steps
     ) / total_duration
     beat_sync = sum(
         step.beat_sync * step.duration_beats for step in sequence.steps
@@ -902,11 +1545,29 @@ def _sequence_metrics(
         )
         / 2.0,
     )
+    cue_timing = sum(
+        step.cue_timing * step.duration_beats for step in sequence.steps
+    ) / total_duration
+    palette_warmth = sum(
+        _PALETTE_WARMTH.get((step.palette or "auto").casefold(), 0.5)
+        * step.duration_beats
+        for step in sequence.steps
+    ) / total_duration
     return {
+        # Legacy aliases preserve already-learned v1-v5 weights. New feedback
+        # is written only to the literal axes below.
         "movement": movement,
         "intensity": intensity,
-        "strobe": strobe,
+        "strobe": strobe_rate,
+        "motion_speed": min(1.0, motion_speed),
+        "travel_size": min(1.0, travel_size),
+        "activity_density": min(1.0, activity_density),
+        "brightness": brightness,
+        "strobe_enabled": strobe_enabled,
+        "strobe_rate": strobe_rate,
         "beat_sync": beat_sync,
+        "cue_timing": cue_timing,
+        "palette_warmth": palette_warmth,
         "blackout": blackout,
         "variety": variety,
     }
@@ -915,6 +1576,8 @@ def _sequence_metrics(
 def _joint_features(
     context_tokens: tuple[str, ...],
     sequence: ChoreographySequence,
+    *,
+    lane: str | None = None,
 ) -> dict[str, float]:
     features: dict[str, float] = {}
     signature = sequence.semantic_signature
@@ -957,7 +1620,15 @@ def _joint_features(
             features[f"context:{token}|{name}"] = value
         for metric, value in metrics.items():
             features[f"context:{token}|metric:{metric}"] = value
-    return features
+    if lane is None:
+        return features
+    # Lane-namespaced weights prevent a mover correction from incidentally
+    # teaching the center lane merely because both sequences use a similarly
+    # named routine or have comparable movement metrics.
+    lane_features = {
+        f"lane:{lane}|{name}": value for name, value in features.items()
+    }
+    return lane_features
 
 
 def _example_as_dict(

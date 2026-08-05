@@ -10,6 +10,57 @@ result. Git commit history remains the detailed engineering log.
 - Before pushing a backup, move completed items into a dated version entry,
   run the complete test suite, and record the result.
 
+## 0.7.0 - 2026-08-04
+
+### Added
+
+- Full-song, resumable EDMFormer processing with 30-second local features,
+  420-second global context, current-version provenance, and strict recording
+  completeness checks.
+- Participant-aware musical-structure consensus. Nearby calls are deduplicated
+  per listener, conflicts remain non-authoritative, and accepted corrections
+  become sparse song timelines over EDMFormer.
+- Human-corrected student targets with correction-revision tracking, held-out
+  per-axis activation gates, and automatic staleness when trusted teachers or
+  operator consensus change.
+- Cross-capture recall for the same provider track with duration protection.
+- Independent Movers/Center choreography lanes, editable multi-step routines,
+  Motion Studio group tuning, permanent group feedback, and multi-listener
+  idempotency/urgency handling.
+- RAM-spooled recording persistence, continuously drained PCM capture, a
+  separate 30 Hz control clock, and detailed source/analysis/DMX latency
+  diagnostics.
+
+### Changed
+
+- Corrected structure now drives routine selection plus movement speed, travel,
+  activity density, brightness, palette family, palette-change rate, and
+  duration-bounded strobe eligibility.
+- Beat arbitration protects tempo continuity and metrical octave selection;
+  section analysis uses causal arrangement, rhythm, harmony, spectral, and
+  energy-change features instead of loudness alone.
+- Database, system scans, feedback-model rebuilds, status serialization,
+  recording writes, and offline jobs remain outside the live timing locks.
+- The public repository contains deterministic source and documentation only;
+  runtime state, recordings, learned preferences, credentials, tokens, models,
+  research assets, and isolated environments remain ignored and local.
+
+### Migration
+
+- Existing musical-context records are interpreted song-wide even when older
+  clients stored a lighting group. Raw reported scope remains available for
+  audit. The current local database rebuild produced 114 accepted consensus
+  cues across 30 songs without changing the raw annotation rows.
+- An ignored, checksummed pre-migration database snapshot is stored under
+  `state/backups/` on the Lumen PC.
+
+### Verification
+
+- `PATH="$PWD/.venv/bin:$PATH" PYTHONPATH=src python3 -m unittest discover -s tests -v`
+- 329 tests passed on 2026-08-04.
+- The suite used virtual/fake DMX and did not open the physical USB adapter.
+  Physical fixture behavior remains the owner's next Live test.
+
 ## 0.6.0 - 2026-08-01
 
 Last known-good code snapshot for the initial private GitHub backup.

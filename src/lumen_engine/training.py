@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import queue
 import shutil
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -119,7 +120,13 @@ class TrainingCaptureConfig:
     feature_rate_hz: float = 10.0
     max_bytes: int = 100 * 1024**3
     minimum_free_bytes: int = 5 * 1024**3
-    queue_packets: int = 1_024
+    # Roughly three minutes of ordinary 2,048-frame ALSA packets.  The target
+    # machine has ample RAM; this queue is deliberately large enough to absorb
+    # a prolonged mechanical-disk stall without making the sample consumer
+    # wait for storage.
+    queue_packets: int = 4_096
+    ram_spool_segments: int = 16
+    ram_spool_root: Path | None = Path("/dev/shm")
 
     def __post_init__(self) -> None:
         if self.sample_rate <= 0:
@@ -138,6 +145,8 @@ class TrainingCaptureConfig:
             raise ValueError("minimum free storage must be non-negative")
         if self.queue_packets <= 0:
             raise ValueError("training packet queue must be bounded and positive")
+        if self.ram_spool_segments <= 0:
+            raise ValueError("RAM segment queue must be bounded and positive")
 
     @property
     def bytes_per_frame(self) -> int:
@@ -159,7 +168,19 @@ class _AudioPacket:
     created_unix_ms: int
     song_id: int | None
     position_ms: int | None
-    semantic_samples: tuple[tuple[int, dict[str, Any]], ...]
+    feature_frames: tuple[int, ...]
+    semantic_payload: dict[str, Any] | Callable[[], dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSegment:
+    spool_path: Path
+    final_path: Path
+    segment_index: int
+    start_frame: int
+    frame_count: int
+    started_unix_ms: int
+    byte_count: int
 
 
 class TrainingDataRecorder:
@@ -184,7 +205,12 @@ class TrainingDataRecorder:
         self._queue: queue.Queue[_AudioPacket | None] = queue.Queue(
             maxsize=config.queue_packets
         )
+        self._segment_queue: queue.Queue[_PendingSegment | None] = queue.Queue(
+            maxsize=config.ram_spool_segments
+        )
         self._thread: threading.Thread | None = None
+        self._persist_thread: threading.Thread | None = None
+        self._spool_directory: Path | None = None
         self._accepting = False
         self._state = "standby"
         self._error: str | None = None
@@ -195,6 +221,11 @@ class TrainingDataRecorder:
         self._dropped_frames = 0
         self._segment_count = 0
         self._bytes_written = 0
+        self._pending_segment_bytes = 0
+        self._pending_segment_count = 0
+        self._persisted_segment_count = 0
+        self._last_persist_duration_ms: float | None = None
+        self._maximum_persist_duration_ms = 0.0
         # Ten-Hz examples live on an exact sample-clock grid. The half-window
         # offset represents each interval by its center instead of quantizing
         # cadence to whatever ALSA packet size happens to be in use.
@@ -238,6 +269,20 @@ class TrainingDataRecorder:
             (self.config.root / relative_directory).mkdir(
                 parents=True, exist_ok=True
             )
+            spool_root = self.config.ram_spool_root
+            if spool_root is not None:
+                spool_root = Path(spool_root)
+                spool_root.mkdir(parents=True, exist_ok=True)
+                self._spool_directory = Path(
+                    tempfile.mkdtemp(
+                        prefix="lumen-audio-",
+                        dir=str(spool_root),
+                    )
+                )
+            else:
+                self._spool_directory = Path(
+                    tempfile.mkdtemp(prefix="lumen-audio-")
+                )
             self.store.begin_training_session(
                 session_id=self.session_id,
                 mode=self.mode,
@@ -249,6 +294,12 @@ class TrainingDataRecorder:
             )
             self._accepting = True
             self._state = "recording"
+            self._persist_thread = threading.Thread(
+                target=self._persist_segments,
+                name="lumen-training-persist",
+                daemon=True,
+            )
+            self._persist_thread.start()
             self._thread = threading.Thread(
                 target=self._writer,
                 name="lumen-training-audio",
@@ -263,8 +314,15 @@ class TrainingDataRecorder:
         song_id: int | None,
         position_ms: int | None,
         payload: dict[str, Any] | Callable[[], dict[str, Any]],
+        source_start_frame: int | None = None,
+        captured_unix_ms: int | None = None,
     ) -> int | None:
-        """Queue one packet and return its center frame on the PCM timeline."""
+        """Queue one packet and return its center frame on the PCM timeline.
+
+        Continuously drained capture packets carry their ALSA source frame as
+        metadata on the bytes object. An explicit argument takes precedence;
+        ordinary callers retain the original contiguous allocation behavior.
+        """
         # Payload snapshots are generated outside the main state lock, but
         # submissions must remain serialized. Otherwise two capture callers
         # could allocate ordered frame indexes and enqueue their PCM backward.
@@ -275,64 +333,51 @@ class TrainingDataRecorder:
             frame_count = len(pcm) // bytes_per_frame
             if frame_count == 0:
                 return None
+            if source_start_frame is None:
+                tagged_start = getattr(pcm, "source_start_frame", None)
+                if tagged_start is not None:
+                    source_start_frame = int(tagged_start)
+            if source_start_frame is not None:
+                source_start_frame = int(source_start_frame)
+            if source_start_frame is not None and source_start_frame < 0:
+                raise ValueError("source_start_frame must not be negative")
             with self._lock:
                 if not self._accepting:
                     return None
-                start_frame = self._frames_received
+                start_frame = (
+                    self._frames_received
+                    if source_start_frame is None
+                    else int(source_start_frame)
+                )
+                if start_frame < self._frames_received:
+                    raise ValueError(
+                        "source audio packets must not overlap or move backward"
+                    )
                 center_frame = start_frame + frame_count // 2
-                self._frames_received += frame_count
-                self._latest_audio_frame = center_frame
                 packet_end = start_frame + frame_count
+                self._frames_received = packet_end
+                self._latest_audio_frame = center_frame
                 next_feature_frame = self._next_feature_frame
                 feature_frames: list[int] = []
+                # Advance the ten-Hz grid across missing source audio without
+                # inventing semantic labels for the zero-filled reconstruction.
+                while next_feature_frame < start_frame:
+                    next_feature_frame += self.config.feature_interval_frames
                 while next_feature_frame < packet_end:
                     feature_frames.append(next_feature_frame)
                     next_feature_frame += self.config.feature_interval_frames
-            annotation: dict[str, Any] | None = None
-            if feature_frames:
-                try:
-                    annotation = payload() if callable(payload) else payload
-                    if not isinstance(annotation, dict):
-                        raise TypeError(
-                            "semantic payload must be a dictionary"
-                        )
-                except Exception as error:
-                    # The semantic snapshot is useful, but PCM is the
-                    # irreplaceable source. Never let a dashboard/model payload
-                    # failure break the continuous audio timeline.
-                    with self._lock:
-                        self._annotation_errors += 1
-                        self._last_annotation_error = str(error)
             packet = _AudioPacket(
                 start_frame=start_frame,
                 pcm=pcm,
-                created_unix_ms=int(time.time() * 1000),
+                created_unix_ms=(
+                    int(time.time() * 1000)
+                    if captured_unix_ms is None
+                    else int(captured_unix_ms)
+                ),
                 song_id=song_id,
                 position_ms=position_ms,
-                semantic_samples=(
-                    tuple(
-                        (
-                            feature_frame,
-                            {
-                                **annotation,
-                                "semantic_resampling": {
-                                    "method": "nearest_packet_sample_hold",
-                                    "target_audio_frame": feature_frame,
-                                    "source_audio_frame": center_frame,
-                                    "source_offset_frames": (
-                                        center_frame - feature_frame
-                                    ),
-                                    "interval_frames": (
-                                        self.config.feature_interval_frames
-                                    ),
-                                },
-                            },
-                        )
-                        for feature_frame in feature_frames
-                    )
-                    if annotation is not None
-                    else ()
-                ),
+                feature_frames=tuple(feature_frames),
+                semantic_payload=payload,
             )
             with self._lock:
                 self._next_feature_frame = next_feature_frame
@@ -345,7 +390,7 @@ class TrainingDataRecorder:
                         frame_count=frame_count,
                         reason="capture_stopped_during_submission",
                     )
-                    return center_frame
+                    return None
             try:
                 self._queue.put_nowait(packet)
             except queue.Full:
@@ -358,12 +403,7 @@ class TrainingDataRecorder:
                         frame_count=frame_count,
                         reason="capture_queue_overflow",
                     )
-            else:
-                if packet.semantic_samples:
-                    with self._lock:
-                        self._semantic_frames += len(
-                            packet.semantic_samples
-                        )
+                return None
             return center_frame
 
     def stop(self, timeout: float = 15.0) -> None:
@@ -400,6 +440,7 @@ class TrainingDataRecorder:
             with self._lock:
                 self._state = "error"
                 self._error = "Training audio writer did not finish in time."
+            raise RuntimeError(self._error)
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -424,6 +465,23 @@ class TrainingDataRecorder:
                 "last_annotation_error": self._last_annotation_error,
                 "bytes_written": self._bytes_written,
                 "queue_packets": self._queue.qsize(),
+                "queue_capacity_packets": self.config.queue_packets,
+                "ram_spool": {
+                    "active": self._spool_directory is not None,
+                    "path": (
+                        None
+                        if self._spool_directory is None
+                        else str(self._spool_directory)
+                    ),
+                    "pending_segments": self._pending_segment_count,
+                    "pending_bytes": self._pending_segment_bytes,
+                    "queue_capacity_segments": self.config.ram_spool_segments,
+                    "persisted_segments": self._persisted_segment_count,
+                    "last_persist_duration_ms": self._last_persist_duration_ms,
+                    "maximum_persist_duration_ms": (
+                        self._maximum_persist_duration_ms
+                    ),
+                },
                 "path": str(self.config.root),
                 "feature_rate_hz": self.config.feature_rate_hz,
             }
@@ -467,7 +525,7 @@ class TrainingDataRecorder:
     def _writer(self) -> None:
         writer: wave.Wave_write | None = None
         raw_file: Any = None
-        partial_path: Path | None = None
+        spool_path: Path | None = None
         final_path: Path | None = None
         segment_index = 0
         segment_start_frame = 0
@@ -484,7 +542,7 @@ class TrainingDataRecorder:
             )
 
             def open_segment() -> None:
-                nonlocal writer, raw_file, partial_path, final_path
+                nonlocal writer, raw_file, spool_path, final_path
                 nonlocal segment_start_frame, segment_frame_count
                 nonlocal segment_started_unix_ms
                 segment_start_frame = expected_frame
@@ -495,53 +553,39 @@ class TrainingDataRecorder:
                 )
                 stem = f"segment-{segment_index:05d}"
                 final_path = self.config.root / relative_directory / f"{stem}.wav"
-                partial_path = final_path.with_suffix(".wav.partial")
-                raw_file = partial_path.open("wb")
+                assert self._spool_directory is not None
+                spool_path = self._spool_directory / f"{stem}.wav"
+                raw_file = spool_path.open("wb")
                 writer = wave.open(raw_file, "wb")
                 writer.setnchannels(self.config.channels)
                 writer.setsampwidth(self.config.sample_width)
                 writer.setframerate(self.config.sample_rate)
 
             def close_segment() -> None:
-                nonlocal writer, raw_file, partial_path, final_path
+                nonlocal writer, raw_file, spool_path, final_path
                 if writer is None or raw_file is None:
                     return
                 writer.close()
                 raw_file.flush()
-                os.fsync(raw_file.fileno())
                 raw_file.close()
-                assert partial_path is not None and final_path is not None
-                partial_path.replace(final_path)
-                digest = hashlib.sha256()
-                with final_path.open("rb") as source:
-                    for block in iter(lambda: source.read(1024 * 1024), b""):
-                        digest.update(block)
-                byte_count = final_path.stat().st_size
-                relative_path = final_path.relative_to(
-                    self.config.root
-                ).as_posix()
-                self.store.add_training_segment(
-                    session_id=self.session_id,
+                assert spool_path is not None and final_path is not None
+                byte_count = spool_path.stat().st_size
+                pending = _PendingSegment(
+                    spool_path=spool_path,
+                    final_path=final_path,
                     segment_index=segment_index,
-                    relative_path=relative_path,
                     start_frame=segment_start_frame,
                     frame_count=segment_frame_count,
                     started_unix_ms=segment_started_unix_ms,
-                    ended_unix_ms=int(
-                        segment_started_unix_ms
-                        + segment_frame_count
-                        * 1000
-                        / self.config.sample_rate
-                    ),
                     byte_count=byte_count,
-                    sha256=digest.hexdigest(),
                 )
                 with self._lock:
-                    self._segment_count += 1
-                    self._bytes_written += byte_count
+                    self._pending_segment_count += 1
+                    self._pending_segment_bytes += byte_count
+                self._segment_queue.put(pending)
                 writer = None
                 raw_file = None
-                partial_path = None
+                spool_path = None
                 final_path = None
 
             def write_aligned(data: bytes) -> None:
@@ -570,7 +614,11 @@ class TrainingDataRecorder:
 
             def projected_storage_bytes(additional_frames: int = 0) -> int:
                 """Conservatively include open PCM and future WAV headers."""
-                projected = self._base_bytes + self._bytes_written
+                with self._lock:
+                    durable_or_queued = (
+                        self._bytes_written + self._pending_segment_bytes
+                    )
+                projected = self._base_bytes + durable_or_queued
                 frames_left = max(0, int(additional_frames))
                 if writer is not None:
                     projected += (
@@ -597,6 +645,19 @@ class TrainingDataRecorder:
                     self._state = "quota"
                     self._error = reason
 
+            last_free_space_check = 0.0
+            cached_free_space = shutil.disk_usage(self.config.root).free
+
+            def available_storage_bytes(*, force: bool = False) -> int:
+                nonlocal last_free_space_check, cached_free_space
+                now = time.monotonic()
+                if force or now - last_free_space_check >= 5.0:
+                    cached_free_space = shutil.disk_usage(
+                        self.config.root
+                    ).free
+                    last_free_space_check = now
+                return cached_free_space
+
             while True:
                 try:
                     packet = self._queue.get(timeout=0.25)
@@ -604,10 +665,9 @@ class TrainingDataRecorder:
                     with self._lock:
                         accepting = self._accepting
                     if not accepting:
-                        # A submission may already own a frame range while its
-                        # semantic payload is still being built. Do not finalize
-                        # ahead of it merely because shutdown made the queue
-                        # temporarily empty.
+                        # A submission may already own a frame range before it
+                        # reaches the queue. Do not finalize ahead of it merely
+                        # because shutdown made the queue temporarily empty.
                         if self._submit_lock.acquire(timeout=0.25):
                             self._submit_lock.release()
                             break
@@ -648,7 +708,7 @@ class TrainingDataRecorder:
                             )
                         continue
                     if (
-                        shutil.disk_usage(self.config.root).free
+                        available_storage_bytes()
                         < self.config.minimum_free_bytes + required_bytes
                     ):
                         enter_quota(
@@ -700,9 +760,57 @@ class TrainingDataRecorder:
                     center_frame = packet.start_frame + packet_frames // 2
                     with self._lock:
                         self._frames_written = expected_frame
-                    for feature_frame, semantic_payload in (
-                        packet.semantic_samples
-                    ):
+                    annotation: dict[str, Any] | None = None
+                    if packet.feature_frames:
+                        try:
+                            candidate = packet.semantic_payload
+                            annotation = (
+                                candidate()
+                                if callable(candidate)
+                                else candidate
+                            )
+                            if not isinstance(annotation, dict):
+                                raise TypeError(
+                                    "semantic payload must be a dictionary"
+                                )
+                        except Exception as error:
+                            # PCM is authoritative and has already been written.
+                            # Semantic enrichment is deliberately best-effort
+                            # and cannot delay or fail the live submitter.
+                            annotation = None
+                            with self._lock:
+                                self._annotation_errors += 1
+                                self._last_annotation_error = str(error)
+                    semantic_samples = (
+                        tuple(
+                            (
+                                feature_frame,
+                                {
+                                    **annotation,
+                                    "semantic_resampling": {
+                                        "method": (
+                                            "nearest_packet_sample_hold"
+                                        ),
+                                        "target_audio_frame": feature_frame,
+                                        "source_audio_frame": center_frame,
+                                        "source_offset_frames": (
+                                            center_frame - feature_frame
+                                        ),
+                                        "interval_frames": (
+                                            self.config.feature_interval_frames
+                                        ),
+                                    },
+                                },
+                            )
+                            for feature_frame in packet.feature_frames
+                        )
+                        if annotation is not None
+                        else ()
+                    )
+                    if semantic_samples:
+                        with self._lock:
+                            self._semantic_frames += len(semantic_samples)
+                    for feature_frame, semantic_payload in semantic_samples:
                         offset_ms = round(
                             (feature_frame - center_frame)
                             * 1000
@@ -743,7 +851,7 @@ class TrainingDataRecorder:
                             "Training capture reached its storage limit."
                         )
                     elif (
-                        shutil.disk_usage(self.config.root).free
+                        available_storage_bytes()
                         < self.config.minimum_free_bytes
                     ):
                         enter_quota(
@@ -792,6 +900,13 @@ class TrainingDataRecorder:
                 except Exception:
                     pass
         finally:
+            # The audio writer only stages complete WAVs in RAM.  Let the
+            # persistence worker drain every staged segment before publishing
+            # the final session manifest and database summary.
+            self._segment_queue.put(None)
+            persist_thread = self._persist_thread
+            if persist_thread is not None:
+                persist_thread.join()
             with self._lock:
                 if self._state == "quota":
                     status = "quota"
@@ -840,6 +955,77 @@ class TrainingDataRecorder:
                         self._error
                         or f"Could not finalize training index: {error}"
                     )
+
+            spool_directory = self._spool_directory
+            if spool_directory is not None:
+                try:
+                    spool_directory.rmdir()
+                except OSError:
+                    # A retained spool file is evidence of an incomplete disk
+                    # transfer and must not be silently deleted.
+                    pass
+
+    def _persist_segments(self) -> None:
+        """Move completed RAM-spooled WAVs to durable storage sequentially."""
+
+        while True:
+            pending = self._segment_queue.get()
+            try:
+                if pending is None:
+                    return
+                started = time.monotonic()
+                partial_path = pending.final_path.with_suffix(".wav.partial")
+                digest = hashlib.sha256()
+                with pending.spool_path.open("rb") as source, partial_path.open(
+                    "wb"
+                ) as target:
+                    for block in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(block)
+                        target.write(block)
+                    target.flush()
+                    os.fsync(target.fileno())
+                partial_path.replace(pending.final_path)
+                relative_path = pending.final_path.relative_to(
+                    self.config.root
+                ).as_posix()
+                self.store.add_training_segment(
+                    session_id=self.session_id,
+                    segment_index=pending.segment_index,
+                    relative_path=relative_path,
+                    start_frame=pending.start_frame,
+                    frame_count=pending.frame_count,
+                    started_unix_ms=pending.started_unix_ms,
+                    ended_unix_ms=int(
+                        pending.started_unix_ms
+                        + pending.frame_count
+                        * 1000
+                        / self.config.sample_rate
+                    ),
+                    byte_count=pending.byte_count,
+                    sha256=digest.hexdigest(),
+                )
+                duration_ms = (time.monotonic() - started) * 1000.0
+                with self._lock:
+                    self._segment_count += 1
+                    self._persisted_segment_count += 1
+                    self._bytes_written += pending.byte_count
+                    self._pending_segment_count -= 1
+                    self._pending_segment_bytes -= pending.byte_count
+                    self._last_persist_duration_ms = round(duration_ms, 2)
+                    self._maximum_persist_duration_ms = max(
+                        self._maximum_persist_duration_ms,
+                        duration_ms,
+                    )
+                pending.spool_path.unlink(missing_ok=True)
+            except Exception as error:
+                with self._lock:
+                    self._accepting = False
+                    self._state = "error"
+                    self._error = self._error or (
+                        f"Could not persist RAM-spooled audio: {error}"
+                    )
+            finally:
+                self._segment_queue.task_done()
 
     def _write_capture_manifest(
         self,
@@ -1091,7 +1277,10 @@ def export_training_dataset(
                     json.dumps(example, sort_keys=True) + "\n"
                 )
             recordings = _recording_sequences(
-                exported_session, verified_segments, frames
+                exported_session,
+                verified_segments,
+                frames,
+                capture=capture,
             )
             for recording in recordings:
                 recording_file.write(
@@ -1195,6 +1384,166 @@ def export_training_dataset(
         "path": str(export_directory),
         "manifest": manifest,
     }
+
+
+def export_research_session_index(
+    store: SongMemoryStore,
+    root: Path,
+    session_id: str,
+) -> dict[str, Any]:
+    """Build the bounded index needed to queue teachers for one new capture.
+
+    The full operator export intentionally contains every semantic frame and
+    derived choreography sequence. Rebuilding that historical dataset after
+    each Live stop scales quadratically and can take longer than application
+    shutdown. Teacher preparation only needs verified segment clips and track
+    boundaries, so this path projects compact identities directly in SQLite.
+    """
+
+    session = next(
+        (
+            item
+            for item in store.training_sessions()
+            if str(item["id"]) == str(session_id)
+        ),
+        None,
+    )
+    if session is None:
+        raise ValueError(f"unknown training session: {session_id}")
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    stem = (
+        f"research-{timestamp}-"
+        f"{hashlib.sha256(str(session_id).encode()).hexdigest()[:10]}"
+    )
+    export_directory = root / "exports" / stem
+    working_directory = export_directory.with_name(
+        f".{export_directory.name}.partial"
+    )
+    collision = 0
+    while export_directory.exists() or working_directory.exists():
+        collision += 1
+        export_directory = root / "exports" / f"{stem}-{collision:02d}"
+        working_directory = export_directory.with_name(
+            f".{export_directory.name}.partial"
+        )
+    working_directory.mkdir(parents=True, exist_ok=False)
+
+    segments = store.training_segments(str(session_id))
+    frames = store.training_frame_identities(str(session_id))
+    capture = _load_capture_manifest(root, session)
+    verified_segments, integrity_errors = _verify_segments(
+        root, session, segments
+    )
+    continuity = _session_continuity(
+        session, verified_segments, capture
+    )
+    integrity_errors.extend(continuity["errors"])
+    warnings = list(continuity["warnings"])
+    if capture is None:
+        warnings.append(
+            {
+                "session_id": str(session_id),
+                "code": "capture_manifest_unavailable",
+                "message": "The session capture manifest could not be read.",
+            }
+        )
+    exported_session = {
+        **session,
+        "capture_id": (
+            capture.get("capture_id") if capture is not None else None
+        ),
+        "capture_manifest": (
+            (
+                Path(str(session["relative_path"])) / "capture.json"
+            ).as_posix()
+            if capture is not None
+            else None
+        ),
+        "integrity": {
+            "timeline_complete": continuity["timeline_complete"],
+            "sample_accurate": continuity["sample_accurate"],
+            "source_audio_complete": continuity["source_audio_complete"],
+            "substituted_silence_frames": continuity[
+                "substituted_silence_frames"
+            ],
+        },
+    }
+    recordings = _recording_sequences(
+        exported_session,
+        verified_segments,
+        frames,
+        capture=capture,
+    )
+    files = {
+        "sessions": "sessions.jsonl",
+        "segments": "segments.jsonl",
+        "frames": "frames.jsonl",
+        "feedback_examples": "feedback_examples.jsonl",
+        "annotation_examples": "annotation_examples.jsonl",
+        "recordings": "recordings.jsonl",
+        "student_sequences": "student_sequences.jsonl",
+        "choreography_sequences": "choreography_sequences.jsonl",
+    }
+    for filename in files.values():
+        (working_directory / filename).touch()
+    with (working_directory / files["sessions"]).open(
+        "w", encoding="utf-8"
+    ) as target:
+        target.write(json.dumps(exported_session, sort_keys=True) + "\n")
+    with (working_directory / files["segments"]).open(
+        "w", encoding="utf-8"
+    ) as target:
+        for segment in verified_segments:
+            target.write(json.dumps(segment, sort_keys=True) + "\n")
+    with (working_directory / files["recordings"]).open(
+        "w", encoding="utf-8"
+    ) as target:
+        for recording in recordings:
+            target.write(json.dumps(recording, sort_keys=True) + "\n")
+    split_counts = {"train": 0, "validation": 0, "test": 0}
+    supervision = {"complete": 0, "partial": 0, "unknown": 0}
+    for recording in recordings:
+        split_counts[str(recording["split"])] += 1
+        classification = str(
+            recording["structure_supervision"]["classification"]
+        )
+        supervision[classification] = supervision.get(classification, 0) + 1
+    manifest = {
+        "format": "lumen_training_dataset",
+        "version": 2,
+        "purpose": "incremental_teacher_preparation",
+        "created_unix_ms": int(time.time() * 1000),
+        "dataset_root": str(root),
+        "audio_format": {
+            "container": "wav",
+            "encoding": "signed_pcm_16_little_endian",
+            "timing_authority": "audio_frame_index",
+        },
+        "files": files,
+        "counts": {
+            "sessions": 1,
+            "segments": len(segments),
+            "semantic_frames": len(frames),
+            "feedback_examples": 0,
+            "annotation_examples": 0,
+            "recordings": len(recordings),
+            "student_sequences": 0,
+            "choreography_sequences": 0,
+            "splits": split_counts,
+            "structure_supervision": supervision,
+        },
+        "validation": {
+            "errors": integrity_errors,
+            "warnings": warnings,
+            "valid": not integrity_errors,
+        },
+    }
+    (working_directory / "dataset.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    working_directory.replace(export_directory)
+    return {"path": str(export_directory), "manifest": manifest}
 
 
 def _load_capture_manifest(
@@ -1414,6 +1763,8 @@ def _recording_sequences(
     session: dict[str, Any],
     segments: list[dict[str, Any]],
     frames: list[dict[str, Any]],
+    *,
+    capture: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     total_frames = int(session["frames_written"])
     if total_frames <= 0:
@@ -1536,6 +1887,29 @@ def _recording_sequences(
             isinstance(session_integrity, dict)
             and session_integrity.get("source_audio_complete")
         )
+        source_gap_frames = 0
+        timeline = capture.get("timeline") if isinstance(capture, dict) else None
+        raw_gaps = timeline.get("gaps") if isinstance(timeline, dict) else None
+        if isinstance(raw_gaps, list):
+            for gap in raw_gaps:
+                if not isinstance(gap, dict):
+                    continue
+                gap_start = max(0, int(gap.get("start_frame") or 0))
+                gap_end = gap_start + max(0, int(gap.get("frame_count") or 0))
+                source_gap_frames += max(
+                    0,
+                    min(end_frame, gap_end) - max(start_frame, gap_start),
+                )
+            # A capture can have a gap in one song while later songs remain
+            # sample-complete. Session-wide completeness must not discard the
+            # unaffected recordings. Missing legacy gap locations remain
+            # conservative because raw_gaps is unavailable in that case.
+            source_audio_complete = bool(
+                isinstance(session_integrity, dict)
+                and session_integrity.get("timeline_complete")
+                and int(session.get("dropped_frames") or 0) == 0
+                and source_gap_frames == 0
+            )
         structure_supervision = structure_supervision_completeness(
             track_duration_ms=media.get("duration_ms"),
             start_position_ms=run["first_position_ms"],
@@ -1562,6 +1936,8 @@ def _recording_sequences(
                 "first_position_ms": run["first_position_ms"],
                 "last_position_ms": run["last_position_ms"],
                 "semantic_frame_count": run["semantic_frame_count"],
+                "source_audio_complete": source_audio_complete,
+                "source_gap_frames": source_gap_frames,
                 "audio_clips": clips,
                 "content_fingerprint": (
                     f"sha256:{content_digest}"

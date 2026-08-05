@@ -39,6 +39,10 @@ class OpenDmxStatus:
     universe: int
     frame_rate_hz: float
     frames_sent: int
+    control_updates: int
+    content_changes: int
+    last_control_update_age_ms: float | None
+    last_content_change_age_ms: float | None
     last_error: str | None
 
 
@@ -272,6 +276,10 @@ class OpenDmxUsbOutput:
         self._frame_lock = threading.Lock()
         self._stop = threading.Event()
         self.frames_sent = 0
+        self.control_updates = 0
+        self.content_changes = 0
+        self._last_control_update_at: float | None = None
+        self._last_content_change_at: float | None = None
         self.last_error: Exception | None = None
         self._thread: threading.Thread | None = None
         if start_thread:
@@ -309,8 +317,15 @@ class OpenDmxUsbOutput:
 
     def send(self, frame: DMXFrame) -> None:
         data = frame.universe_data(self.universe)
+        now = time.monotonic()
         with self._frame_lock:
+            changed = data != self._frame
             self._frame = data
+            self.control_updates += 1
+            self._last_control_update_at = now
+            if changed:
+                self.content_changes += 1
+                self._last_content_change_at = now
 
     def blackout(self) -> None:
         with self._frame_lock:
@@ -341,11 +356,29 @@ class OpenDmxUsbOutput:
 
     @property
     def status(self) -> OpenDmxStatus:
+        now = time.monotonic()
+        with self._frame_lock:
+            control_updates = self.control_updates
+            content_changes = self.content_changes
+            last_control_update_at = self._last_control_update_at
+            last_content_change_at = self._last_content_change_at
         return OpenDmxStatus(
             backend=self.backend.description,
             universe=self.universe,
             frame_rate_hz=self.frame_rate_hz,
             frames_sent=self.frames_sent,
+            control_updates=control_updates,
+            content_changes=content_changes,
+            last_control_update_age_ms=(
+                None
+                if last_control_update_at is None
+                else max(0.0, (now - last_control_update_at) * 1000.0)
+            ),
+            last_content_change_age_ms=(
+                None
+                if last_content_change_at is None
+                else max(0.0, (now - last_content_change_at) * 1000.0)
+            ),
             last_error=None if self.last_error is None else str(self.last_error),
         )
 

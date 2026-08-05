@@ -8,6 +8,7 @@ import unittest
 from lumen_engine.datasets import (
     deterministic_track_split,
     normalize_structure_label,
+    normalize_techno_structure_label,
     parse_ccmusic,
     parse_ccmusic_label_records,
     parse_edm98,
@@ -15,10 +16,13 @@ from lumen_engine.datasets import (
     parse_salami,
 )
 from lumen_engine.structure import (
+    CANONICAL_TECHNO_SECTIONS,
     ContentRole,
     EnergySection,
     FunctionalSection,
     StructureValidationError,
+    TechnoSection,
+    TransitionEvent,
     validate_dataset,
 )
 
@@ -42,6 +46,36 @@ class StructureDatasetTests(unittest.TestCase):
             normalize_structure_label("Breakdown").energy,
             EnergySection.BREAKDOWN,
         )
+        self.assertEqual(
+            normalize_structure_label("Drop").energy,
+            EnergySection.DROP,
+        )
+        self.assertEqual(
+            normalize_structure_label("Release").energy,
+            EnergySection.DROP,
+        )
+        self.assertNotIn("release", CANONICAL_TECHNO_SECTIONS)
+        self.assertEqual(
+            CANONICAL_TECHNO_SECTIONS,
+            tuple(section.value for section in TechnoSection),
+        )
+        self.assertEqual(
+            tuple(event.value for event in TransitionEvent),
+            (
+                "section_start",
+                "energy_rise",
+                "energy_fall",
+                "build_start",
+                "drop_onset",
+                "breakdown_onset",
+                "groove_return",
+                "outro_start",
+                "track_end",
+            ),
+        )
+        techno_intro = normalize_techno_structure_label("intro")
+        self.assertEqual(techno_intro.energy, EnergySection.INTRO)
+        self.assertEqual(techno_intro.functional, FunctionalSection.UNKNOWN)
 
     def test_edm98_jsonl_adapter_preserves_deezer_identity_and_energy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -66,8 +100,14 @@ class StructureDatasetTests(unittest.TestCase):
             self.assertEqual(track.identity.external_ids["deezer"], "1060564312")
             self.assertEqual(track.identity.audio_filename, payload["file_path"])
             self.assertEqual(track.segments[1].label.energy, EnergySection.BUILD)
-            self.assertEqual(track.segments[3].label.energy, EnergySection.RELEASE)
+            self.assertEqual(track.segments[3].label.energy, EnergySection.DROP)
             self.assertTrue(track.boundaries[-1].terminal)
+            self.assertEqual(
+                track.boundaries[3].event, TransitionEvent.DROP_ONSET
+            )
+            self.assertEqual(
+                track.boundaries[-1].event, TransitionEvent.TRACK_END
+            )
             self.assertEqual(track.segments[0].provenance.source, "edm98")
 
     def test_edm98_rejects_duplicate_identity(self) -> None:

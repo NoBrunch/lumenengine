@@ -6,15 +6,23 @@ from array import array
 from collections import deque
 from dataclasses import dataclass
 import math
+import queue
 import subprocess
-import sys
+import threading
 import time
-from typing import Iterator
+import sys
+from typing import Any, Iterator
 
 import numpy as np
 
 from lumen_engine.models import MusicalObservation, clamp
-from lumen_engine.beat import BeatTracker, SpectralTempoTracker
+from lumen_engine.structure import transition_event_for
+from lumen_engine.beat import (
+    BeatState,
+    BeatTracker,
+    SpectralTempoTracker,
+    TempoSourceArbiter,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +31,28 @@ class AudioCaptureConfig:
     sample_rate: int = 48_000
     channels: int = 2
     chunk_frames: int = 2_048
+
+
+class SourcePcm(bytes):
+    """PCM bytes tagged with their position on the capture sample clock."""
+
+    source_start_frame: int
+    frame_count: int
+    timestamp_s: float
+
+    def __new__(
+        cls,
+        pcm: bytes,
+        *,
+        source_start_frame: int,
+        frame_count: int,
+        timestamp_s: float,
+    ) -> "SourcePcm":
+        value = super().__new__(cls, pcm)
+        value.source_start_frame = int(source_start_frame)
+        value.frame_count = int(frame_count)
+        value.timestamp_s = float(timestamp_s)
+        return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +101,7 @@ class RealtimeAudioAnalyzer:
         self._previous_loudness = 0.0
         self._beat_tracker = BeatTracker()
         self._tempo_tracker: SpectralTempoTracker | None = None
+        self._tempo_arbiter = TempoSourceArbiter()
         self._tempo_update_rate = 0.0
         self._noise_floor = 0.0005
         self._level_envelope = 0.005
@@ -90,11 +121,40 @@ class RealtimeAudioAnalyzer:
         self._section_candidate_since: float | None = None
         self._section_fast_level = 0.0
         self._section_slow_level = 0.0
+        self._section_reference_level = 0.0
+        self._section_fast_rhythm = 0.0
+        self._section_slow_rhythm = 0.0
+        self._section_fast_brightness = 0.0
+        self._section_slow_brightness = 0.0
+        self._section_fast_bass = 0.0
+        self._section_slow_bass = 0.0
         self._section_last_timestamp: float | None = None
         self._silence_started_at: float | None = None
         self._tempo_reset_for_silence = False
-        self._release_refractory_until = float("-inf")
+        self._tempo_discarded_for_silence = False
+        self._drop_refractory_until = float("-inf")
+        self._last_transition_event: str | None = None
+        self._last_spectral_beat_state = BeatState(0.0, False, 0, 0.0, 0.0)
+        self._last_fallback_beat_state = BeatState(0.0, False, 0, 0.0, 0.0)
         self.last_metrics = AudioInputMetrics.silence(channels=channels)
+
+    @property
+    def tempo_diagnostics(self) -> dict[str, object]:
+        diagnostics = dict(self._tempo_arbiter.diagnostics)
+        diagnostics["spectral"] = (
+            self._tempo_tracker.diagnostics
+            if self._tempo_tracker is not None
+            else {}
+        )
+        diagnostics["spectral_state"] = {
+            "bpm": self._last_spectral_beat_state.bpm,
+            "confidence": self._last_spectral_beat_state.confidence,
+        }
+        diagnostics["fallback_state"] = {
+            "bpm": self._last_fallback_beat_state.bpm,
+            "confidence": self._last_fallback_beat_state.confidence,
+        }
+        return diagnostics
 
     def reset(self) -> None:
         """Reset temporal analysis at a recording/seek boundary."""
@@ -178,14 +238,17 @@ class RealtimeAudioAnalyzer:
             self._tempo_update_rate = update_rate
             self._tempo_tracker = SpectralTempoTracker(update_rate)
         spectral_beat_state = self._tempo_tracker.update(beat_drive, timestamp)
-        beat_state = (
-            spectral_beat_state
-            if spectral_beat_state.bpm > 0.0
-            else fallback_beat_state
+        self._last_spectral_beat_state = spectral_beat_state
+        self._last_fallback_beat_state = fallback_beat_state
+        beat_state = self._tempo_arbiter.select(
+            spectral=spectral_beat_state,
+            fallback=fallback_beat_state,
+            now=timestamp,
         )
         if signal_present:
             self._silence_started_at = None
             self._tempo_reset_for_silence = False
+            self._tempo_discarded_for_silence = False
             quiet_for = 0.0
         else:
             if self._silence_started_at is None:
@@ -242,13 +305,30 @@ class RealtimeAudioAnalyzer:
             if quiet_for >= 0.75:
                 bpm = None
             if quiet_for >= 1.5 and not self._tempo_reset_for_silence:
-                self._beat_tracker = BeatTracker()
-                self._tempo_tracker = SpectralTempoTracker(self._tempo_update_rate)
+                # Stop publishing the clock, but preserve its private tempo
+                # hypothesis across a musical breakdown. Spotify/seek
+                # boundaries reset the whole analyzer separately. This avoids
+                # reacquiring the half-time octave when the same song returns.
+                self._tempo_arbiter.reset()
                 self._tempo_reset_for_silence = True
+            if quiet_for >= 30.0 and not self._tempo_discarded_for_silence:
+                self._beat_tracker = BeatTracker()
+                self._tempo_tracker = SpectralTempoTracker(
+                    self._tempo_update_rate
+                )
+                self._tempo_discarded_for_silence = True
         beat_phase = (beat_state.bar_progress * 4.0) % 1.0
         novelty = clamp(0.65 * onset + 0.35 * abs(high - low), 0.0, 1.0)
         section, section_confidence = self._classify_section(
-            timestamp, loudness, onset, low, novelty
+            timestamp,
+            loudness,
+            onset,
+            low,
+            novelty,
+            rhythm_density=self._rhythm_density,
+            spectral_brightness=spectral_brightness,
+            harmonic_change=harmonic_change,
+            arrangement_change=self._arrangement_change,
         )
         return MusicalObservation(
             timestamp_s=timestamp,
@@ -270,6 +350,7 @@ class RealtimeAudioAnalyzer:
             rhythm_density=clamp(self._rhythm_density, 0.0, 1.0),
             harmonic_change=harmonic_change,
             arrangement_change=clamp(self._arrangement_change, 0.0, 1.0),
+            transition_event=self._last_transition_event,
         )
 
     def _classify_section(
@@ -279,18 +360,46 @@ class RealtimeAudioAnalyzer:
         onset: float,
         low_energy: float,
         novelty: float,
+        *,
+        rhythm_density: float | None = None,
+        spectral_brightness: float | None = None,
+        harmonic_change: float = 0.0,
+        arrangement_change: float | None = None,
     ) -> tuple[str, float]:
-        """Track stable musical regions with hysteresis and transition memory.
+        """Track causal techno energy regions from arrangement trajectories.
 
-        Spectral features arrive every ~43 ms. Treating each packet as a whole
-        song section caused the dashboard to alternate groove/build on normal
-        notes. This tracker compares short- and long-term level, requires a
-        candidate to persist, and holds a release long enough to be meaningful.
+        The first implementation calculated rhythm, timbre, harmony, and
+        arrangement change but classified sections almost entirely from
+        loudness.  This tracker uses independent short/long trajectories and a
+        slowly decaying song reference.  It remains causal: no future audio or
+        metadata timing is used.
         """
+        self._last_transition_event = None
+        rhythm = clamp(
+            self._rhythm_density if rhythm_density is None else rhythm_density,
+            0.0,
+            1.0,
+        )
+        brightness = clamp(
+            0.0 if spectral_brightness is None else spectral_brightness,
+            0.0,
+            1.0,
+        )
+        arrangement = clamp(
+            self._arrangement_change
+            if arrangement_change is None
+            else arrangement_change,
+            0.0,
+            1.0,
+        )
         if self._section_last_timestamp is None:
             elapsed = 1.0 / 24.0
             self._section_fast_level = loudness
             self._section_slow_level = loudness
+            self._section_reference_level = loudness
+            self._section_fast_rhythm = self._section_slow_rhythm = rhythm
+            self._section_fast_brightness = self._section_slow_brightness = brightness
+            self._section_fast_bass = self._section_slow_bass = low_energy
             self._section_started_at = timestamp
         else:
             elapsed = clamp(timestamp - self._section_last_timestamp, 0.005, 0.25)
@@ -299,46 +408,83 @@ class RealtimeAudioAnalyzer:
         slow_alpha = 1.0 - math.exp(-elapsed / 5.5)
         self._section_fast_level += fast_alpha * (loudness - self._section_fast_level)
         self._section_slow_level += slow_alpha * (loudness - self._section_slow_level)
-        trend = self._section_fast_level - self._section_slow_level
+        self._section_fast_rhythm += fast_alpha * (rhythm - self._section_fast_rhythm)
+        self._section_slow_rhythm += slow_alpha * (rhythm - self._section_slow_rhythm)
+        self._section_fast_brightness += fast_alpha * (
+            brightness - self._section_fast_brightness
+        )
+        self._section_slow_brightness += slow_alpha * (
+            brightness - self._section_slow_brightness
+        )
+        self._section_fast_bass += fast_alpha * (low_energy - self._section_fast_bass)
+        self._section_slow_bass += slow_alpha * (low_energy - self._section_slow_bass)
+        # Remember meaningful program level for long enough that a sustained
+        # breakdown remains visibly soft after the five-second average adapts.
+        reference_decay = math.exp(-elapsed / 45.0)
+        self._section_reference_level = max(
+            loudness,
+            self._section_reference_level * reference_decay,
+        )
+        level_trend = self._section_fast_level - self._section_slow_level
+        rhythm_trend = self._section_fast_rhythm - self._section_slow_rhythm
+        brightness_trend = (
+            self._section_fast_brightness - self._section_slow_brightness
+        )
+        bass_trend = self._section_fast_bass - self._section_slow_bass
+        relative_level = loudness / max(0.08, self._section_reference_level)
         section_age = timestamp - (
             timestamp if self._section_started_at is None else self._section_started_at
         )
 
-        if self._section == "release" and section_age < 1.6:
-            return "release", clamp(0.72 + 0.18 * onset, 0.0, 1.0)
-        if self._section == "release":
-            # Release is a bounded transition event, not a persistent region.
-            # Return to groove unconditionally so ordinary post-drop
-            # transients cannot trap the classifier in release forever.
-            self._section = "groove"
-            self._section_started_at = timestamp
-            self._section_candidate = None
-            self._section_candidate_since = None
-            section_age = 0.0
-
-        strong_release = (
-            onset >= 0.82
-            and low_energy >= 0.32
-            and novelty >= 0.58
-            and loudness >= max(0.34, self._section_slow_level * 0.82)
+        rise_score = clamp(
+            0.34 * clamp(level_trend / 0.12, 0.0, 1.0)
+            + 0.24 * clamp(rhythm_trend / 0.16, 0.0, 1.0)
+            + 0.16 * clamp(brightness_trend / 0.16, 0.0, 1.0)
+            + 0.12 * clamp(bass_trend / 0.16, 0.0, 1.0)
+            + 0.14 * max(novelty, arrangement),
+            0.0,
+            1.0,
         )
-        if (
-            self._section != "release"
-            and timestamp >= self._release_refractory_until
-            and strong_release
-            and (self._section == "build" or trend >= 0.045)
-        ):
-            candidate = "release"
+        withdrawal_score = clamp(
+            0.46 * clamp((0.72 - relative_level) / 0.45, 0.0, 1.0)
+            + 0.22 * clamp(-rhythm_trend / 0.14, 0.0, 1.0)
+            + 0.14 * clamp(-brightness_trend / 0.14, 0.0, 1.0)
+            + 0.10 * clamp(-bass_trend / 0.14, 0.0, 1.0)
+            + 0.08 * arrangement,
+            0.0,
+            1.0,
+        )
+        high_state = bool(
+            relative_level >= 0.78
+            and loudness >= 0.34
+            and (rhythm >= 0.30 or low_energy >= 0.30)
+        )
+        drop_onset = bool(
+            timestamp >= self._drop_refractory_until
+            and high_state
+            and (onset >= 0.72 or arrangement >= 0.42 or novelty >= 0.58)
+            and (
+                (self._section == "build" and section_age >= 2.0)
+                or (self._section == "breakdown" and relative_level >= 0.88)
+            )
+        )
+        if drop_onset:
+            candidate = "drop"
             required = 0.0
-        elif loudness <= max(0.10, self._section_slow_level * 0.48):
+        elif withdrawal_score >= 0.46 and relative_level <= 0.72:
             candidate = "breakdown"
-            required = 0.75
-        elif trend >= 0.055 and novelty >= 0.30 and loudness >= 0.26:
+            required = 0.65
+        elif self._section == "drop" and high_state and withdrawal_score < 0.40:
+            # A drop is a sustained state. Residual upward trajectories after
+            # the onset must not immediately relabel it as another build.
+            candidate = "drop"
+            required = 0.0
+        elif rise_score >= 0.42 and loudness >= 0.22:
             candidate = "build"
-            required = 1.10
+            required = 0.90
         else:
             candidate = "groove"
-            required = 1.35
+            required = 1.10
 
         if candidate != self._section_candidate:
             self._section_candidate = candidate
@@ -348,26 +494,40 @@ class RealtimeAudioAnalyzer:
             if self._section_candidate_since is None
             else self._section_candidate_since
         )
-        minimum_hold = 1.0 if self._section == "breakdown" else 2.4
+        minimum_hold = 0.8 if self._section == "breakdown" else 1.8
         if (
             candidate != self._section
             and candidate_age >= required
-            and (section_age >= minimum_hold or candidate == "release")
+            and (section_age >= minimum_hold or candidate == "drop")
         ):
+            previous = self._section
             self._section = candidate
             self._section_started_at = timestamp
-            if candidate == "release":
-                self._release_refractory_until = timestamp + 3.5
+            if candidate == "drop":
+                self._drop_refractory_until = timestamp + 3.5
+            self._last_transition_event = transition_event_for(
+                previous, candidate
+            ).value
+            if previous == candidate:
+                self._last_transition_event = None
             self._section_candidate = None
             self._section_candidate_since = None
             section_age = 0.0
 
         stability = clamp(section_age / 3.0, 0.0, 1.0)
         evidence = {
-            "breakdown": clamp((0.24 - loudness) / 0.20, 0.0, 1.0),
-            "build": clamp(trend / 0.14 + novelty * 0.35, 0.0, 1.0),
-            "release": clamp(onset * 0.70 + novelty * 0.30, 0.0, 1.0),
-            "groove": clamp(0.45 + 0.35 * (1.0 - novelty), 0.0, 1.0),
+            "breakdown": withdrawal_score,
+            "build": rise_score,
+            "drop": clamp(
+                0.45 * relative_level + 0.30 * rhythm + 0.25 * low_energy,
+                0.0,
+                1.0,
+            ),
+            "groove": clamp(
+                0.42 + 0.24 * (1.0 - arrangement) + 0.18 * rhythm,
+                0.0,
+                1.0,
+            ),
         }[self._section]
         return self._section, clamp(0.35 + 0.35 * stability + 0.30 * evidence, 0.0, 1.0)
 
@@ -571,6 +731,7 @@ class AlsaLineIn:
     def __init__(self, config: AudioCaptureConfig | None = None) -> None:
         self.config = config or AudioCaptureConfig()
         self._process: subprocess.Popen[bytes] | None = None
+        self._process_lock = threading.RLock()
 
     def chunks(self) -> Iterator[bytes]:
         if self._process is not None:
@@ -590,14 +751,16 @@ class AlsaLineIn:
             "-t",
             "raw",
         ]
-        self._process = subprocess.Popen(command, stdout=subprocess.PIPE)
-        assert self._process.stdout is not None
+        process = subprocess.Popen(command, stdout=subprocess.PIPE)
+        with self._process_lock:
+            self._process = process
+        assert process.stdout is not None
         chunk_bytes = config.chunk_frames * config.channels * 2
         try:
             while True:
-                data = self._process.stdout.read(chunk_bytes)
+                data = process.stdout.read(chunk_bytes)
                 if not data:
-                    code = self._process.poll()
+                    code = process.poll()
                     if code not in (None, 0):
                         raise RuntimeError(f"arecord stopped with exit code {code}")
                     break
@@ -606,18 +769,293 @@ class AlsaLineIn:
             self.close()
 
     def close(self) -> None:
-        if self._process is None:
+        with self._process_lock:
+            process = self._process
+            self._process = None
+        if process is None:
             return
-        if self._process.poll() is None:
-            self._process.terminate()
+        if process.poll() is None:
+            process.terminate()
             try:
-                self._process.wait(timeout=2)
+                process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait(timeout=2)
-        self._process = None
+                process.kill()
+                process.wait(timeout=2)
 
     def __enter__(self) -> "AlsaLineIn":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedPcmChunk:
+    """One PCM block located on the authoritative ALSA sample clock."""
+
+    pcm: SourcePcm
+    captured_monotonic_s: float
+    source_start_frame: int
+    frame_count: int
+    timestamp_s: float
+
+
+class ContinuouslyDrainedAudio:
+    """Drain an audio source on its own thread and expose an ordered queue.
+
+    The analyzer and HTTP interface may pause without back-pressuring
+    ``arecord``. A minute of PCM costs only tens of megabytes on the target
+    machine, so ordinary filesystem and database pauses are absorbed instead
+    of becoming holes in the authoritative audio timeline. Exceptional
+    overflow still collapses stale packets and remains explicit in diagnostics.
+    """
+
+    def __init__(
+        self,
+        source: AlsaLineIn,
+        *,
+        max_chunks: int | None = None,
+        overflow_low_water_chunks: int | None = None,
+        buffer_seconds: float = 60.0,
+    ) -> None:
+        if buffer_seconds <= 0.0:
+            raise ValueError("buffer_seconds must be positive")
+        if max_chunks is None:
+            source_config = getattr(source, "config", AudioCaptureConfig())
+            max_chunks = max(
+                8,
+                round(
+                    buffer_seconds
+                    * source_config.sample_rate
+                    / source_config.chunk_frames
+                ),
+            )
+        if max_chunks < 1:
+            raise ValueError("max_chunks must be positive")
+        if overflow_low_water_chunks is None:
+            overflow_low_water_chunks = min(
+                max(1, max_chunks // 4), max_chunks - 1
+            )
+        if not 0 <= overflow_low_water_chunks < max_chunks:
+            raise ValueError(
+                "overflow_low_water_chunks must be in [0, max_chunks)"
+            )
+        self.source = source
+        self._queue: queue.Queue[CapturedPcmChunk] = queue.Queue(
+            maxsize=max_chunks
+        )
+        self._stop = threading.Event()
+        self._overflow_low_water_chunks = overflow_low_water_chunks
+        source_config = getattr(source, "config", AudioCaptureConfig())
+        self._buffer_seconds = max_chunks * source_config.chunk_frames / (
+            source_config.sample_rate
+        )
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
+        self._maximum_depth = 0
+        self._sample_clock_origin_s: float | None = None
+        self._source_frames = 0
+        self._packets_read = 0
+        self._last_packet_monotonic_s: float | None = None
+        self._dropped_packets = 0
+        self._dropped_frames = 0
+        self._dropped_ranges: list[dict[str, int | str]] = []
+        self._state_lock = threading.Lock()
+
+    @property
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
+
+    @property
+    def maximum_queue_depth(self) -> int:
+        with self._state_lock:
+            return self._maximum_depth
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        now = time.monotonic()
+        with self._state_lock:
+            thread = self._thread
+            return {
+                "reader_alive": bool(thread is not None and thread.is_alive()),
+                "packets_read": self._packets_read,
+                "source_frames": self._source_frames,
+                "last_packet_monotonic_s": self._last_packet_monotonic_s,
+                "last_packet_age_ms": (
+                    None
+                    if self._last_packet_monotonic_s is None
+                    else max(
+                        0.0,
+                        (now - self._last_packet_monotonic_s) * 1000.0,
+                    )
+                ),
+                "queue_depth": self._queue.qsize(),
+                "queue_capacity": self._queue.maxsize,
+                "buffer_seconds": self._buffer_seconds,
+                "overflow_low_water_chunks": self._overflow_low_water_chunks,
+                "maximum_queue_depth": self._maximum_depth,
+                "dropped_packets": self._dropped_packets,
+                "dropped_frames": self._dropped_frames,
+                "dropped_ranges": [
+                    dict(item) for item in self._dropped_ranges
+                ],
+                "sample_clock_origin_s": self._sample_clock_origin_s,
+                "error": None if self._error is None else str(self._error),
+            }
+
+    def start(self) -> None:
+        if self._thread is not None:
+            raise RuntimeError("audio drain is already started")
+        self._thread = threading.Thread(
+            target=self._drain,
+            name="lumen-alsa-drain",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def chunks(
+        self, *, stop_event: threading.Event | None = None
+    ) -> Iterator[CapturedPcmChunk]:
+        if self._thread is None:
+            self.start()
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                self.close()
+                return
+            try:
+                item = self._queue.get(timeout=0.10)
+            except queue.Empty:
+                if not self._done.is_set():
+                    continue
+                if self._error is not None and not self._stop.is_set():
+                    raise RuntimeError(
+                        f"audio capture stopped: {self._error}"
+                    ) from self._error
+                return
+            try:
+                yield item
+            finally:
+                self._queue.task_done()
+
+    def close(self, timeout: float = 3.0) -> None:
+        if timeout < 0.0:
+            raise ValueError("timeout must not be negative")
+        self._stop.set()
+        close_source = getattr(self.source, "close", None)
+        if callable(close_source):
+            close_source()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        if thread is not None and thread.is_alive():
+            raise RuntimeError(
+                "audio capture reader did not stop after its source was closed"
+            )
+
+    def _drain(self) -> None:
+        try:
+            origin: float | None = None
+            for pcm in self.source.chunks():
+                if self._stop.is_set():
+                    break
+                bytes_per_frame = self.source.config.channels * 2
+                if len(pcm) % bytes_per_frame:
+                    raise RuntimeError(
+                        "ALSA returned PCM that is not sample-frame aligned"
+                    )
+                frame_count = len(pcm) // bytes_per_frame
+                read_completed_s = time.monotonic()
+                if origin is None:
+                    # The generator starts arecord lazily. Anchor the first
+                    # packet to when it was actually read, not to process
+                    # startup time before ALSA opened.
+                    origin = (
+                        read_completed_s
+                        - frame_count / self.source.config.sample_rate
+                    )
+                    with self._state_lock:
+                        self._sample_clock_origin_s = origin
+                with self._state_lock:
+                    start_frame = self._source_frames
+                    self._source_frames += frame_count
+                    self._packets_read += 1
+                    self._last_packet_monotonic_s = read_completed_s
+                timestamp_s = (
+                    origin
+                    + (start_frame + frame_count / 2.0)
+                    / self.source.config.sample_rate
+                )
+                source_pcm = SourcePcm(
+                    pcm,
+                    source_start_frame=start_frame,
+                    frame_count=frame_count,
+                    timestamp_s=timestamp_s,
+                )
+                item = CapturedPcmChunk(
+                    pcm=source_pcm,
+                    captured_monotonic_s=time.monotonic(),
+                    source_start_frame=start_frame,
+                    frame_count=frame_count,
+                    timestamp_s=timestamp_s,
+                )
+                while not self._stop.is_set():
+                    try:
+                        self._queue.put_nowait(item)
+                    except queue.Full:
+                        # A one-packet eviction leaves a mildly overloaded live
+                        # consumer permanently riding at the queue ceiling. Drop
+                        # back to a low-water mark in one operation so DMX catches
+                        # up to the room instead of remaining a third of a second
+                        # behind it. Every discarded source-frame range remains
+                        # explicit for diagnostics and the training recorder.
+                        self._collapse_overflow_backlog()
+                        continue
+                    with self._state_lock:
+                        self._maximum_depth = max(
+                            self._maximum_depth, self._queue.qsize()
+                        )
+                    break
+        except BaseException as error:
+            if not self._stop.is_set():
+                self._error = error
+        finally:
+            self._done.set()
+
+    def _collapse_overflow_backlog(self) -> None:
+        while self._queue.qsize() > self._overflow_low_water_chunks:
+            try:
+                dropped = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            self._queue.task_done()
+            with self._state_lock:
+                self._dropped_packets += 1
+                self._dropped_frames += dropped.frame_count
+                self._append_dropped_range(dropped)
+
+    def _append_dropped_range(self, item: CapturedPcmChunk) -> None:
+        if (
+            self._dropped_ranges
+            and int(self._dropped_ranges[-1]["start_frame"])
+            + int(self._dropped_ranges[-1]["frame_count"])
+            == item.source_start_frame
+        ):
+            self._dropped_ranges[-1]["frame_count"] = (
+                int(self._dropped_ranges[-1]["frame_count"])
+                + item.frame_count
+            )
+            return
+        self._dropped_ranges.append(
+            {
+                "start_frame": item.source_start_frame,
+                "frame_count": item.frame_count,
+                "reason": "capture_queue_overflow",
+            }
+        )
+
+    def __enter__(self) -> "ContinuouslyDrainedAudio":
+        self.start()
         return self
 
     def __exit__(self, *_: object) -> None:

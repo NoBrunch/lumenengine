@@ -33,15 +33,83 @@ class FunctionalSection(StrEnum):
     OUTRO = "outro"
 
 
-class EnergySection(StrEnum):
-    UNKNOWN = "unknown"
+class TechnoSection(StrEnum):
+    """Canonical sustained musical states used by Lumen's techno model."""
+
     SILENCE = "silence"
-    LOW = "low"
+    INTRO = "intro"
+    GROOVE = "groove"
     BREAKDOWN = "breakdown"
     BUILD = "build"
-    RELEASE = "release"
+    DROP = "drop"
+    OUTRO = "outro"
+
+
+CANONICAL_TECHNO_SECTIONS = tuple(section.value for section in TechnoSection)
+
+
+class EnergySection(StrEnum):
+    """Canonical techno state plus ``unknown`` for missing annotations.
+
+    ``unknown`` is an annotation sentinel, not a musical state. Historical
+    ``low``, ``sustained``, and ``release`` values intentionally are not part
+    of this ontology; old timelines remain auditable under their old version.
+    """
+
+    UNKNOWN = "unknown"
+    SILENCE = "silence"
+    INTRO = "intro"
     GROOVE = "groove"
-    SUSTAINED = "sustained"
+    BREAKDOWN = "breakdown"
+    BUILD = "build"
+    DROP = "drop"
+    OUTRO = "outro"
+
+
+class TransitionEvent(StrEnum):
+    """Instantaneous events kept separate from sustained section state."""
+
+    SECTION_START = "section_start"
+    ENERGY_RISE = "energy_rise"
+    ENERGY_FALL = "energy_fall"
+    BUILD_START = "build_start"
+    DROP_ONSET = "drop_onset"
+    BREAKDOWN_ONSET = "breakdown_onset"
+    GROOVE_RETURN = "groove_return"
+    OUTRO_START = "outro_start"
+    TRACK_END = "track_end"
+
+    # Source-compatible member names read old code and serialized intent into
+    # the one canonical vocabulary. Their values are aliases, so new output
+    # never creates a second spelling for the same event.
+    TRACK_START = "section_start"
+    SECTION_CHANGE = "section_start"
+    BUILD_ONSET = "build_start"
+    OUTRO_ONSET = "outro_start"
+
+
+def transition_event_for(
+    previous: str | TechnoSection | EnergySection | None,
+    current: str | TechnoSection | EnergySection | None,
+    *,
+    terminal: bool = False,
+) -> TransitionEvent:
+    """Name the boundary event without turning it into a sustained state."""
+
+    if terminal:
+        return TransitionEvent.TRACK_END
+    current_value = str(current or "unknown")
+    if isinstance(current, (TechnoSection, EnergySection)):
+        current_value = current.value
+    if previous is None:
+        return TransitionEvent.SECTION_START
+    return {
+        TechnoSection.BUILD.value: TransitionEvent.BUILD_START,
+        TechnoSection.DROP.value: TransitionEvent.DROP_ONSET,
+        TechnoSection.BREAKDOWN.value: TransitionEvent.BREAKDOWN_ONSET,
+        TechnoSection.GROOVE.value: TransitionEvent.GROOVE_RETURN,
+        TechnoSection.OUTRO.value: TransitionEvent.OUTRO_START,
+    }.get(current_value, TransitionEvent.SECTION_START)
 
 
 class ContentRole(StrEnum):
@@ -124,10 +192,23 @@ class StructureBoundary:
     label: StructuralLabel
     provenance: AnnotationProvenance
     terminal: bool = False
+    event: TransitionEvent | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.time_s) or self.time_s < 0:
             raise ValueError("boundary time must be finite and non-negative")
+        if self.event is None:
+            object.__setattr__(
+                self,
+                "event",
+                (
+                    TransitionEvent.TRACK_END
+                    if self.terminal
+                    else TransitionEvent.SECTION_CHANGE
+                ),
+            )
+        elif self.terminal and self.event is not TransitionEvent.TRACK_END:
+            raise ValueError("terminal boundary event must be track_end")
 
     @property
     def confidence(self) -> float:

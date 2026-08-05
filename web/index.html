@@ -300,6 +300,12 @@
                 <label class="feedback-target">Applies to
                   <select id="feedback-scope"><option value="overall">Overall performance</option></select>
                 </label>
+                <label class="feedback-target">Remember for
+                  <select id="feedback-lifetime"><option value="cue">This song section</option><option value="song">This whole song</option><option value="artist">This artist</option><option value="global">General taste</option></select>
+                </label>
+                <label class="feedback-listener">Listener
+                  <input id="feedback-listener-name" type="text" maxlength="32" placeholder="Optional name on this device">
+                </label>
                 <div class="feedback-buttons feedback-primary">
                   <button data-feedback="liked_this" data-value="1"><span>✓</span>Keep this</button>
                   <button data-feedback="pick_it_up" data-value="1"><span>↗</span>More</button>
@@ -319,6 +325,12 @@
                     <button data-feedback="faster_strobe" data-value="1">Faster strobe</button><button data-feedback="slower_strobe" data-value="1">Slower strobe</button>
                     <button data-feedback="faster_side_arms" data-value="1">Faster side arms</button><button data-feedback="slower_side_arms" data-value="1">Slower side arms</button>
                     <button data-feedback="cool_blue_purple" data-value="1">Cooler palette</button><button data-feedback="warmer_color" data-value="1">Warmer palette</button>
+                  </div>
+                  <div class="feedback-preferred-grid">
+                    <label><span>What should it have done?</span><select id="feedback-action-label"><option value="keep_current">Keep current sequence</option><option value="breathe">Breathe</option><option value="fan_sweep">Fan sweep</option><option value="figure_eight">Figure eight</option><option value="opposing_chase">Opposing chase</option><option value="beat_nod">Beat nod</option><option value="counter_rotate">Counter rotate</option></select></label>
+                    <button id="feedback-action-button">Use preferred action here</button>
+                    <label><span>What is happening in the song?</span><select id="feedback-context-label"><optgroup label="Energy state"><option value="silence">Silence</option><option value="intro">Intro</option><option value="groove">Groove</option><option value="breakdown">Breakdown</option><option value="build">Build</option><option value="drop">Drop</option><option value="outro">Outro</option></optgroup><optgroup label="Content role"><option value="vocal">Vocal</option><option value="instrumental">Instrumental</option><option value="solo">Solo</option><option value="transition">Transition material</option><option value="applause">Applause</option></optgroup><optgroup label="Transition event"><option value="section_start">Section start</option><option value="energy_rise">Energy rise</option><option value="energy_fall">Energy fall</option><option value="build_start">Build start</option><option value="drop_onset">Drop onset</option><option value="breakdown_onset">Breakdown onset</option><option value="groove_return">Groove return</option><option value="outro_start">Outro start</option><option value="track_end">Track end</option></optgroup></select></label>
+                    <button id="feedback-context-button">Save song context</button>
                   </div>
                   <div class="feedback-note"><input id="feedback-note" type="text" placeholder="Optional note…"><button id="feedback-note-button">Save note</button></div>
                 </details>
@@ -367,13 +379,19 @@
                 <div class="rehearsal-now"><span>NOW AUDITIONING</span><b id="rehearsal-routine-name">Figure eight</b><p id="rehearsal-routine-description">Looping pan with a faster vertical harmonic.</p></div>
               </section>
               <section class="panel motion-editor-panel">
-                <div class="panel-titlebar"><h3>Motion Studio</h3><span id="motion-editor-status" class="panel-note">Saved locally</span></div>
+                <div class="panel-titlebar"><h3>Motion Studio</h3><label class="motion-scope-picker">Editing <select id="motion-editor-scope"><option value="movers">Movers</option><option value="center">Center multi-effect</option></select></label><span id="motion-editor-status" class="panel-note">Saved locally</span></div>
                 <div class="motion-editor-body">
-                  <div class="motion-path-stage">
+                  <div id="motion-mover-preview" class="motion-path-stage">
                     <canvas id="motion-path-canvas"></canvas>
                     <div class="motion-path-legend"><span class="mover-a">Mover A</span><span class="mover-b">Mover B</span><span>Pan ↔ · Tilt ↕</span></div>
                   </div>
-                  <div class="motion-editor-controls">
+                  <div id="motion-center-preview" class="center-motion-preview hidden">
+                    <div><span>Body</span><b id="center-preview-body">Musical rotation</b></div>
+                    <div><span>Arm 1</span><b id="center-preview-arm-1">Independent</b></div>
+                    <div><span>Arm 2</span><b id="center-preview-arm-2">Independent</b></div>
+                    <p>The center editor controls its body, both arms, emitters, laser, strip, and hardware strobe independently from the movers.</p>
+                  </div>
+                  <div id="motion-mover-controls" class="motion-editor-controls">
                     <label><span>Cycle length <output id="motion-cycle-value">16 beats</output></span><input id="motion-cycle" data-motion-control="cycle_beats" type="range" min="1" max="32" step="1" value="16"></label>
                     <label><span>Pan travel <output id="motion-pan-size-value">100%</output></span><input id="motion-pan-size" data-motion-control="pan_size" type="range" min="0" max="100" step="1" value="100"></label>
                     <label><span>Tilt travel <output id="motion-tilt-size-value">82%</output></span><input id="motion-tilt-size" data-motion-control="tilt_size" type="range" min="0" max="100" step="1" value="82"></label>
@@ -381,21 +399,89 @@
                     <label><span>Tilt center <output id="motion-tilt-center-value">50%</output></span><input id="motion-tilt-center" data-motion-control="tilt_center" type="range" min="0" max="100" step="1" value="50"></label>
                     <label><span>Fixture relationship</span><select id="motion-relationship" data-motion-control="relationship"><option value="synchronized">Synchronized</option><option value="opposed">Exactly opposed</option><option value="mirrored">Mirrored pan</option><option value="chase">Even chase</option><option value="counter">Counter direction</option></select></label>
                     <label><span>Direction</span><select id="motion-direction" data-motion-control="direction"><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
-                    <label><span>Center body travel <output id="motion-body-size-value">65%</output></span><input id="motion-body-size" data-motion-control="body_size" type="range" min="0" max="100" step="1" value="65"></label>
-                    <label><span>Center arm travel <output id="motion-arm-size-value">90%</output></span><input id="motion-arm-size" data-motion-control="arm_size" type="range" min="0" max="100" step="1" value="90"></label>
+                  </div>
+                  <div id="motion-center-controls" class="motion-editor-controls hidden">
+                    <label><span>Cycle length <output id="center-cycle-value">8 beats</output></span><input id="center-cycle" data-center-motion-control type="range" min="1" max="64" step="1" value="8"></label>
+                    <label><span>Arm relationship</span><select id="center-relationship" data-center-motion-control><option value="synchronized">Synchronized</option><option value="opposed">Exactly opposed</option><option value="mirrored">Mirrored</option><option value="chase">Quarter-cycle chase</option><option value="counter">Counter direction</option></select></label>
+                    <label><span>Body travel <output id="center-body-travel-value">75%</output></span><input id="center-body-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="75"></label>
+                    <label><span>Body rate <output id="center-body-speed-value">1×</output></span><input id="center-body-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
+                    <label><span>Body start phase <output id="center-body-phase-value">0%</output></span><input id="center-body-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
+                    <label><span>Body direction</span><select id="center-body-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
+                    <label><span>Arm 1 travel <output id="center-arm-1-travel-value">85%</output></span><input id="center-arm-1-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="85"></label>
+                    <label><span>Arm 1 rate <output id="center-arm-1-speed-value">1×</output></span><input id="center-arm-1-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
+                    <label><span>Arm 1 start phase <output id="center-arm-1-phase-value">0%</output></span><input id="center-arm-1-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
+                    <label><span>Arm 1 direction</span><select id="center-arm-1-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
+                    <label><span>Arm 2 travel <output id="center-arm-2-travel-value">85%</output></span><input id="center-arm-2-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="85"></label>
+                    <label><span>Arm 2 rate <output id="center-arm-2-speed-value">1×</output></span><input id="center-arm-2-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
+                    <label><span>Arm 2 start phase <output id="center-arm-2-phase-value">0%</output></span><input id="center-arm-2-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
+                    <label><span>Arm 2 direction</span><select id="center-arm-2-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
+                    <label><span>Emitters</span><select id="center-emitter-pattern" data-center-motion-control><option value="both">Ball + arms</option><option value="alternate">Alternate ball / arms</option><option value="ball">Ball only</option><option value="arms">Arms only</option><option value="chase">Emitter chase</option></select></label>
+                    <label><span>Color behavior</span><select id="center-color-pattern" data-center-motion-control><option value="palette">Selected palette</option><option value="alternate">Alternate within palette</option><option value="opposed">Opposed colors</option><option value="pulse">Beat pulse</option></select></label>
+                    <label><span>Laser behavior</span><select id="center-laser-mode" data-center-motion-control><option value="off">Off</option><option value="steady">Steady</option><option value="beat">On beat</option><option value="alternate">Alternate red / green</option></select></label>
+                    <label><span>Laser level <output id="center-laser-level-value">65%</output></span><input id="center-laser-level" data-center-motion-control type="range" min="0" max="100" step="1" value="65"></label>
+                    <label><span>Strip program <output id="center-strip-program-value">0</output></span><input id="center-strip-program" data-center-motion-control type="range" min="0" max="255" step="1" value="0"></label>
+                    <label><span>Strip rate <output id="center-strip-speed-value">55%</output></span><input id="center-strip-speed" data-center-motion-control type="range" min="0" max="100" step="1" value="55"></label>
+                    <label><span>Hardware strobe <output id="center-strobe-level-value">Off</output></span><input id="center-strobe-level" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
+                    <label><span>Fixture intensity <output id="center-intensity-value">100%</output></span><input id="center-intensity" data-center-motion-control type="range" min="0" max="100" step="1" value="100"></label>
+                    <label><span>Beat blackout accent <output id="center-blackout-accent-value">Off</output></span><input id="center-blackout-accent" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
                   </div>
                 </div>
-                <div class="motion-editor-actions"><button id="motion-reset-defaults">Reset this routine</button><span>These are shared routine definitions. Edits affect this rehearsal and every future automatic performance that selects the routine; audition tempo, scale, intensity, strobe, palette, and scope above remain rehearsal-only.</span><strong id="motion-velocity-status">VELOCITY OK</strong></div>
+                <div class="motion-editor-actions"><button id="motion-reset-defaults">Reset this group’s routine</button><span>Edits are saved separately for Movers and Center, then recalled whenever Live selects this routine for that group.</span><strong id="motion-velocity-status">VELOCITY OK</strong></div>
               </section>
-              <section class="panel rehearsal-place-panel">
-                <div class="panel-titlebar"><h3>Place in song memory</h3><span class="panel-note">Explicit teaching action</span></div>
-                <p>After you find a movement you want, identify the musical moment and save the selected routine. This is the only rehearsal action that teaches Lumen.</p>
-                <div class="rehearsal-placement">
-                  <label><span>This part of the song</span><select id="rehearsal-context-label"><option value="intro">Intro</option><option value="verse">Verse</option><option value="pre_chorus">Pre-chorus</option><option value="chorus">Chorus</option><option value="build">Build</option><option value="release">Release / drop</option><option value="breakdown">Breakdown / quiet part</option><option value="bridge">Bridge</option><option value="solo">Solo</option><option value="outro">Outro</option><option value="vocal_focus">Vocal focus</option><option value="instrumental">Instrumental</option><option value="transition">Transition</option></select></label>
-                  <button id="rehearsal-context-button">Save song context</button>
-                  <div class="placement-summary"><span>Preferred action</span><b id="rehearsal-preferred-summary">Figure eight · Both movers</b></div>
-                  <button id="rehearsal-use-here" class="rehearsal-use-here">Use this routine here</button>
+              <section class="panel live-teaching-reference">
+                <div class="panel-titlebar"><h3>Live teaching reference</h3><span id="teaching-reference-source" class="panel-note">Waiting for Live</span></div>
+                <div class="teaching-track-identity">
+                  <h2 id="teaching-track-title">No identified song</h2>
+                  <p id="teaching-track-artist">Start Live with Spotify connected</p>
                 </div>
+                <div class="teaching-playback">
+                  <b id="teaching-position">0:00</b><div class="teaching-progress-track"><i id="teaching-progress-fill"></i><span id="teaching-progress-marker"></span></div><b id="teaching-duration">0:00</b>
+                </div>
+                <div class="teaching-reference-grid">
+                  <div><span>Musical energy</span><b id="teaching-energy">0%</b><small id="teaching-energy-detail">Waiting for audio</small></div>
+                  <div><span>Structure</span><b id="teaching-structure">Unknown</b><small id="teaching-structure-detail">No structural source</small></div>
+                  <div><span>Rhythm</span><b id="teaching-rhythm">No lock</b><small id="teaching-rhythm-detail">Beat timing comes from line-in</small></div>
+                  <div><span>Change evidence</span><b id="teaching-change">0%</b><small id="teaching-change-detail">Arrangement · novelty · harmonic change</small></div>
+                  <div class="teaching-lane"><span>Movers actually output</span><b id="teaching-movers-output">Waiting</b><small id="teaching-movers-detail">No effective cue</small><button data-capture-live-cue="movers">Load this cue into editor</button></div>
+                  <div class="teaching-lane"><span>Center actually output</span><b id="teaching-center-output">Waiting</b><small id="teaching-center-detail">No effective cue</small><button data-capture-live-cue="center">Load this cue into editor</button></div>
+                </div>
+                <p class="teaching-reference-help">Loading a cue copies the complete observed output into the editor. Nothing is taught until you inspect its routine, speed, travel, activity, brightness, palette, strobe state, duration, and then save it at the intended song position.</p>
+              </section>
+              <section class="panel sequence-editor-panel">
+                <div class="panel-titlebar"><h3>Song Timeline &amp; Sequence Editor</h3><span id="sequence-song-position" class="panel-note">No identified song</span></div>
+                <p class="control-help">Build an ordered phrase for one group. Saving places it at the current song position; Live recalls it at a phrase boundary while the audio sample clock remains in charge of beats.</p>
+                <div id="teacher-timeline-summary" class="teacher-timeline-summary">No cached teacher timeline for this recording yet.</div>
+                <details class="structure-timeline-inspector" open>
+                  <summary><span><b>Analyzed song database &amp; timeline review</b><small>Browse every retained song, see whether it trained the active model, then inspect, approve, correct, or reject its generated structure.</small></span><strong id="structure-timeline-count">0 SONGS</strong></summary>
+                  <div class="structure-library-toolbar">
+                    <label><span>Find a song</span><input id="structure-song-search" type="search" placeholder="Title or artist"></label>
+                    <label><span>Show</span><select id="structure-song-filter"><option value="all" selected>All analyzed songs</option><option value="needs_review">Needs review</option><option value="reviewed">Reviewed</option><option value="diagnostic_only">Diagnostic only</option></select></label>
+                    <label><span>Song to review</span><select id="structure-song-select"><option value="">No analyzed songs available</option></select></label>
+                    <button id="structure-song-playing" type="button">Select playing song</button>
+                  </div>
+                  <div id="structure-library-status" class="structure-library-status">Loading analyzed song library…</div>
+                  <div class="structure-catalog-wrap">
+                    <table class="structure-catalog-table">
+                      <thead><tr><th>Song</th><th>Artist</th><th>Duration</th><th>Teacher</th><th>Timeline review</th><th>Model training</th><th>Split</th><th>Analyzed</th></tr></thead>
+                      <tbody id="structure-catalog-body"><tr><td colspan="8">Loading song database…</td></tr></tbody>
+                    </table>
+                  </div>
+                  <div class="structure-selected-song">
+                    <div><h2 id="structure-selected-title">No song selected</h2><p id="structure-selected-artist">Choose a song above</p></div>
+                    <div class="structure-selected-duration"><b id="structure-selected-position">0:00</b><span>of</span><b id="structure-selected-total">0:00</b></div>
+                  </div>
+                  <div id="structure-overview" class="structure-overview"><span class="empty-state">Select an analyzed song to display its section map.</span></div>
+                  <p class="control-help">Needs review means EDMFormer produced a usable exact-song timeline but it cannot control Live until you approve or correct it. Approval is a separate operator trust decision; it does not invent a model probability. A correction preserves the teacher original.</p>
+                  <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
+                </details>
+                <div class="sequence-heading-controls">
+                  <label><span>Sequence name</span><input id="sequence-name" type="text" maxlength="80" placeholder="Example: build into drop"></label>
+                  <label><span>Fixture group</span><select id="sequence-scope"><option value="movers">Movers</option><option value="center">Center multi-effect</option><option value="overall">Whole rig</option></select></label>
+                  <label><span>Energy state</span><select id="sequence-section"><option value="">Use current detection</option><option value="silence">Silence</option><option value="intro">Intro</option><option value="groove">Groove</option><option value="breakdown">Breakdown</option><option value="build">Build</option><option value="drop">Drop</option><option value="outro">Outro</option></select></label>
+                </div>
+                <div id="sequence-steps" class="sequence-steps"></div>
+                <div class="sequence-editor-actions"><button id="sequence-add-step">+ Add step</button><button id="sequence-save-here" class="primary">Save complete cue sequence at this position</button><button id="sequence-clear">New blank sequence</button><button id="sequence-undo-history" disabled>Undo last edit/delete</button></div>
+                <div class="sequence-history"><h4>Saved for this song</h4><div id="sequence-history-list" class="sequence-history-list"></div></div>
               </section>
               <section class="panel rehearsal-guide-panel">
                 <div class="panel-titlebar"><h3>Rehearsal workflow</h3></div>
@@ -589,6 +675,10 @@
                   <div><span>Phase</span><b id="beat-phase-detail">0.00</b></div>
                   <div><span>Beat pulse</span><b id="beat-pulse-detail">0%</b></div>
                   <div><span>Novelty</span><b id="novelty-detail">0.00</b></div>
+                  <div><span>Clock source</span><b id="beat-clock-source">None</b></div>
+                  <div><span>Spectral candidate</span><b id="beat-candidate-detail">—</b></div>
+                  <div><span>Spectral lock</span><b id="beat-spectral-lock">—</b></div>
+                  <div><span>Octave decision</span><b id="beat-octave-detail">Standard</b></div>
                 </div>
               </section>
               <section class="panel input-panel">
@@ -638,6 +728,9 @@
                   <div><span>MOTION</span><b id="analysis-motion">0%</b><small>Pan, tilt, and motor travel</small></div>
                   <div><span>TIMING</span><b id="analysis-timing">Searching</b><small>Beat/tempo confidence</small></div>
                   <div><span>STRUCTURE MODEL</span><b id="analysis-structure">Live analyzer only</b><small id="analysis-structure-detail">No validated streaming student is active.</small></div>
+                  <div><span>MOVERS PLAN</span><b id="analysis-movers-plan">Waiting</b><small id="analysis-movers-plan-detail">No phrase lease yet.</small></div>
+                  <div><span>CENTER PLAN</span><b id="analysis-center-plan">Waiting</b><small id="analysis-center-plan-detail">No phrase lease yet.</small></div>
+                  <div><span>FEEDBACK LEARNING</span><b id="analysis-learning">No evidence yet</b><small id="analysis-learning-detail">Listener agreement and boundary application appear here.</small></div>
                   <div><span>RESOLUTION</span><b id="analysis-resolution">Waiting</b><small>How the target becomes DMX</small></div>
                 </div>
                 <div class="pipeline">
@@ -671,6 +764,9 @@
                   <div><span>Semantic frames</span><b id="training-features">0</b></div>
                   <div><span>Linked feedback</span><b id="training-feedback">0</b></div>
                   <div><span>Context / action labels</span><b id="training-annotations">0</b></div>
+                  <div><span>Musical corrections</span><b id="training-musical-annotations">0</b></div>
+                  <div><span>Consensus cues</span><b id="training-consensus-anchors">0</b></div>
+                  <div><span>Structure listeners</span><b id="training-structure-participants">0</b></div>
                   <div><span>Dataset size</span><b id="training-size">0 B</b></div>
                   <div><span>Disk available</span><b id="training-free">—</b></div>
                   <div><span>Dropped frames</span><b id="training-dropped">0</b></div>
@@ -703,7 +799,7 @@
                   </div>
                 </div>
                 <div class="training-steps">
-                  <div><b>1</b><span>Analyze recordings</span><small>EDMFormer and SongFormer label the captured songs. This is resumable.</small></div>
+                  <div><b>1</b><span>Analyze recordings</span><small>EDMFormer supplies the active techno labels. Preserved SongFormer research stays diagnostic and cannot control training or Live. Processing is resumable.</small></div>
                   <div><b>2</b><span>Check readiness</span><small>Lumen keeps songs separated and reserves held-out songs for an honest test.</small></div>
                   <div><b>3</b><span>Train and validate</span><small>The 60-second causal student activates only after passing the held-out gate.</small></div>
                 </div>
@@ -1042,6 +1138,12 @@
           <label class="feedback-target">Applies to
             <select id="remote-feedback-scope"><option value="overall">Overall performance</option></select>
           </label>
+          <label class="feedback-target">Remember for
+            <select id="remote-feedback-lifetime"><option value="cue">This song section</option><option value="song">This whole song</option><option value="artist">This artist</option><option value="global">General taste</option></select>
+          </label>
+          <label class="feedback-listener">Listener
+            <input id="remote-listener-name" type="text" maxlength="32" placeholder="Your name (optional)">
+          </label>
           <div class="remote-feedback remote-feedback-primary">
             <button data-feedback="liked_this" data-value="1"><span>✓</span><b>Keep this</b></button>
             <button data-feedback="pick_it_up" data-value="1"><span>↗</span><b>More</b></button>
@@ -1059,9 +1161,29 @@
               <button data-feedback="strobe" data-value="1">More strobe</button><button data-feedback="no_strobes" data-value="1">No strobe</button>
               <button data-feedback="cool_blue_purple" data-value="1">Cooler color</button><button data-feedback="warmer_color" data-value="1">Warmer color</button>
             </div>
+            <div class="remote-preferred-actions">
+              <label><span>Preferred action</span><select id="remote-action-label"><option value="keep_current">Keep current sequence</option><option value="breathe">Breathe</option><option value="fan_sweep">Fan sweep</option><option value="figure_eight">Figure eight</option><option value="opposing_chase">Opposing chase</option><option value="beat_nod">Beat nod</option><option value="counter_rotate">Counter rotate</option></select></label>
+              <button id="remote-action-button">Use this action here</button>
+              <label><span>Song context</span><select id="remote-context-label"><optgroup label="Energy state"><option value="silence">Silence</option><option value="intro">Intro</option><option value="groove">Groove</option><option value="breakdown">Breakdown</option><option value="build">Build</option><option value="drop">Drop</option><option value="outro">Outro</option></optgroup><optgroup label="Content role"><option value="vocal">Vocal</option><option value="instrumental">Instrumental</option><option value="solo">Solo</option><option value="transition">Transition material</option><option value="applause">Applause</option></optgroup><optgroup label="Transition event"><option value="section_start">Section start</option><option value="energy_rise">Energy rise</option><option value="energy_fall">Energy fall</option><option value="build_start">Build start</option><option value="drop_onset">Drop onset</option><option value="breakdown_onset">Breakdown onset</option><option value="groove_return">Groove return</option><option value="outro_start">Outro start</option><option value="track_end">Track end</option></optgroup></select></label>
+              <button id="remote-context-button">Save this context</button>
+            </div>
             <textarea id="remote-feedback-note" rows="3" placeholder="Say what you noticed in your own words…"></textarea>
             <button id="remote-feedback-note-button">Save this note</button>
           </div>
+        </section>
+
+        <section class="remote-section remote-song-teaching">
+          <details>
+            <summary><b>Teach a specific song action</b><span id="remote-sequence-position">Current position</span></summary>
+            <p>This is stronger than quick feedback: it places an exact group action on the identified song timeline and recalls it at a future phrase boundary.</p>
+            <div class="remote-training-grid">
+              <label><span>Group</span><select id="remote-sequence-scope"><option value="movers">Movers</option><option value="center">Center</option><option value="overall">Whole rig</option></select></label>
+              <label><span>Action</span><select id="remote-sequence-routine"><option value="breathe">Breathe</option><option value="fan_sweep">Fan sweep</option><option value="figure_eight">Figure eight</option><option value="opposing_chase">Opposing chase</option><option value="beat_nod">Beat nod</option><option value="counter_rotate">Counter rotate</option></select></label>
+              <label><span>Length</span><select id="remote-sequence-duration"><option value="4">4 beats</option><option value="8" selected>8 beats</option><option value="16">16 beats</option><option value="32">32 beats</option></select></label>
+              <label><span>Intensity</span><input id="remote-sequence-intensity" type="range" min="0" max="100" step="1" value="75"></label>
+            </div>
+            <button id="remote-sequence-save" class="remote-primary">Use this here</button>
+          </details>
         </section>
 
         <section class="remote-section remote-engine-card">

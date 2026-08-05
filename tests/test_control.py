@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import os
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 import tempfile
@@ -11,6 +14,7 @@ from urllib.request import Request, urlopen
 from unittest.mock import patch
 
 from lumen_engine.control import (
+    GatedOutput,
     LumenApplication,
     LumenHTTPServer,
     OperatorControls,
@@ -19,13 +23,90 @@ from lumen_engine.control import (
     _rehearsal_observation,
 )
 from lumen_engine.audio import AudioInputMetrics
+from lumen_engine.choreography import (
+    ChoreographySequence,
+    ChoreographyStep,
+    SequencePreferenceModel,
+)
+from lumen_engine.dmx import VirtualDMXOutput
 from lumen_engine.expression import ExpressionPolicy
-from lumen_engine.models import MusicalObservation
-from lumen_engine.student import LABELS, StreamingStructureStudent
+from lumen_engine.models import MediaIdentity, MusicalObservation
+from lumen_engine.memory import (
+    EDMFORMER_PREPROCESSING_VERSION,
+    TEACHER_NORMALIZATION_VERSION,
+)
+from lumen_engine.student import (
+    LABELS,
+    StudentPrediction,
+    StreamingStructureStudent,
+)
 from lumen_engine.offline import EDMFORMER_JOB, SONGFORMER_JOB
+from lumen_engine.runtime import PerformanceRuntime
 
 
 class ControlApplicationTests(unittest.TestCase):
+    def test_same_track_seek_invalidates_causal_structure_context(self) -> None:
+        first = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:seek-test",
+            title="Seek Test",
+            observed_position_ms=120_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=False,
+        )
+        self.application._remember_media_identity(first)
+        generation = self.application._analysis_generation
+        self.application._cached_structure_prediction = {
+            "axes": {"energy": {"label": "drop", "confidence": 0.9}}
+        }
+
+        self.application._remember_media_identity(replace(
+            first,
+            observed_position_ms=30_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+        ))
+
+        self.assertEqual(self.application._analysis_generation, generation + 1)
+        self.assertIsNone(self.application._cached_structure_prediction)
+        self.assertTrue(any(
+            "reset causal audio" in event["message"]
+            for event in self.application.events
+        ))
+
+        # A normal metadata refresh on the same recording is not a seek.
+        self.application._remember_media_identity(replace(
+            first,
+            observed_position_ms=31_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+        ))
+        self.assertEqual(self.application._analysis_generation, generation + 1)
+
+        self.application._remember_media_identity(replace(
+            first,
+            observed_position_ms=36_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+        ))
+        self.assertEqual(self.application._analysis_generation, generation + 2)
+
+    def test_media_position_can_be_anchored_to_captured_sample_time(self) -> None:
+        self.application.media = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:sample-time",
+            title="Sample Time",
+            duration_ms=300_000,
+            observed_position_ms=100_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=True,
+        )
+        current = self.application._media_position_ms()
+        captured = self.application._media_position_ms(
+            at_monotonic_s=time.monotonic() - 0.30
+        )
+        self.assertIsNotNone(current)
+        self.assertIsNotNone(captured)
+        self.assertGreaterEqual(current - captured, 250)
+        self.assertLessEqual(current - captured, 350)
+
     def test_offline_teacher_button_processes_a_resumable_batch(self) -> None:
         for job_type in (EDMFORMER_JOB, SONGFORMER_JOB):
             self.application.memory.enqueue_analysis_job(
@@ -38,12 +119,6 @@ class ControlApplicationTests(unittest.TestCase):
                 {
                     "job_id": "one",
                     "job_type": EDMFORMER_JOB,
-                    "status": "complete",
-                    "result": {},
-                },
-                {
-                    "job_id": "two",
-                    "job_type": SONGFORMER_JOB,
                     "status": "complete",
                     "result": {},
                 },
@@ -64,8 +139,13 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         result = self.application._research_worker_last
         assert result is not None
-        self.assertEqual(result["processed"], 2)
+        self.assertEqual(result["processed"], 1)
         self.assertEqual(result["failed"], 0)
+        queued = {
+            job["job_type"]: job["status"]
+            for job in self.application.memory.list_analysis_jobs()
+        }
+        self.assertEqual(queued[SONGFORMER_JOB], "queued")
 
     def test_analyze_preflight_does_not_rebuild_while_engine_thread_lives(
         self,
@@ -181,6 +261,7 @@ class ControlApplicationTests(unittest.TestCase):
             )
         finally:
             restarted.close()
+
     def test_custom_memory_files_isolate_models_and_training_state(
         self,
     ) -> None:
@@ -205,20 +286,111 @@ class ControlApplicationTests(unittest.TestCase):
         finally:
             other.close()
 
+    def test_application_close_joins_performance_trace_worker(self) -> None:
+        root = Path(self.temporary.name)
+        other = LumenApplication(
+            rig_path=self.rig_path,
+            memory_path=root / "close-memory.sqlite3",
+            settings_path=root / "close-settings.json",
+        )
+        trace_thread = other._trace_thread
+        model_thread = other._model_save_thread
+        feedback_thread = other._feedback_refresh_thread
+
+        other.close()
+
+        self.assertFalse(trace_thread.is_alive())
+        self.assertFalse(model_thread.is_alive())
+        self.assertFalse(feedback_thread.is_alive())
+
+    def test_choreography_persistence_coalesces_listener_burst(self) -> None:
+        root = Path(self.temporary.name)
+        other = LumenApplication(
+            rig_path=self.rig_path,
+            memory_path=root / "coalesce-memory.sqlite3",
+            settings_path=root / "coalesce-settings.json",
+        )
+        try:
+            with patch.object(
+                other,
+                "_write_choreography_model",
+                wraps=other._write_choreography_model,
+            ) as writer:
+                for _ in range(8):
+                    other._save_choreography_model()
+                with other._model_save_condition:
+                    completed = other._model_save_condition.wait_for(
+                        lambda: (
+                            other._model_save_completed
+                            >= other._model_save_requested
+                        ),
+                        timeout=2.0,
+                    )
+                self.assertTrue(completed)
+                self.assertEqual(writer.call_count, 1)
+                saved = json.loads(
+                    other._choreography_model_path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+                self.assertEqual(
+                    saved["format"], "lumen_sequence_preference_model"
+                )
+        finally:
+            other.close()
+
+    def test_live_listener_burst_coalesces_feedback_bias_rebuild(self) -> None:
+        self.application.engine_mode = "live"
+        with patch.object(
+            self.application,
+            "_rebuild_feedback_biases",
+            wraps=self.application._rebuild_feedback_biases,
+        ) as rebuild:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(
+                    lambda index: self.application.add_feedback({
+                        "label": "increase_movement",
+                        "value": 1,
+                        "scope": "overall",
+                        "participant_id": f"listener-{index}",
+                        "client_event_id": f"listener-tap-{index}",
+                    }),
+                    range(8),
+                ))
+            with self.application._feedback_refresh_condition:
+                completed = (
+                    self.application._feedback_refresh_condition.wait_for(
+                        lambda: (
+                            self.application._feedback_refresh_completed
+                            >= self.application._feedback_refresh_requested
+                        ),
+                        timeout=2.0,
+                    )
+                )
+            self.assertTrue(completed)
+            self.assertEqual(rebuild.call_count, 1)
+            self.assertEqual(
+                max(row["participant_agreement"] for row in results), 8
+            )
+            self.assertGreater(
+                self.application._feedback_biases["overall"]["motion"],
+                0.0,
+            )
+
     def test_feedback_persistence_never_holds_audio_publication_lock(
         self,
     ) -> None:
         entered = threading.Event()
         release = threading.Event()
-        original = self.application.memory.add_feedback
+        original = self.application.memory.add_feedback_event
 
-        def delayed(feedback):
+        def delayed(feedback, **kwargs):
             entered.set()
             release.wait(timeout=2.0)
-            return original(feedback)
+            return original(feedback, **kwargs)
 
         with patch.object(
-            self.application.memory, "add_feedback", side_effect=delayed
+            self.application.memory, "add_feedback_event", side_effect=delayed
         ):
             worker = threading.Thread(
                 target=self.application.add_feedback,
@@ -234,6 +406,259 @@ class ControlApplicationTests(unittest.TestCase):
             worker.join(timeout=2.0)
         self.assertFalse(worker.is_alive())
         self.assertLess(elapsed, 0.05)
+
+    def test_bootstrap_database_work_never_holds_live_publication_lock(
+        self,
+    ) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        original = self.application.memory.summary
+
+        def delayed(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=2.0)
+            return original(*args, **kwargs)
+
+        with patch.object(
+            self.application.memory, "summary", side_effect=delayed
+        ):
+            worker = threading.Thread(target=self.application.bootstrap)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1.0))
+            started = time.monotonic()
+            with self.application._lock:
+                self.application._status_sequence += 1
+            elapsed = time.monotonic() - started
+            release.set()
+            worker.join(timeout=5.0)
+        self.assertFalse(worker.is_alive())
+        self.assertLess(elapsed, 0.05)
+
+    def test_settings_file_write_never_holds_live_publication_lock(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        def delayed(_settings):
+            entered.set()
+            release.wait(timeout=2.0)
+
+        with patch.object(
+            self.application, "_save_settings", side_effect=delayed
+        ):
+            worker = threading.Thread(
+                target=self.application.patch_settings,
+                args=({"spotify_client_id": "client-test"},),
+            )
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1.0))
+            started = time.monotonic()
+            with self.application._lock:
+                self.application._status_sequence += 1
+            elapsed = time.monotonic() - started
+            release.set()
+            worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertLess(elapsed, 0.05)
+
+    def test_trace_snapshot_never_holds_live_publication_lock(self) -> None:
+        runtime = self.application._runtime_for_rig(
+            GatedOutput(VirtualDMXOutput(), self.application.controls)
+        )
+        observation = MusicalObservation(
+            timestamp_s=5.0,
+            loudness=0.6,
+            onset_strength=0.4,
+            low_energy=0.5,
+            mid_energy=0.4,
+            high_energy=0.3,
+            bpm=120.0,
+            section="groove",
+            section_confidence=0.7,
+        )
+        frame = runtime.step(observation)
+        entered = threading.Event()
+        release = threading.Event()
+        original = runtime.choreography_snapshot
+
+        def delayed():
+            entered.set()
+            release.wait(timeout=2.0)
+            return original()
+
+        self.application._runtime = runtime
+        self.application._last_trace_timestamp = None
+        with patch.object(
+            runtime, "choreography_snapshot", side_effect=delayed
+        ):
+            worker = threading.Thread(
+                target=self.application._accept_runtime_frame,
+                args=(observation, frame),
+            )
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1.0))
+            started = time.monotonic()
+            with self.application._lock:
+                self.application._status_sequence += 1
+            elapsed = time.monotonic() - started
+            release.set()
+            worker.join(timeout=2.0)
+        self.application._runtime = None
+        runtime.close()
+        self.assertFalse(worker.is_alive())
+        self.assertLess(elapsed, 0.05)
+
+    def test_trace_materialization_uses_the_snapshot_paired_with_its_frame(
+        self,
+    ) -> None:
+        runtime = self.application._runtime_for_rig(
+            GatedOutput(VirtualDMXOutput(), self.application.controls)
+        )
+        observation = MusicalObservation(
+            timestamp_s=5.0,
+            loudness=0.6,
+            onset_strength=0.4,
+            low_energy=0.5,
+            mid_energy=0.4,
+            high_energy=0.3,
+            bpm=120.0,
+            section="groove",
+            section_confidence=0.7,
+        )
+        frame = runtime.step(observation)
+        exact_snapshot = runtime.choreography_snapshot()
+        item = {
+            "_kind": "performance_seed",
+            "session_id": "trace-exact",
+            "song_id": None,
+            "position_ms": None,
+            "frame": frame,
+            "observation": observation,
+            "raw_observation": observation,
+            "audio_metrics": None,
+            "controls": replace(self.application.controls),
+            "structure_model": None,
+            "structure_resolution": {
+                "source": "test", "section": "groove"
+            },
+            "choreography_snapshot": exact_snapshot,
+        }
+        # If materialization consulted live runtime here, this mutation would
+        # make the stored planner state differ from the queued frame.
+        runtime.notify_timeline_discontinuity()
+        runtime.step(replace(observation, timestamp_s=9.0, section="drop"))
+        materialized = self.application._materialize_trace_item(item)
+        self.assertEqual(
+            materialized["payload"]["choreography_runtime"],
+            exact_snapshot,
+        )
+        runtime.close()
+
+    def test_new_runtime_adopts_prepared_recall_when_ids_are_unchanged(
+        self,
+    ) -> None:
+        recalled = ChoreographySequence(
+            sequence_id="same-track-restart",
+            source="operator_song_timeline",
+            steps=(ChoreographyStep(
+                start_beat=0.0,
+                duration_beats=8.0,
+                fixture_scope="movers",
+                routine="figure_eight",
+            ),),
+        )
+        self.application._prepared_recalled_choreography = (recalled,)
+        self.application._prepared_recalled_ids = ("same-track-v1",)
+        # Simulate IDs retained from the runtime that was just stopped.
+        self.application._recalled_choreography_ids = ("same-track-v1",)
+        previous_runtime = self.application._runtime_for_rig(
+            GatedOutput(VirtualDMXOutput(), self.application.controls)
+        )
+        self.application._recalled_choreography_runtime = previous_runtime
+        new_runtime = self.application._runtime_for_rig(
+            GatedOutput(VirtualDMXOutput(), self.application.controls)
+        )
+        try:
+            self.application._refresh_recalled_choreography(
+                new_runtime, self.application.observation
+            )
+            self.assertEqual(
+                new_runtime._recalled_choreography, (recalled,)
+            )
+        finally:
+            previous_runtime.close()
+            new_runtime.close()
+
+    def test_status_render_never_holds_live_publication_lock(self) -> None:
+        runtime = self.application._runtime_for_rig(
+            GatedOutput(VirtualDMXOutput(), self.application.controls)
+        )
+        observation = MusicalObservation(
+            timestamp_s=6.0,
+            loudness=0.6,
+            onset_strength=0.4,
+            low_energy=0.5,
+            mid_energy=0.4,
+            high_energy=0.3,
+            bpm=120.0,
+            section="groove",
+            section_confidence=0.7,
+        )
+        frame = runtime.step(observation)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def delayed_status_component():
+            entered.set()
+            release.wait(timeout=2.0)
+            return {"scope": "movers", "groups": {}}
+
+        with patch.object(
+            self.application,
+            "_motion_editor_snapshot",
+            side_effect=delayed_status_component,
+        ):
+            worker = threading.Thread(target=self.application.snapshot)
+            worker.start()
+            self.assertTrue(entered.wait(timeout=1.0))
+            started = time.monotonic()
+            self.application._accept_runtime_frame(
+                observation,
+                frame,
+                audio_metrics=AudioInputMetrics.silence(
+                    timestamp_s=observation.timestamp_s
+                ),
+            )
+            elapsed = time.monotonic() - started
+            release.set()
+            worker.join(timeout=2.0)
+        runtime.close()
+        self.assertFalse(worker.is_alive())
+        self.assertLess(elapsed, 0.05)
+
+    def test_status_distinguishes_capture_from_pipeline_stall(self) -> None:
+        class FreshCapture:
+            @property
+            def diagnostics(self):
+                return {
+                    "reader_alive": True,
+                    "packets_read": 50,
+                    "source_frames": 102_400,
+                    "queue_depth": 4,
+                    "last_packet_age_ms": 12.0,
+                }
+
+        self.application.engine_mode = "monitor"
+        self.application._thread = threading.current_thread()
+        self.application._audio_packets = 2
+        self.application._audio_last_packet_at = time.monotonic() - 1.0
+        self.application._active_audio_capture = FreshCapture()
+        status = self.application._audio_snapshot_unlocked(True)
+        self.application._active_audio_capture = None
+        self.application._thread = None
+        self.assertEqual(status["state"], "pipeline_stale")
+        self.assertEqual(status["label"], "ANALYSIS PIPELINE STALLED")
+        self.assertEqual(status["last_source_packet_age_ms"], 12.0)
+        self.assertGreater(status["last_processed_frame_age_ms"], 750.0)
 
     def test_semantic_capture_contains_nonzero_student_contract(self) -> None:
         observation = MusicalObservation(
@@ -327,6 +752,146 @@ class ControlApplicationTests(unittest.TestCase):
         self.application.close()
         self.temporary.cleanup()
 
+    def test_songformer_timeline_cannot_be_approved_for_live_recall(
+        self,
+    ) -> None:
+        media = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:diagnostic-songformer",
+            title="Diagnostic teacher",
+            duration_ms=60_000,
+            observed_position_ms=10_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=False,
+        )
+        song_id = self.application.memory.remember_media(media)
+        recording_id = self.application.memory.remember_recording_version(
+            provider=media.provider,
+            provider_item_id=media.provider_item_id,
+            duration_ms=media.duration_ms,
+            song_id=song_id,
+        )
+        run_id = self.application.memory.begin_teacher_run(
+            teacher_name="SongFormer",
+            teacher_version="diagnostic",
+            device="cpu",
+            preprocessing_version="diagnostic",
+            recording_id=recording_id,
+        )
+        timeline_id = self.application.memory.save_structure_timeline(
+            provenance="songformer_teacher",
+            timeline_version=TEACHER_NORMALIZATION_VERSION,
+            confidence=0.9,
+            recording_id=recording_id,
+            teacher_run_id=run_id,
+            segments=[{
+                "start_ms": 0,
+                "end_ms": 60_000,
+                "functional_label": "chorus",
+            }],
+        )
+        self.application.memory.finish_teacher_run(run_id, status="complete")
+        self.application.media = media
+        self.application.song_id = song_id
+
+        with self.assertRaisesRegex(
+            ValueError, "diagnostic timeline cannot be approved"
+        ):
+            self.application.review_structure_timeline({
+                "timeline_id": timeline_id,
+                "status": "approved",
+            })
+
+        self.assertIsNone(
+            self.application.memory.structure_timeline_review(timeline_id)
+        )
+        self.assertIsNone(self.application.memory.cached_structure_at(
+            recording_id=recording_id,
+            playback_position_ms=10_000,
+        ))
+
+    def test_timeline_library_can_review_song_without_active_playback(self) -> None:
+        recording_id = self.application.memory.remember_recording_version(
+            provider="spotify",
+            provider_item_id="spotify:track:offline-review",
+            duration_ms=90_000,
+            metadata={
+                "track_identity": {
+                    "title": "Offline Review",
+                    "artists": ["Lumen Test"],
+                }
+            },
+        )
+        run_id = self.application.memory.begin_teacher_run(
+            teacher_name="EDMFormer",
+            teacher_version="test",
+            device="cpu",
+            preprocessing_version=EDMFORMER_PREPROCESSING_VERSION,
+            recording_id=recording_id,
+        )
+        timeline_id = self.application.memory.save_structure_timeline(
+            provenance="edmformer_teacher",
+            timeline_version=TEACHER_NORMALIZATION_VERSION,
+            confidence=0.0,
+            recording_id=recording_id,
+            teacher_run_id=run_id,
+            segments=[{
+                "start_ms": 0,
+                "end_ms": 90_000,
+                "energy_label": "build",
+                "raw_label": "Buildup",
+            }],
+        )
+        self.application.memory.finish_teacher_run(run_id, status="complete")
+        self.assertIsNone(self.application.media)
+
+        library = self.application.structure_training_library()
+        self.assertEqual(library["recordings"], 1)
+        self.assertEqual(library["needs_review"], 1)
+        self.assertEqual(library["selected_recording_id"], recording_id)
+        self.assertEqual(
+            library["selected_recording"]["training_status"],
+            "ready_for_next_training",
+        )
+        self.assertEqual(
+            library["structure_timelines"][0]["id"], timeline_id
+        )
+
+        result = self.application.review_structure_timeline({
+            "timeline_id": timeline_id,
+            "recording_id": recording_id,
+            "status": "approved",
+            "participant_id": "desktop-owner",
+        })
+        self.assertEqual(result["recording_id"], recording_id)
+        self.assertIsNone(result["cached_structure"])
+        updated = self.application.structure_training_library(recording_id)
+        self.assertEqual(updated["needs_review"], 0)
+        self.assertEqual(
+            updated["selected_recording"]["review_status"], "approved"
+        )
+        corrected = self.application.correct_structure_timeline({
+            "base_timeline_id": timeline_id,
+            "recording_id": recording_id,
+            "participant_id": "desktop-owner",
+            "note": "The build is actually the drop.",
+            "segments": [{
+                "segment_index": 0,
+                "start_ms": 0,
+                "end_ms": 90_000,
+                "energy_label": "drop",
+            }],
+        })
+        self.assertEqual(corrected["recording_id"], recording_id)
+        self.assertIsNone(corrected["cached_structure"])
+        corrected_library = self.application.structure_training_library(
+            recording_id
+        )
+        self.assertEqual(
+            corrected_library["selected_recording"]["review_status"],
+            "corrected",
+        )
+
     def test_demo_drives_operator_status_without_hardware(self) -> None:
         self.application.start("demo")
         deadline = time.monotonic() + 2.0
@@ -342,6 +907,43 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertGreater(len(status["dmx"]["active_channels"]), 0)
         self.assertEqual(self.application.memory.summary()["totals"]["decisions"], 0)
         self.application.stop()
+
+    def test_rejected_student_is_reported_as_quarantined_not_runtime_error(
+        self,
+    ) -> None:
+        path = self.application._student_model_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        model = StreamingStructureStudent(hidden_size=8, seed=41)
+        model.approved_axes = set()
+        model.save(path)
+        path.with_name(path.stem + ".evaluation.json").write_text(
+            json.dumps(
+                {
+                    "activated": False,
+                    "teacher_normalization_version": (
+                        TEACHER_NORMALIZATION_VERSION
+                    ),
+                    "edmformer_preprocessing_version": (
+                        EDMFORMER_PREPROCESSING_VERSION
+                    ),
+                    "axis_gate_reasons": {
+                        "energy": ["did not beat held-out baseline"]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.application._load_student_model()
+        status = self.application.snapshot()["structure_model"]
+
+        self.assertEqual(status["state"], "quarantined")
+        self.assertIsNone(status["error"])
+        self.assertEqual(
+            status["gate_reasons"],
+            ["did not beat held-out baseline"],
+        )
+        self.assertIsNone(self.application._student_model)
 
     def test_rehearsal_controls_validate_and_clamp(self) -> None:
         controls = RehearsalControls()
@@ -372,7 +974,7 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertTrue(editor["modified"])
         self.assertTrue(self.application.motion_path.is_file())
         restored = self.application._load_motion_tunings()
-        self.assertEqual(restored["figure_eight"].pan_size, 0.88)
+        self.assertEqual(restored.movers["figure_eight"].pan_size, 0.88)
         reset = self.application.patch_motion_routine({
             "routine": "figure_eight", "action": "reset",
         })
@@ -470,10 +1072,164 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertEqual(model._last_timestamp_s, 1.0)
         self.assertTrue(status["prediction"]["accepted_axes"]["energy"])
 
+    def test_approved_student_boundary_reaches_the_live_resolver(self) -> None:
+        model = StreamingStructureStudent(hidden_size=8, seed=19)
+        model.boundary_weights.fill(0.0)
+        model.boundary_residual_weights.fill(0.0)
+        model.boundary_bias = 20.0
+        model.approved_axes = {"boundary"}
+        self.application._student_model = model
+        raw = MusicalObservation(
+            timestamp_s=4.0,
+            loudness=0.45,
+            onset_strength=0.3,
+            low_energy=0.4,
+            mid_energy=0.35,
+            high_energy=0.25,
+            section="groove",
+            section_confidence=0.7,
+        )
+        metrics = AudioInputMetrics(
+            timestamp_s=4.0,
+            frame_count=2048,
+            rms=0.10,
+            dbfs=-20.0,
+            peak=0.35,
+            channel_rms=(0.10, 0.10),
+            channel_peak=(0.35, 0.34),
+            clipped_samples=0,
+            waveform=(0.0,),
+        )
+
+        self.application._apply_student_structure(raw, metrics)
+        self.application._resolve_structure(raw, metrics)
+
+        prediction = self.application._student_prediction
+        self.assertIsNotNone(prediction)
+        self.assertTrue(prediction["accepted_axes"]["boundary"])
+        boundary = self.application._effective_structure["axes"]["boundary"]
+        self.assertEqual(boundary["source"], "streaming_student")
+        self.assertGreater(boundary["confidence"], 0.99)
+
+    def test_unapproved_student_energy_head_cannot_control_live(self) -> None:
+        model = StreamingStructureStudent()
+        for axis in LABELS:
+            model.head_weights[axis].fill(0.0)
+            model.residual_weights[axis].fill(0.0)
+            model.head_bias[axis].fill(-8.0)
+        model.head_bias["energy"][LABELS["energy"].index("build")] = 8.0
+        model.approved_axes = {"content", "boundary"}
+        self.application._student_model = model
+        result = self.application._apply_student_structure(
+            MusicalObservation(
+                timestamp_s=1.0,
+                loudness=0.5,
+                onset_strength=0.3,
+                low_energy=0.4,
+                mid_energy=0.4,
+                high_energy=0.2,
+                section="groove",
+                section_confidence=0.7,
+            ),
+            AudioInputMetrics.silence(),
+        )
+        prediction = self.application.snapshot()["structure_model"][
+            "prediction"
+        ]
+        self.assertEqual(result.section, "groove")
+        self.assertEqual(prediction["selected_axis"], "live_analyzer")
+        self.assertFalse(prediction["accepted_axes"]["energy"])
+        self.assertNotIn("energy", prediction["approved_axes"])
+
+    def test_new_audio_session_resets_student_and_decoder_state(self) -> None:
+        class EmptyCapture:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                del args
+
+            @staticmethod
+            def chunks():
+                return iter(())
+
+        model = StreamingStructureStudent(hidden_size=8, seed=31)
+        self.application._student_model = model
+        self.application._apply_student_structure(
+            MusicalObservation(
+                timestamp_s=12.0,
+                loudness=0.7,
+                onset_strength=0.5,
+                low_energy=0.5,
+                mid_energy=0.4,
+                high_energy=0.3,
+                section="groove",
+                section_confidence=0.5,
+            ),
+            AudioInputMetrics.silence(),
+        )
+        self.application._student_decoder.update(
+            StudentPrediction(
+                functional="chorus",
+                energy="drop",
+                content="instrumental",
+                confidence={
+                    "functional": 0.9,
+                    "energy": 0.9,
+                    "content": 0.9,
+                },
+                probabilities={
+                    "functional": {},
+                    "energy": {},
+                    "content": {},
+                },
+                boundary_probability=0.8,
+            ),
+            12.0,
+        )
+        self.assertTrue(model._started)
+        self.assertIsNotNone(self.application._student_prediction)
+        self.assertTrue(
+            any(
+                value is not None
+                for value in self.application._student_decoder._selected.values()
+            )
+        )
+
+        self.application.training_capture_enabled = False
+        with (
+            patch.object(self.application, "_prepare_dedicated_line_input"),
+            patch("lumen_engine.control.AlsaLineIn", return_value=EmptyCapture()),
+        ):
+            self.application._run_audio(object())
+
+        self.assertFalse(model._started)
+        self.assertIsNone(model._last_timestamp_s)
+        self.assertIsNone(self.application._student_prediction)
+        self.assertTrue(
+            all(
+                value is None
+                for value in self.application._student_decoder._selected.values()
+            )
+        )
+
+    def test_causal_reset_during_live_silence_preserves_physical_gate(self) -> None:
+        self.application._physical_quiet_since_s = 12.0
+        self.application._physical_signal_since_s = None
+        self.application._physical_silence_active = True
+
+        self.application._reset_student_stream(
+            reset_physical_silence=False
+        )
+
+        self.assertEqual(self.application._physical_quiet_since_s, 12.0)
+        self.assertIsNone(self.application._physical_signal_since_s)
+        self.assertTrue(self.application._physical_silence_active)
+
     def test_weak_student_axes_are_visible_but_cannot_drive_choreography(self) -> None:
         self.application._student_prediction = {
             "functional": "chorus",
-            "energy": "release",
+            "energy": "drop",
             "content": "vocal",
             "confidence": {
                 "functional": 0.59,
@@ -501,7 +1257,7 @@ class ControlApplicationTests(unittest.TestCase):
         for axis in LABELS:
             model.head_weights[axis].fill(0.0)
             model.head_bias[axis].fill(-8.0)
-        model.head_bias["energy"][LABELS["energy"].index("sustained")] = 8.0
+        model.head_bias["energy"][LABELS["energy"].index("unknown")] = 8.0
         model.head_bias["functional"][
             LABELS["functional"].index("chorus")
         ] = 8.0
@@ -555,6 +1311,134 @@ class ControlApplicationTests(unittest.TestCase):
             release.set()
             worker.join(timeout=1.0)
 
+    def test_external_worker_lease_blocks_ui_analysis_training_and_live(
+        self,
+    ) -> None:
+        job_id = self.application.memory.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={"recording_id": "external-worker"},
+        )
+        claimed = self.application.memory.claim_analysis_job(
+            worker_id="worker:external-test", worker_pid=os.getpid()
+        )
+        self.assertEqual(claimed["id"], job_id)
+
+        status = self.application.research_status()
+        self.assertTrue(status["worker"]["running"])
+        self.assertTrue(status["worker"]["externally_managed"])
+        self.assertFalse(status["worker"]["cancel_supported"])
+        self.assertEqual(
+            status["worker"]["progress"]["current_job_type"],
+            EDMFORMER_JOB,
+        )
+        reopened = LumenApplication(
+            rig_path=self.rig_path,
+            memory_path=Path(self.temporary.name) / "memory.sqlite3",
+            settings_path=Path(self.temporary.name) / "reopened.json",
+        )
+        try:
+            reopened_status = reopened.research_status()
+            self.assertTrue(reopened_status["worker"]["running"])
+            self.assertTrue(
+                reopened_status["worker"]["externally_managed"]
+            )
+            self.assertEqual(
+                reopened_status["worker"]["recovered_jobs"], []
+            )
+        finally:
+            reopened.close()
+
+        with self.assertRaisesRegex(RuntimeError, "another Lumen process"):
+            self.application.start("monitor")
+        with patch.object(
+            self.application, "export_training_data"
+        ) as export:
+            with self.assertRaisesRegex(
+                RuntimeError, "another Lumen process"
+            ):
+                self.application.analyze_training_data()
+            export.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "another Lumen process"):
+            self.application.train_structure_student({"epochs": 1})
+
+        # Completion by the external process is reflected from the durable
+        # job row on the next status poll; no application restart is needed.
+        externally_trained = StreamingStructureStudent()
+        externally_trained.training_examples = 42
+        externally_trained.save(self.application._student_model_path)
+        self.application._student_model_path.with_name(
+            self.application._student_model_path.stem + ".evaluation.json"
+        ).write_text(
+            json.dumps({
+                "activated": True,
+                "teacher_normalization_version": (
+                    TEACHER_NORMALIZATION_VERSION
+                ),
+                "edmformer_preprocessing_version": (
+                    EDMFORMER_PREPROCESSING_VERSION
+                ),
+            }),
+            encoding="utf-8",
+        )
+        self.application.memory.update_analysis_job(
+            job_id, status="complete", result={"elapsed_s": 12.0}
+        )
+        completed = self.application.research_status()
+        self.assertFalse(completed["worker"]["running"])
+        self.assertFalse(completed["worker"]["externally_managed"])
+        self.assertFalse(completed["worker"]["cancel_supported"])
+        self.assertTrue(completed["training"]["model"]["active"])
+        self.assertEqual(
+            self.application._student_model.training_examples, 42
+        )
+
+    def test_obsolete_student_artifact_cannot_control_live(self) -> None:
+        stale = StreamingStructureStudent()
+        stale.save(self.application._student_model_path)
+        self.application._student_model_path.with_name(
+            self.application._student_model_path.stem + ".evaluation.json"
+        ).write_text(
+            json.dumps({
+                "teacher_normalization_version": (
+                    "lumen_normalized_structure_v1"
+                )
+            }),
+            encoding="utf-8",
+        )
+
+        self.application._load_student_model()
+
+        self.assertIsNone(self.application._student_model)
+        self.assertIn("obsolete teacher normalization", (
+            self.application._student_model_error or ""
+        ))
+
+    def test_status_poll_recovers_external_worker_that_dies_after_startup(
+        self,
+    ) -> None:
+        job_id = self.application.memory.enqueue_analysis_job(
+            job_type=SONGFORMER_JOB,
+            payload={"recording_id": "worker-died-after-ui-open"},
+        )
+        claimed = self.application.memory.claim_analysis_job(
+            worker_id="worker:dead-after-open",
+            worker_pid=999_999_999,
+        )
+        self.assertEqual(claimed["id"], job_id)
+
+        status = self.application.research_status()
+
+        self.assertFalse(status["worker"]["running"])
+        self.assertEqual(
+            [row["job_id"] for row in status["worker"]["recovered_jobs"]],
+            [job_id],
+        )
+        jobs = {
+            row["id"]: row
+            for row in self.application.memory.list_analysis_jobs()
+        }
+        self.assertEqual(jobs[job_id]["status"], "queued")
+
     def test_research_status_reports_runtime_model_failure_not_file_presence(
         self,
     ) -> None:
@@ -588,6 +1472,29 @@ class ControlApplicationTests(unittest.TestCase):
 
         self.assertFalse(result["started"])
         self.assertIn("No new", result["message"])
+
+    def test_analyze_reports_retained_ineligible_recordings(self) -> None:
+        with patch.object(
+            self.application,
+            "_prepare_unindexed_research_captures",
+            return_value={
+                "sessions_prepared": 1,
+                "recordings": 3,
+                "jobs_queued": 0,
+                "recordings_ineligible": 3,
+                "recordings_partial": 2,
+                "recordings_unknown": 1,
+            },
+        ), patch.object(
+            self.application,
+            "research_status",
+            return_value={"worker": {"running": False}},
+        ):
+            result = self.application.analyze_training_data()
+
+        self.assertFalse(result["started"])
+        self.assertIn("Found 3 captured recording(s)", result["message"])
+        self.assertIn("2 partial, 1 unidentified", result["message"])
 
     def test_controls_feedback_target_and_fixture_edit_are_operable(self) -> None:
         status = self.application.apply_preset("restrained")
@@ -658,6 +1565,28 @@ class ControlApplicationTests(unittest.TestCase):
             server.shutdown()
             ThreadingHTTPServer.server_close(server)
             thread.join(timeout=3)
+
+    def test_http_status_body_is_shared_across_concurrent_ui_reads(
+        self,
+    ) -> None:
+        server = LumenHTTPServer(("127.0.0.1", 0), self.application)
+        try:
+            self.assertGreaterEqual(server.request_queue_size, 64)
+            with patch.object(
+                self.application,
+                "snapshot",
+                wraps=self.application.snapshot,
+            ) as snapshot:
+                first = server.status_body()
+                second = server.status_body()
+                self.assertEqual(first, second)
+                self.assertEqual(snapshot.call_count, 1)
+
+                time.sleep(0.04)
+                server.status_body()
+                self.assertEqual(snapshot.call_count, 2)
+        finally:
+            ThreadingHTTPServer.server_close(server)
 
     def test_analyze_http_api_starts_and_reports_virtual_batch(self) -> None:
         job_id = self.application.memory.enqueue_analysis_job(
@@ -780,6 +1709,7 @@ class ControlApplicationTests(unittest.TestCase):
         overall = self.application._feedback_biases["overall"]
         self.assertGreater(overall["motion"], 0.0)
         self.assertLess(overall["strobe"], 0.0)
+        self.assertLess(overall["strobe_enabled"], 0.0)
         self.assertLess(overall["palette"], 0.0)
 
         fixture_id = self.application.rig.fixtures[0].fixture_id
@@ -805,6 +1735,358 @@ class ControlApplicationTests(unittest.TestCase):
         rebuilt = self.application._feedback_biases["overall"]
         self.assertGreater(rebuilt["motion"], 0.0)
         self.assertLess(rebuilt["strobe"], 0.0)
+        self.assertLess(rebuilt["strobe_enabled"], 0.0)
+
+    def test_feedback_rebuild_preserves_literal_motion_axes_across_restart(self) -> None:
+        for label in ("faster", "increase_movement", "too_busy"):
+            self.application.add_feedback({
+                "label": label,
+                "value": 1,
+                "scope": "overall",
+                "participant_id": f"listener-{label}",
+                "client_event_id": f"event-{label}",
+            })
+        bias = self.application._feedback_biases["overall"]
+        self.assertGreater(bias["motion_speed"], 0.0)
+        self.assertGreater(bias["travel_size"], 0.0)
+        self.assertLess(bias["activity_density"], 0.0)
+
+        expected = {
+            axis: bias[axis]
+            for axis in (
+                "motion_speed", "travel_size", "activity_density"
+            )
+        }
+        memory_path = self.application.memory_path
+        self.application.close()
+        self.application = LumenApplication(
+            rig_path=self.rig_path,
+            memory_path=memory_path,
+            settings_path=Path(self.temporary.name) / "settings.json",
+        )
+        restored = self.application._feedback_biases["overall"]
+        for axis, value in expected.items():
+            self.assertAlmostEqual(restored[axis], value)
+
+    def test_strobe_enable_and_rate_remain_independent(self) -> None:
+        self.application.add_feedback({
+            "label": "faster_strobe",
+            "value": 1,
+            "scope": "overall",
+        })
+        overall = self.application._feedback_biases["overall"]
+        self.assertGreater(overall["strobe_rate"], 0.0)
+        self.assertEqual(overall["strobe_enabled"], 0.0)
+        self.assertEqual(overall["strobe"], 0.0)
+
+        self.application.add_feedback({
+            "label": "strobe",
+            "value": 1,
+            "scope": "group",
+            "group_id": "movers",
+        })
+        mover = self.application._feedback_biases[
+            self.application.rig.fixtures[0].fixture_id
+        ]
+        self.assertGreater(mover["strobe_enabled"], 0.0)
+        self.assertEqual(mover["strobe_rate"], 0.0)
+
+    def test_group_song_and_section_feedback_keys_keep_literal_axis(self) -> None:
+        media = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:literal-scope",
+            title="Literal Scope",
+            artists=("Scope Artist",),
+            is_playing=False,
+        )
+        self.application._remember_media_identity(media)
+        self.application.observation = replace(
+            self.application.observation, section="build"
+        )
+        self.application.add_feedback({
+            "label": "faster",
+            "value": 1,
+            "scope": "group",
+            "group_id": "movers",
+        })
+        assert self.application.song_id is not None
+        song_id = self.application.song_id
+        for fixture in self.application.rig.fixtures:
+            section_key = (
+                f"song:{self.application.song_id}:section:build:fixture:"
+                f"{fixture.fixture_id}"
+            )
+            self.assertIn(section_key, self.application._feedback_biases)
+            self.assertGreater(
+                self.application._feedback_biases[section_key]["motion_speed"],
+                0.0,
+            )
+            self.assertEqual(
+                self.application._feedback_biases[section_key]["travel_size"],
+                0.0,
+            )
+            self.assertNotIn(
+                fixture.fixture_id, self.application._feedback_biases
+            )
+            self.assertNotIn(
+                f"song:{song_id}:fixture:{fixture.fixture_id}",
+                self.application._feedback_biases,
+            )
+            self.assertNotIn(
+                f"artist:scope artist:fixture:{fixture.fixture_id}",
+                self.application._feedback_biases,
+            )
+        memory_path = self.application.memory_path
+        self.application.close()
+        self.application = LumenApplication(
+            rig_path=self.rig_path,
+            memory_path=memory_path,
+            settings_path=Path(self.temporary.name) / "settings.json",
+        )
+        for fixture in self.application.rig.fixtures:
+            section_key = (
+                f"song:{song_id}:section:build:fixture:{fixture.fixture_id}"
+            )
+            self.assertGreater(
+                self.application._feedback_biases[section_key]["motion_speed"],
+                0.0,
+            )
+
+    def test_default_feedback_does_not_cross_song_or_section(self) -> None:
+        first = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:first-feedback-context",
+            title="First Feedback Context",
+            is_playing=False,
+        )
+        self.application._remember_media_identity(first)
+        self.application.observation = replace(
+            self.application.observation, section="build"
+        )
+        self.application.add_feedback({
+            "label": "faster",
+            "value": 1,
+            "scope": "overall",
+        })
+        assert self.application.song_id is not None
+        first_song_id = self.application.song_id
+        expected_key = f"song:{first_song_id}:section:build"
+        self.assertIn(expected_key, self.application._feedback_biases)
+        self.assertNotIn("overall", self.application._feedback_biases)
+        self.assertNotIn(
+            f"song:{first_song_id}", self.application._feedback_biases
+        )
+
+        runtime = PerformanceRuntime(
+            self.application.rig.fixtures, VirtualDMXOutput()
+        )
+        fixture_id = self.application.rig.fixtures[0].fixture_id
+        runtime.replace_feedback(self.application._feedback_biases)
+        runtime.set_media_context(first_song_id, "build")
+        self.assertGreater(
+            runtime._characteristics_feedback_for(fixture_id).motion_speed,
+            0.0,
+        )
+        runtime.set_media_context(first_song_id, "groove")
+        self.assertEqual(
+            runtime._characteristics_feedback_for(fixture_id).motion_speed,
+            0.0,
+        )
+        second = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:second-feedback-context",
+            title="Second Feedback Context",
+            is_playing=False,
+        )
+        self.application._remember_media_identity(second)
+        assert self.application.song_id is not None
+        runtime.set_media_context(self.application.song_id, "build")
+        self.assertEqual(
+            runtime._characteristics_feedback_for(fixture_id).motion_speed,
+            0.0,
+        )
+
+        self.application.add_feedback({
+            "label": "slower",
+            "value": 1,
+            "scope": "overall",
+            "lifetime": "global",
+        })
+        self.assertLess(
+            self.application._feedback_biases["overall"]["motion_speed"],
+            0.0,
+        )
+
+    def test_free_form_note_uses_literal_axes_and_routine_preferences(self) -> None:
+        self.application.add_feedback({
+            "label": "operator_note",
+            "value": 0,
+            "scope": "overall",
+            "note": (
+                "Faster strobe, more movement, too busy, timing off; "
+                "make it brighter and warmer, lock to the beat; use figure eight"
+            ),
+        })
+        bias = self.application._feedback_biases["overall"]
+        self.assertGreater(bias["strobe_rate"], 0.0)
+        self.assertEqual(bias["strobe_enabled"], 0.0)
+        self.assertEqual(bias["motion_speed"], 0.0)
+        self.assertGreater(bias["travel_size"], 0.0)
+        self.assertLess(bias["activity_density"], 0.0)
+        self.assertGreater(bias["brightness"], 0.0)
+        self.assertGreater(bias["palette"], 0.0)
+        self.assertGreater(bias["beat_sync"], 0.0)
+        self.assertLess(bias["cue_timing"], 0.0)
+        self.assertGreater(bias["routines"]["figure_eight"], 0.0)
+        memory_path = self.application.memory_path
+        self.application.close()
+        self.application = LumenApplication(
+            rig_path=self.rig_path,
+            memory_path=memory_path,
+            settings_path=Path(self.temporary.name) / "settings.json",
+        )
+        restored = self.application._feedback_biases["overall"]
+        self.assertGreater(restored["strobe_rate"], 0.0)
+        self.assertEqual(restored["strobe_enabled"], 0.0)
+        self.assertGreater(restored["brightness"], 0.0)
+        self.assertGreater(restored["palette"], 0.0)
+        self.assertGreater(restored["beat_sync"], 0.0)
+        self.assertLess(restored["cue_timing"], 0.0)
+        self.assertGreater(restored["routines"]["figure_eight"], 0.0)
+
+    def test_zero_value_ui_note_still_applies_parsed_semantics(self) -> None:
+        self.application.add_feedback({
+            "label": "operator_note",
+            "value": 0,
+            "scope": "overall",
+            "note": "Please use more movement and make it brighter",
+        })
+        bias = self.application._feedback_biases["overall"]
+        self.assertGreater(bias["motion"], 0.0)
+        self.assertGreater(bias["intensity"], 0.0)
+
+    def test_feedback_consensus_key_changes_with_performed_context(self) -> None:
+        common = {
+            "song_id": 1,
+            "listening_session_id": "session",
+            "created_unix_ms": 10_001,
+            "label": "pick_it_up",
+            "scope": "overall",
+            "fixture_id": None,
+            "section": "groove",
+        }
+        first = self.application._feedback_batch_event_id(
+            **common, routine="figure_eight"
+        )
+        second = self.application._feedback_batch_event_id(
+            **common, routine="fan_sweep"
+        )
+        self.assertNotEqual(first, second)
+
+        lane_common = {
+            **common,
+            "routine": "fan_sweep",
+            "lane": "center",
+        }
+        first_lease = self.application._feedback_batch_event_id(
+            **lane_common,
+            active_sequence_id="center-sequence-a",
+            boundary_id="center-boundary-4",
+        )
+        second_lease = self.application._feedback_batch_event_id(
+            **lane_common,
+            active_sequence_id="center-sequence-b",
+            boundary_id="center-boundary-5",
+        )
+        self.assertNotEqual(first_lease, second_lease)
+
+    def test_center_feedback_persists_center_planner_context(self) -> None:
+        self.application.start("demo")
+        deadline = time.monotonic() + 2.0
+        while (
+            self.application.snapshot()["decision"] is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        choreography = self.application.snapshot()["choreography"]
+        center = choreography["lanes"]["center"]
+        movers = choreography["lanes"]["movers"]
+        result = self.application.add_feedback({
+            "label": "more_like_this",
+            "value": 1,
+            "scope": "group",
+            "group_id": "center",
+        })
+        row = next(
+            item for item in self.application.memory.all_feedback()
+            if item["id"] == result["feedback_id"]
+        )
+        self.assertEqual(set(row["lane_context"]["lanes"]), {"center"})
+        stored = row["lane_context"]["lanes"]["center"]
+        self.assertEqual(
+            stored["active_sequence_id"], center["active_sequence_id"]
+        )
+        self.assertEqual(
+            stored["boundary_id"], center["active_boundary_id"]
+        )
+        self.assertEqual(
+            stored["routine"], center["active_step"]["routine"]
+        )
+        self.assertEqual(row["routine"], center["active_step"]["routine"])
+        if (
+            movers["active_step"]["routine"]
+            != center["active_step"]["routine"]
+        ):
+            self.assertNotEqual(
+                row["routine"], movers["active_step"]["routine"]
+            )
+        self.assertEqual(set(result["model_event_ids"]), {"center"})
+        self.application.stop()
+
+    def test_unimplemented_preferred_actions_are_rejected(self) -> None:
+        for label in ("hold_position", "blackout_accent"):
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.application.add_training_annotation({
+                    "kind": "preferred_action",
+                    "label": label,
+                    "scope": "overall",
+                })
+
+    def test_song_context_uses_canonical_techno_states_and_events(self) -> None:
+        self.application._remember_media_identity(MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:structure-scope",
+            title="Structure Scope",
+            duration_ms=180_000,
+            observed_position_ms=10_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=False,
+        ))
+        state = self.application.add_training_annotation({
+            "kind": "musical_context",
+            "label": "drop",
+            # Legacy/mobile clients may still send the currently selected
+            # fixture target. Song structure must ignore it.
+            "scope": "group",
+            "group_id": "movers",
+        })
+        event = self.application.add_training_annotation({
+            "kind": "musical_context",
+            "label": "drop_onset",
+            "scope": "overall",
+        })
+        self.assertEqual(state["label"], "drop")
+        self.assertEqual(event["label"], "drop_onset")
+        stored = self.application.memory.musical_structure_annotations()
+        self.assertTrue(stored)
+        self.assertTrue(all(item["scope"] == "overall" for item in stored))
+        self.assertTrue(all(item["fixture_id"] is None for item in stored))
+        with self.assertRaisesRegex(ValueError, "unknown training annotation"):
+            self.application.add_training_annotation({
+                "kind": "musical_context",
+                "label": "release",
+                "scope": "overall",
+            })
 
     def test_feedback_delete_reverses_sequence_learning_event(self) -> None:
         self.application.start("demo")
@@ -821,18 +2103,560 @@ class ControlApplicationTests(unittest.TestCase):
                 "scope": "overall",
             }
         )
-        event_id = f"feedback:{result['feedback_id']}"
+        event_id = result["model_event_id"]
+        lane_event_ids = result["model_event_ids"]
         state = self.application._choreography_model.state_dict()
-        self.assertIn(event_id, state["events"])
+        self.assertEqual(set(lane_event_ids), {"movers", "center"})
+        self.assertTrue(all(
+            lane_event_id.startswith(event_id + ":")
+            for lane_event_id in lane_event_ids.values()
+        ))
+        self.assertIn(lane_event_ids["movers"], state["events"])
+        self.assertIn(lane_event_ids["center"], state["events"])
         removed = self.application.delete_feedback(
             {"feedback_id": result["feedback_id"]}
         )
         self.assertTrue(removed["sequence_update_removed"])
+        events = self.application._choreography_model.state_dict()["events"]
+        self.assertNotIn(lane_event_ids["movers"], events)
+        self.assertNotIn(lane_event_ids["center"], events)
+        self.application.stop()
+
+    def test_feedback_delete_forgets_legacy_feedback_id_event(self) -> None:
+        self.application.start("demo")
+        deadline = time.monotonic() + 2.0
+        while (
+            self.application.snapshot()["decision"] is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        result = self.application.add_feedback({
+            "label": "more_like_this",
+            "value": 1,
+            "scope": "group",
+            "group_id": "center",
+        })
+        state = self.application._choreography_model.state_dict()
+        current_event_id = result["model_event_ids"]["center"]
+        legacy_event_id = f"feedback:{result['feedback_id']}"
+        state["events"][legacy_event_id] = state["events"].pop(
+            current_event_id
+        )
+        self.application._choreography_model = (
+            SequencePreferenceModel.from_state_dict(state)
+        )
+        removed = self.application.delete_feedback({
+            "feedback_id": result["feedback_id"]
+        })
+        self.assertTrue(removed["sequence_update_removed"])
         self.assertNotIn(
-            event_id,
+            legacy_event_id,
             self.application._choreography_model.state_dict()["events"],
         )
         self.application.stop()
+
+    def test_repeated_directional_feedback_is_one_urgency_event_without_named_routine(
+        self,
+    ) -> None:
+        self.application.start("demo")
+        deadline = time.monotonic() + 2.0
+        while (
+            self.application.snapshot()["decision"] is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        first = self.application.add_feedback({
+            "label": "pick_it_up",
+            "value": 1,
+            "scope": "overall",
+            "participant_id": "listener-a",
+            "client_event_id": "tap-1",
+        })
+        second = self.application.add_feedback({
+            "label": "pick_it_up",
+            "value": 1,
+            "scope": "overall",
+            "participant_id": "listener-a",
+            "client_event_id": "tap-2",
+        })
+        self.assertEqual(first["model_event_id"], second["model_event_id"])
+        self.assertEqual(second["feedback_occurrences"], 2)
+        self.assertGreater(second["urgency"], first["urgency"])
+        self.assertEqual(
+            self.application._feedback_routine_effect(
+                "pick_it_up", None
+            ),
+            {},
+        )
+        events = self.application._choreography_model.state_dict()["events"]
+        matching = {
+            key: value for key, value in events.items()
+            if key.startswith(second["model_event_id"] + ":")
+        }
+        self.assertEqual(set(key.rsplit(":", 1)[-1] for key in matching), {
+            "movers", "center",
+        })
+        for event in matching.values():
+            example = event["example"]
+            self.assertIsNone(example["preferred"])
+            self.assertEqual(example["feedback"][0]["occurrences"], 2)
+        self.application.delete_feedback({
+            "feedback_id": second["feedback_id"],
+            "participant_id": "listener-a",
+        })
+        events = self.application._choreography_model.state_dict()["events"]
+        matching = [
+            value for key, value in events.items()
+            if key.startswith(second["model_event_id"] + ":")
+        ]
+        self.assertTrue(matching)
+        self.assertTrue(all(
+            value["example"]["feedback"][0]["occurrences"] == 1
+            for value in matching
+        ))
+        self.application.stop()
+
+    def test_structure_resolver_rejects_false_student_silence_and_falls_back_per_axis(
+        self,
+    ) -> None:
+        raw = MusicalObservation(
+            timestamp_s=10.0,
+            loudness=0.45,
+            onset_strength=0.2,
+            low_energy=0.4,
+            mid_energy=0.4,
+            high_energy=0.2,
+            section="groove",
+            section_confidence=0.62,
+        )
+        metrics = AudioInputMetrics(
+            timestamp_s=10.0,
+            frame_count=2048,
+            rms=0.12,
+            dbfs=-18.4,
+            peak=0.42,
+            channel_rms=(0.12, 0.12),
+            channel_peak=(0.42, 0.40),
+            clipped_samples=0,
+            waveform=(0.0,),
+        )
+        self.application._student_prediction = {
+            "functional": "verse",
+            "energy": "silence",
+            "content": "instrumental",
+            "confidence": {
+                "functional": 0.8, "energy": 0.99, "content": 0.8,
+            },
+            "accepted_axes": {
+                "functional": True, "energy": True,
+                "content": True, "boundary": False,
+            },
+        }
+        resolved = self.application._resolve_structure(raw, metrics)
+        self.assertEqual(resolved.section, "groove")
+        self.assertEqual(
+            self.application._effective_structure["axes"]["energy"]["source"],
+            "live_analyzer",
+        )
+
+        self.application._student_prediction["energy"] = "build"
+        self.application._student_prediction["confidence"]["energy"] = 0.82
+        self.application._cached_structure_prediction = {
+            "axes": {
+                "functional": {
+                    "label": "chorus",
+                    "confidence": 0.91,
+                    "timeline_id": "timeline-functional",
+                    "provenance": "songformer:test",
+                },
+                "energy": {"label": "unknown", "confidence": 0.0},
+                "content": {"label": "unknown", "confidence": 0.0},
+            },
+            "boundary": {},
+        }
+        resolved = self.application._resolve_structure(raw, metrics)
+        axes = self.application._effective_structure["axes"]
+        self.assertEqual(resolved.section, "build")
+        self.assertEqual(axes["functional"]["source"], "cached_offline_teacher")
+        self.assertEqual(axes["energy"]["source"], "streaming_student")
+        self.assertEqual(axes["functional"]["timeline_id"], "timeline-functional")
+
+    def test_physical_silence_overrides_cached_and_student_structure(self) -> None:
+        self.application._cached_structure_prediction = {
+            "axes": {
+                "energy": {"label": "drop", "confidence": 0.99},
+            },
+            "boundary": {"current_confidence": 0.9},
+        }
+        self.application._student_prediction = {
+            "energy": "drop",
+            "confidence": {"energy": 0.99},
+            "accepted_axes": {"energy": True, "boundary": True},
+            "boundary_probability": 0.9,
+        }
+        quiet = MusicalObservation(
+            timestamp_s=20.0,
+            loudness=0.0,
+            onset_strength=0.0,
+            low_energy=0.0,
+            mid_energy=0.0,
+            high_energy=0.0,
+            section="groove",
+            section_confidence=0.2,
+        )
+        self.application._resolve_structure(
+            quiet, AudioInputMetrics.silence(timestamp_s=20.0)
+        )
+        quiet = replace(quiet, timestamp_s=20.6)
+        resolved = self.application._resolve_structure(
+            quiet, AudioInputMetrics.silence(timestamp_s=20.6)
+        )
+        resolution = self.application._effective_structure
+        self.assertEqual(resolved.section, "silence")
+        self.assertEqual(resolution["source"], "live_audio_silence")
+        self.assertEqual(
+            resolution["axes"]["boundary"]["source"],
+            "live_audio_silence",
+        )
+
+        audible_metrics = replace(
+            AudioInputMetrics.silence(timestamp_s=20.64),
+            rms=0.10,
+            dbfs=-20.0,
+            peak=0.35,
+        )
+        audible = replace(
+            quiet,
+            timestamp_s=20.64,
+            loudness=0.45,
+            onset_strength=0.2,
+        )
+        # One packet cannot knock the physical silence gate open.
+        resolved = self.application._resolve_structure(
+            audible, audible_metrics
+        )
+        self.assertEqual(resolved.section, "silence")
+        # Sustained signal can.
+        resolved = self.application._resolve_structure(
+            replace(audible, timestamp_s=20.78),
+            replace(audible_metrics, timestamp_s=20.78),
+        )
+        self.assertNotEqual(resolved.section, "silence")
+
+    def test_uncalibrated_teacher_default_does_not_override_student_energy(
+        self,
+    ) -> None:
+        raw = MusicalObservation(
+            timestamp_s=30.0,
+            loudness=0.5,
+            onset_strength=0.3,
+            low_energy=0.5,
+            mid_energy=0.4,
+            high_energy=0.3,
+            section="groove",
+            section_confidence=0.65,
+        )
+        metrics = AudioInputMetrics(
+            timestamp_s=30.0,
+            frame_count=2048,
+            rms=0.12,
+            dbfs=-18.0,
+            peak=0.4,
+            channel_rms=(0.12, 0.12),
+            channel_peak=(0.4, 0.4),
+            clipped_samples=0,
+            waveform=(0.0,),
+        )
+        self.application._cached_structure_prediction = {
+            "axes": {
+                "energy": {
+                    "label": "drop",
+                    # Legacy teacher default after memory reliability scaling.
+                    "confidence": 0.72 * 0.72,
+                }
+            },
+            "boundary": {},
+        }
+        self.application._student_prediction = {
+            "energy": "build",
+            "confidence": {"energy": 0.82},
+            "accepted_axes": {"energy": True, "boundary": False},
+        }
+
+        resolved = self.application._resolve_structure(raw, metrics)
+
+        self.assertEqual(resolved.section, "build")
+        self.assertEqual(
+            self.application._effective_structure["axes"]["energy"]["source"],
+            "streaming_student",
+        )
+
+    def test_approved_unscored_teacher_is_authoritative_without_fake_probability(
+        self,
+    ) -> None:
+        raw = MusicalObservation(
+            timestamp_s=30.0,
+            loudness=0.5,
+            onset_strength=0.3,
+            low_energy=0.5,
+            mid_energy=0.4,
+            high_energy=0.3,
+            section="groove",
+            section_confidence=0.65,
+        )
+        metrics = AudioInputMetrics(
+            timestamp_s=30.0,
+            frame_count=2048,
+            rms=0.12,
+            dbfs=-18.0,
+            peak=0.4,
+            channel_rms=(0.12, 0.12),
+            channel_peak=(0.4, 0.4),
+            clipped_samples=0,
+            waveform=(0.0,),
+        )
+        self.application._cached_structure_prediction = {
+            "axes": {
+                "energy": {
+                    "label": "build",
+                    "confidence": 0.0,
+                    "model_confidence": 0.0,
+                    "operator_trust": 1.0,
+                    "recall_authority": "operator_approved",
+                    "timeline_id": "approved-zero",
+                }
+            },
+            "boundary": {},
+        }
+
+        resolved = self.application._resolve_structure(raw, metrics)
+        axis = self.application._effective_structure["axes"]["energy"]
+        self.assertEqual(resolved.section, "build")
+        self.assertEqual(resolved.section_confidence, 1.0)
+        self.assertEqual(axis["source"], "operator_approved_timeline")
+        self.assertEqual(axis["model_confidence"], 0.0)
+        self.assertEqual(axis["operator_trust"], 1.0)
+        self.assertEqual(axis["confidence"], 0.0)
+
+    def test_every_performance_trace_frame_names_effective_structure_source(
+        self,
+    ) -> None:
+        self.application._effective_structure = {
+            "schema": "lumen_structure_resolution_v2",
+            "source": "streaming_student",
+            "section": "build",
+            "confidence": 0.81,
+            "axes": {
+                "energy": {
+                    "label": "build",
+                    "confidence": 0.81,
+                    "source": "streaming_student",
+                    "accepted_reason": "test approved axis",
+                    "provenance": "model:test",
+                    "timeline_id": None,
+                }
+            },
+            "beat_timing_authority": "audio_sample_clock",
+        }
+        self.application.start("demo")
+        deadline = time.monotonic() + 2.0
+        samples = []
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            self.application._trace_queue.join()
+            samples = self.application.memory.latest_performance_session()
+            if samples:
+                break
+        self.application.stop()
+        self.assertTrue(samples)
+        for sample in samples:
+            payload = sample["payload"]
+            self.assertEqual(payload["schema"], "lumen_performance_trace_v2")
+            self.assertEqual(
+                payload["structure_resolution"]["source"],
+                "simulated_demo",
+            )
+            self.assertEqual(
+                payload["structure_resolution"]["axes"]["energy"]["source"],
+                "simulated_demo",
+            )
+            self.assertEqual(
+                payload["resolved_observation"]["section"],
+                payload["structure_resolution"]["section"],
+            )
+            self.assertEqual(
+                {item["fixture_id"] for item in payload["fixture_dmx"]},
+                {
+                    fixture.fixture_id
+                    for fixture in (
+                        *self.application.rig.fixtures,
+                        *self.application.rig.auxiliary_fixtures,
+                    )
+                },
+            )
+            self.assertTrue(all(
+                item["channels"] for item in payload["fixture_dmx"]
+            ))
+
+    def test_operator_structure_correction_is_visible_and_recalled_on_replay(
+        self,
+    ) -> None:
+        media = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:operator-correction",
+            title="Operator Correction",
+            duration_ms=60_000,
+            observed_position_ms=35_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=False,
+        )
+        self.application._remember_media_identity(media)
+        recording_id = self.application.memory.remember_recording_version(
+            provider=media.provider,
+            provider_item_id=media.provider_item_id,
+            song_id=self.application.song_id,
+            duration_ms=media.duration_ms,
+        )
+        run_id = self.application.memory.begin_teacher_run(
+            teacher_name="EDMFormer",
+            teacher_version="test",
+            device="cpu",
+            preprocessing_version=EDMFORMER_PREPROCESSING_VERSION,
+            recording_id=recording_id,
+        )
+        base_id = self.application.memory.save_structure_timeline(
+            provenance="edmformer_teacher",
+            timeline_version=TEACHER_NORMALIZATION_VERSION,
+            confidence=0.8,
+            recording_id=recording_id,
+            song_id=self.application.song_id,
+            teacher_run_id=run_id,
+            segments=[
+                {
+                    "start_ms": 0,
+                    "end_ms": 30_000,
+                    "energy_label": "groove",
+                    "raw_label": "Drop",
+                },
+                {
+                    "start_ms": 30_000,
+                    "end_ms": 60_000,
+                    "energy_label": "drop",
+                    "raw_label": "Breakdown",
+                },
+            ],
+        )
+        self.application.memory.finish_teacher_run(run_id, status="complete")
+
+        before = self.application.song_teaching_snapshot(force=True)
+        self.assertEqual(before["recording_id"], recording_id)
+        self.assertEqual(before["structure_timelines"][0]["id"], base_id)
+        self.assertEqual(
+            before["structure_timelines"][0]["segments"][1]["raw_label"],
+            "Breakdown",
+        )
+        saved = self.application.correct_structure_timeline({
+            "base_timeline_id": base_id,
+            "participant_id": "console",
+            "segments": [
+                {
+                    "segment_index": 0,
+                    "start_ms": 0,
+                    "end_ms": 30_000,
+                    "energy_label": "groove",
+                },
+                {
+                    "segment_index": 1,
+                    "start_ms": 30_000,
+                    "end_ms": 60_000,
+                    "energy_label": "breakdown",
+                },
+            ],
+        })
+        self.assertNotEqual(saved["timeline_id"], base_id)
+        self.assertEqual(
+            saved["cached_structure"]["axes"]["energy"]["label"],
+            "breakdown",
+        )
+
+        # Simulate a later play: clear the in-memory answer and reconstruct it
+        # exclusively from the stable Spotify recording identity.
+        self.application._cached_structure_prediction = None
+        self.application._poll_memory_context_once()
+        replay = self.application._cached_structure_prediction
+        assert replay is not None
+        self.assertEqual(replay["recording"]["id"], recording_id)
+        self.assertEqual(replay["axes"]["energy"]["label"], "breakdown")
+        self.assertEqual(
+            replay["axes"]["energy"]["timeline_id"], saved["timeline_id"]
+        )
+        after = self.application.song_teaching_snapshot(force=True)
+        self.assertEqual(len(after["structure_timelines"]), 2)
+        original = next(
+            item for item in after["structure_timelines"] if item["id"] == base_id
+        )
+        self.assertEqual(original["segments"][1]["energy_label"], "drop")
+
+    def test_song_sequence_round_trips_canonical_cue_fields(self) -> None:
+        media = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:cue-fields",
+            title="Cue Fields",
+            duration_ms=120_000,
+            observed_position_ms=20_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=False,
+        )
+        self.application._remember_media_identity(media)
+        self.application.memory.remember_recording_version(
+            provider=media.provider,
+            provider_item_id=media.provider_item_id,
+            song_id=self.application.song_id,
+            duration_ms=media.duration_ms,
+        )
+        saved = self.application.save_choreography_proposal({
+            "name": "Canonical cue",
+            "scope": "movers",
+            "place": True,
+            "steps": [{
+                "routine": "figure_eight",
+                "duration_beats": 8,
+                "motion_speed": 0.22,
+                "travel_size": 0.83,
+                "activity_density": 0.61,
+                "brightness": 0.72,
+                "palette": "midnight_teal",
+                "strobe_enabled": True,
+                "strobe_rate": 0.31,
+                "beat_sync": 0.44,
+                "cue_timing": 0.91,
+            }],
+        })
+        stored = self.application.memory.choreography_sequence(
+            saved["sequence_id"]
+        )
+        assert stored is not None
+        parameters = stored["steps"][0]["parameters"]
+        self.assertEqual(parameters["motion_speed"], 0.22)
+        self.assertEqual(parameters["travel_size"], 0.83)
+        self.assertEqual(parameters["activity_density"], 0.61)
+        self.assertEqual(parameters["brightness"], 0.72)
+        self.assertEqual(parameters["cue_timing"], 0.91)
+        self.assertEqual(stored["steps"][0]["strobe"], {
+            "enabled": True, "rate": 0.31,
+        })
+
+        self.application._poll_memory_context_once()
+        self.assertEqual(len(self.application._prepared_recalled_choreography), 1)
+        recalled = self.application._prepared_recalled_choreography[0].steps[0]
+        self.assertEqual(recalled.motion_speed, 0.22)
+        self.assertEqual(recalled.travel_size, 0.83)
+        self.assertEqual(recalled.activity_density, 0.61)
+        self.assertEqual(recalled.brightness, 0.72)
+        self.assertTrue(recalled.strobe_enabled)
+        self.assertEqual(recalled.strobe_rate, 0.31)
+        self.assertEqual(recalled.beat_sync, 0.44)
+        self.assertEqual(recalled.cue_timing, 0.91)
 
     @patch("lumen_engine.control.subprocess.run")
     @patch("lumen_engine.control.shutil.which", return_value="/usr/bin/amixer")

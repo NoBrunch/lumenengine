@@ -4,9 +4,9 @@ Lumen Engine is a private, local-first system for making a lighting rig listen,
 remember, aim, and perform expressively. It is being built for one dedicated
 Ubuntu PC in a garage audio system. It is a separate project from Party Parrot.
 
-This repository is backed up only to a private GitHub repository. Recordings,
-credentials, tokens, learned preferences, runtime databases, and downloaded
-research assets remain local and ignored by Git.
+The source repository is public. Recordings, credentials, tokens, learned
+preferences, runtime databases, and downloaded research assets remain private,
+local, and ignored by Git.
 
 ## Start Lumen
 

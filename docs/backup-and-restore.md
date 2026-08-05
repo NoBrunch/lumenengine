@@ -1,7 +1,7 @@
 # Backup and restore runbook
 
 This runbook returns Lumen to the last recorded operating state without placing
-private runtime material in GitHub. GitHub is a private backup of code, tests,
+private runtime material in GitHub. The public repository backs up code, tests,
 documentation, deterministic configuration, and history. It is not a backup of
 recordings, learned preferences, runtime databases, credentials, or downloaded
 research assets.
@@ -85,8 +85,8 @@ Spotify after restore. Never add either artifact to Git.
 
 ## Restore the code on Ubuntu
 
-The GitHub repository is private, so sign in to GitHub on the replacement
-machine before cloning. Install the small live-system prerequisites:
+Clone the public GitHub repository on the replacement machine, then install the
+small live-system prerequisites:
 
 ```bash
 sudo apt-get update

@@ -1,32 +1,139 @@
 #!/usr/bin/env python3
-"""Run EDMFormer locally with a hard-bounded CPU context window.
+"""Run one full-song EDMFormer inference in an isolated CPU worker.
 
-The upstream EDM-98 inference pipeline evaluates as much as 420 seconds of
-audio in one MuQ/MusicFM transformer call.  That is appropriate for its
-original GPU environment, but it can exhaust the target Lumen PC's 16 GiB of
-RAM.  This isolated adapter retains the upstream feature extraction, model,
-and whole-song post-processing while limiting every foundation-model call to
-30--60 seconds.
+EDMFormer's 30-second inputs are local feature-extraction chunks.  They are
+combined with a global representation of the complete song (up to the
+published 420-second limit) before one structural prediction is decoded.  A
+shorter ``TIME_DUR`` changes the model's musical context and is therefore not
+a valid memory-saving adaptation.
 
-No model or source checkout is modified.  The context override exists only in
-this short-lived worker process.
+No model or source checkout is modified.  Heavy foundation models are loaded
+sequentially through EDM-98's low-memory path and released with the worker.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import sys
 import time
+from types import MethodType
 import wave
 
 
-MIN_WINDOW_SECONDS = 30
-MAX_WINDOW_SECONDS = 60
-DEFAULT_WINDOW_SECONDS = 60
+PUBLISHED_CONTEXT_SECONDS = 420
+LOCAL_CHUNK_SECONDS = 30
 DEFAULT_THREADS = 4
+
+
+def _sdpa_rotary_attention_forward(
+    self,
+    hidden_states,
+    attention_mask=None,
+    relative_position_embeddings=None,
+    output_attentions=False,
+):
+    """Equivalent rotary attention without materializing the score square."""
+
+    if output_attentions:
+        raise RuntimeError(
+            "Lumen's bounded-memory EDMFormer path does not expose attention "
+            "probability matrices"
+        )
+    if self.position_embeddings_type != "rotary":
+        raise RuntimeError(
+            "Lumen's bounded-memory attention adapter requires rotary "
+            "position embeddings"
+        )
+    if relative_position_embeddings is None:
+        raise ValueError("rotary position embeddings are required")
+
+    import torch
+
+    batch_size, sequence_length, _hidden_size = hidden_states.size()
+    query_key_states = self._apply_rotary_embedding(
+        hidden_states, relative_position_embeddings
+    )
+    query = self.linear_q(query_key_states).view(
+        batch_size, sequence_length, self.num_heads, self.head_size
+    )
+    key = self.linear_k(query_key_states).view(
+        batch_size, sequence_length, self.num_heads, self.head_size
+    )
+    value = self.linear_v(hidden_states).view(
+        batch_size, sequence_length, self.num_heads, self.head_size
+    )
+    query = query.transpose(1, 2)
+    key = key.transpose(1, 2)
+    value = value.transpose(1, 2)
+    attended = torch.nn.functional.scaled_dot_product_attention(
+        query,
+        key,
+        value,
+        attn_mask=attention_mask,
+        dropout_p=float(self.dropout.p) if self.training else 0.0,
+        is_causal=False,
+    )
+    attended = attended.transpose(1, 2).reshape(
+        batch_size, sequence_length, self.num_heads * self.head_size
+    )
+    return self.linear_out(attended), None
+
+
+def _install_memory_efficient_attention(model) -> None:
+    """Install bounded rotary attention on every foundation-model layer."""
+
+    conformer = getattr(getattr(model, "model", model), "conformer", None)
+    layers = getattr(conformer, "layers", None)
+    if layers is None:
+        raise RuntimeError("foundation model does not expose conformer layers")
+    for layer in layers:
+        attention = layer.self_attn
+        if getattr(attention, "_lumen_sdpa_installed", False):
+            continue
+        if attention.position_embeddings_type != "rotary":
+            raise RuntimeError(
+                "foundation model does not use the validated rotary attention"
+            )
+        attention.forward = MethodType(
+            _sdpa_rotary_attention_forward, attention
+        )
+        attention._lumen_sdpa_installed = True
+
+
+@contextmanager
+def _bounded_foundation_model_attention(upstream):
+    """Patch only models created during this isolated worker inference."""
+
+    pipeline_class = getattr(upstream, "InferencePipeline", None)
+    if pipeline_class is None:
+        # Test doubles verify the surrounding inference contract without
+        # importing the heavyweight model implementation.
+        yield
+        return
+    original_muq = pipeline_class._create_muq_model
+    original_musicfm = pipeline_class._create_musicfm_model
+
+    def create_muq(pipeline):
+        model = original_muq(pipeline)
+        _install_memory_efficient_attention(model)
+        return model
+
+    def create_musicfm(pipeline):
+        model = original_musicfm(pipeline)
+        _install_memory_efficient_attention(model)
+        return model
+
+    pipeline_class._create_muq_model = create_muq
+    pipeline_class._create_musicfm_model = create_musicfm
+    try:
+        yield
+    finally:
+        pipeline_class._create_muq_model = original_muq
+        pipeline_class._create_musicfm_model = original_musicfm
 
 
 def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
@@ -40,12 +147,6 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hf-cache-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument(
-        "--window-seconds",
-        type=int,
-        default=DEFAULT_WINDOW_SECONDS,
-        help="Maximum transformer context; must be between 30 and 60 seconds.",
-    )
-    parser.add_argument(
         "--threads",
         type=int,
         default=DEFAULT_THREADS,
@@ -55,11 +156,6 @@ def _arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _validate_arguments(args: argparse.Namespace) -> None:
-    if not MIN_WINDOW_SECONDS <= args.window_seconds <= MAX_WINDOW_SECONDS:
-        raise ValueError(
-            "--window-seconds must be between "
-            f"{MIN_WINDOW_SECONDS} and {MAX_WINDOW_SECONDS}"
-        )
     if not 1 <= args.threads <= 8:
         raise ValueError("--threads must be between 1 and 8")
     required = {
@@ -77,6 +173,15 @@ def _validate_arguments(args: argparse.Namespace) -> None:
             "MusicFM source checkout is missing model/musicfm_25hz.py: "
             f"{args.musicfm_source}"
         )
+    duration_s = _audio_duration_seconds(args.audio)
+    if duration_s > PUBLISHED_CONTEXT_SECONDS:
+        raise ValueError(
+            "EDMFormer full-song inference is currently limited to the "
+            f"published {PUBLISHED_CONTEXT_SECONDS}-second context; got "
+            f"{duration_s:.3f}s. Overlapping long-context inference must "
+            "merge frame probabilities before boundary decoding and is not "
+            "yet validated."
+        )
 
 
 def _configure_process(args: argparse.Namespace) -> None:
@@ -89,6 +194,13 @@ def _configure_process(args: argparse.Namespace) -> None:
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["MUSICFMPATH"] = str(args.musicfm_source)
+    # If the host reaches a genuine kernel OOM after Lumen's own RSS monitor
+    # and swap have both been exhausted, select this disposable offline worker
+    # before the graphical session, audio services, or Lumen's control plane.
+    try:
+        Path("/proc/self/oom_score_adj").write_text("750\n", encoding="ascii")
+    except OSError:
+        pass
 
 
 def _audio_duration_seconds(path: Path) -> float:
@@ -144,9 +256,14 @@ def _predict(
     if upstream is None:
         from edm98.inference import pipeline as upstream
 
-    original_window = int(upstream.TIME_DUR)
+    upstream_context = int(upstream.TIME_DUR)
+    if upstream_context != PUBLISHED_CONTEXT_SECONDS:
+        raise RuntimeError(
+            "EDMFormer upstream context does not match the published "
+            f"{PUBLISHED_CONTEXT_SECONDS}s configuration: "
+            f"{upstream_context}s"
+        )
     original_numpy_errors = upstream.np.seterr(invalid="ignore", divide="ignore")
-    upstream.TIME_DUR = int(args.window_seconds)
     try:
         upstream.torch.set_num_threads(args.threads)
         if hasattr(upstream.torch, "set_num_interop_threads"):
@@ -157,38 +274,40 @@ def _predict(
                 pass
         began = time.monotonic()
         print(
-            "EDMFormer bounded CPU inference: "
-            f"upstream_context={original_window}s, "
-            f"maximum_context={args.window_seconds}s, threads={args.threads}",
+            "EDMFormer full-song CPU inference: "
+            f"local_chunks={LOCAL_CHUNK_SECONDS}s, "
+            f"global_context={PUBLISHED_CONTEXT_SECONDS}s, "
+            f"song_duration={_audio_duration_seconds(args.audio):.3f}s, "
+            f"threads={args.threads}",
             file=sys.stderr,
             flush=True,
         )
-        raw = upstream.predict_file(
-            args.audio,
-            checkpoint_path=args.checkpoint,
-            config_path=args.config,
-            musicfm_stat_path=args.musicfm_stat,
-            musicfm_model_path=args.musicfm_model,
-            device="cpu",
-            low_memory=True,
-            persistent_models=False,
-            hf_cache_dir=args.hf_cache_dir,
-            offline=True,
-            no_cache=False,
-        )
+        with _bounded_foundation_model_attention(upstream):
+            raw = upstream.predict_file(
+                args.audio,
+                checkpoint_path=args.checkpoint,
+                config_path=args.config,
+                musicfm_stat_path=args.musicfm_stat,
+                musicfm_model_path=args.musicfm_model,
+                device="cpu",
+                low_memory=True,
+                persistent_models=False,
+                hf_cache_dir=args.hf_cache_dir,
+                offline=True,
+                no_cache=False,
+            )
         result = _merge_and_clamp_segments(
             raw,
             _audio_duration_seconds(args.audio),
         )
         print(
-            f"EDMFormer bounded CPU inference complete in "
+            f"EDMFormer full-song CPU inference complete in "
             f"{time.monotonic() - began:.2f}s; segments={len(result)}",
             file=sys.stderr,
             flush=True,
         )
         return result
     finally:
-        upstream.TIME_DUR = original_window
         upstream.np.seterr(**original_numpy_errors)
 
 

@@ -11,17 +11,148 @@ import unittest
 from unittest import mock
 import wave
 
+from lumen_engine.audio import SourcePcm
 from lumen_engine.memory import SongMemoryStore
 from lumen_engine.models import Feedback, MediaIdentity
 from lumen_engine.training import (
     TrainingCaptureConfig,
     TrainingDataRecorder,
+    _recording_sequences,
+    export_research_session_index,
     export_training_dataset,
     structure_supervision_completeness,
 )
 
 
 class TrainingDataTests(unittest.TestCase):
+    def test_recording_completeness_is_scoped_to_overlapping_capture_gaps(self):
+        session = {
+            "id": "two-tracks",
+            "frames_written": 200,
+            "sample_rate": 10,
+            "channels": 1,
+            "sample_width": 2,
+            "dropped_frames": 0,
+            "integrity": {
+                "timeline_complete": True,
+                "source_audio_complete": False,
+            },
+        }
+        segments = [
+            {
+                "start_frame": 0,
+                "frame_count": 200,
+                "relative_path": "audio/two-tracks.wav",
+                "sha256": "a" * 64,
+            }
+        ]
+
+        def frame(index, song_id, item_id, position):
+            return {
+                "audio_frame_index": index,
+                "song_id": song_id,
+                "position_ms": position,
+                "payload": {
+                    "media": {
+                        "provider": "spotify",
+                        "provider_item_id": item_id,
+                        "duration_ms": 10_000,
+                    }
+                },
+            }
+
+        frames = [
+            frame(0, 1, "track-one", 0),
+            frame(90, 1, "track-one", 9_000),
+            frame(100, 2, "track-two", 0),
+            frame(190, 2, "track-two", 9_000),
+        ]
+        recordings = _recording_sequences(
+            session,
+            segments,
+            frames,
+            capture={
+                "timeline": {
+                    "gaps": [{"start_frame": 20, "frame_count": 10}]
+                }
+            },
+        )
+
+        self.assertEqual(len(recordings), 2)
+        self.assertFalse(recordings[0]["source_audio_complete"])
+        self.assertEqual(recordings[0]["source_gap_frames"], 10)
+        self.assertFalse(recordings[0]["structure_supervision"]["eligible"])
+        self.assertTrue(recordings[1]["source_audio_complete"])
+        self.assertEqual(recordings[1]["source_gap_frames"], 0)
+        self.assertTrue(recordings[1]["structure_supervision"]["eligible"])
+
+    def test_explicit_source_frames_preserve_gap_without_semantic_labels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SongMemoryStore(root / "memory.sqlite3")
+            config = TrainingCaptureConfig(
+                root=root / "training",
+                sample_rate=100,
+                channels=1,
+                segment_seconds=10,
+                feature_rate_hz=10.0,
+                max_bytes=1024**3,
+                minimum_free_bytes=0,
+            )
+            recorder = TrainingDataRecorder(
+                store,
+                session_id="source-clock-gap",
+                mode="monitor",
+                config=config,
+                metadata={},
+            )
+            recorder.start()
+            first = SourcePcm(
+                b"\x01\x00" * 10,
+                source_start_frame=0,
+                frame_count=10,
+                timestamp_s=0.05,
+            )
+            after_gap = b"\x02\x00" * 10
+            recorder.submit(
+                first,
+                song_id=None,
+                position_ms=None,
+                payload={"observation": {"section": "intro"}},
+            )
+            recorder.submit(
+                after_gap,
+                song_id=None,
+                position_ms=None,
+                payload={"observation": {"section": "verse"}},
+                source_start_frame=20,
+            )
+            recorder.stop()
+
+            rows = store.training_frames("source-clock-gap")
+            self.assertEqual(
+                [row["audio_frame_index"] for row in rows], [5, 25]
+            )
+            self.assertNotIn(15, [row["audio_frame_index"] for row in rows])
+            segments = store.training_segments("source-clock-gap")
+            self.assertEqual(sum(row["frame_count"] for row in segments), 30)
+            capture_path = (
+                config.root / segments[0]["relative_path"]
+            ).with_name("capture.json")
+            capture = json.loads(capture_path.read_text(encoding="utf-8"))
+            self.assertTrue(capture["timeline"]["sample_accurate"])
+            self.assertEqual(
+                capture["timeline"]["gaps"],
+                [
+                    {
+                        "start_frame": 10,
+                        "frame_count": 10,
+                        "reason": "missing_capture_packet",
+                        "representation": "pcm_silence",
+                    }
+                ],
+            )
+
     def test_structure_supervision_requires_a_complete_provider_track(
         self,
     ) -> None:
@@ -376,15 +507,18 @@ class TrainingDataTests(unittest.TestCase):
             recorder.start()
             kept_pcm = struct.pack("<hh", 3_000, -3_000) * 100
             dropped_pcm = struct.pack("<hh", 9_000, -9_000) * 100
-            recorder.submit(
+            kept_frame = recorder.submit(
                 kept_pcm, song_id=None, position_ms=None, payload={}
             )
-            recorder.submit(
+            dropped_frame_one = recorder.submit(
                 dropped_pcm, song_id=None, position_ms=None, payload={}
             )
-            recorder.submit(
+            dropped_frame_two = recorder.submit(
                 dropped_pcm, song_id=None, position_ms=None, payload={}
             )
+            self.assertIsNotNone(kept_frame)
+            self.assertIsNone(dropped_frame_one)
+            self.assertIsNone(dropped_frame_two)
             DelayedRecorder.release_writer.set()
             recorder.stop()
 
@@ -636,6 +770,10 @@ class TrainingDataTests(unittest.TestCase):
             )
             first_thread.start()
             self.assertTrue(payload_started.wait(timeout=2))
+            # Semantic enrichment belongs to the recorder worker. A slow
+            # snapshot must not retain the live submitter or its PCM clock.
+            first_thread.join(timeout=0.10)
+            self.assertFalse(first_thread.is_alive())
             second_thread.start()
             time.sleep(0.01)
             release_payload.set()
@@ -711,6 +849,65 @@ class TrainingDataTests(unittest.TestCase):
             )
             self.assertEqual(capture["timeline"]["gaps"], [])
 
+    def test_stop_surfaces_writer_that_remains_alive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SongMemoryStore(root / "memory.sqlite3")
+            config = TrainingCaptureConfig(
+                root=root / "training",
+                sample_rate=100,
+                channels=1,
+                segment_seconds=10,
+                feature_rate_hz=10.0,
+                max_bytes=1024**3,
+                minimum_free_bytes=0,
+            )
+            recorder = TrainingDataRecorder(
+                store,
+                session_id="blocked-writer",
+                mode="monitor",
+                config=config,
+                metadata={},
+            )
+            entered = threading.Event()
+            release = threading.Event()
+            original = store.finish_training_session
+
+            def blocked(*args, **kwargs):
+                entered.set()
+                release.wait(timeout=2.0)
+                return original(*args, **kwargs)
+
+            with mock.patch.object(
+                store, "finish_training_session", side_effect=blocked
+            ):
+                recorder.start()
+                recorder.submit(
+                    struct.pack("<h", 500) * 100,
+                    song_id=None,
+                    position_ms=None,
+                    payload={"observation": {"section": "groove"}},
+                )
+                errors: list[Exception] = []
+
+                def stop_with_timeout() -> None:
+                    try:
+                        recorder.stop(timeout=0.05)
+                    except Exception as error:
+                        errors.append(error)
+
+                stopping = threading.Thread(target=stop_with_timeout)
+                stopping.start()
+                self.assertTrue(entered.wait(timeout=1.0))
+                stopping.join(timeout=1.0)
+                self.assertFalse(stopping.is_alive())
+                self.assertEqual(len(errors), 1)
+                self.assertRegex(str(errors[0]), "writer did not finish")
+                self.assertTrue(recorder._thread.is_alive())
+                release.set()
+                recorder.stop(timeout=2.0)
+                self.assertFalse(recorder._thread.is_alive())
+
     def test_storage_quota_accounts_for_open_wav_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -770,6 +967,63 @@ class TrainingDataTests(unittest.TestCase):
                         "start_frame": 100,
                     }
                 ],
+            )
+
+    def test_incremental_research_index_omits_full_semantic_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SongMemoryStore(root / "memory.sqlite3")
+            config = TrainingCaptureConfig(
+                root=root / "training",
+                sample_rate=100,
+                channels=1,
+                segment_seconds=10,
+                feature_rate_hz=10,
+                minimum_free_bytes=0,
+            )
+            recorder = TrainingDataRecorder(
+                store,
+                session_id="incremental",
+                mode="live",
+                config=config,
+                metadata={},
+            )
+            recorder.start()
+            recorder.submit(
+                struct.pack("<h", 900) * 200,
+                song_id=None,
+                position_ms=0,
+                payload={
+                    "media": {
+                        "provider": "spotify",
+                        "provider_item_id": "track-7",
+                        "duration_ms": 2_000,
+                    },
+                    "large_runtime_payload": "x" * 20_000,
+                },
+            )
+            recorder.stop()
+            result = export_research_session_index(
+                store, config.root, "incremental"
+            )
+            export = Path(result["path"])
+            manifest = json.loads(
+                (export / "dataset.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["purpose"], "incremental_teacher_preparation"
+            )
+            self.assertTrue(manifest["validation"]["valid"])
+            self.assertEqual(manifest["counts"]["sessions"], 1)
+            self.assertEqual(manifest["counts"]["recordings"], 1)
+            self.assertEqual((export / "frames.jsonl").stat().st_size, 0)
+            recording = json.loads(
+                (export / "recordings.jsonl").read_text(
+                    encoding="utf-8"
+                ).splitlines()[0]
+            )
+            self.assertEqual(
+                recording["track_identity"]["provider_item_id"], "track-7"
             )
 
     def test_failed_export_never_appears_as_complete_dataset(self) -> None:

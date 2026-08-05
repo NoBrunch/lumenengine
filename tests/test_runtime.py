@@ -1,16 +1,455 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from lumen_engine.config import load_rig
-from lumen_engine.choreography import SequencePreferenceModel
+from lumen_engine.choreography import MusicalContext, SequencePreferenceModel
 from lumen_engine.dmx import VirtualDMXOutput
 from lumen_engine.models import MusicalObservation
 from lumen_engine.models import Vec3
-from lumen_engine.runtime import PerformanceRuntime
+from lumen_engine.runtime import PerformanceRuntime, _choreography_candidates
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_trusted_structure_shapes_fixture_dynamics_without_creating_strobe(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+
+        def output_for(section: str):
+            runtime = PerformanceRuntime(
+                rig.fixtures,
+                VirtualDMXOutput(),
+                auxiliary_fixtures=rig.auxiliary_fixtures,
+                choreography_model=SequencePreferenceModel(),
+            )
+            runtime.set_structure_context(
+                energy=section,
+                confidence=0.95,
+                boundary_probability=0.0,
+                resolution={
+                    "axes": {
+                        "energy": {
+                            "source": "cached_offline_teacher",
+                            "provenance": {
+                                "source": "operator_annotation_consensus"
+                            },
+                        }
+                    }
+                },
+            )
+            return runtime.step(self._lane_observation(
+                0.0, 0.0, section=section, loudness=0.65
+            )).effective_outputs[0]
+
+        breakdown = output_for("breakdown")
+        drop = output_for("drop")
+        self.assertLess(breakdown.motion_speed, drop.motion_speed)
+        self.assertLess(breakdown.travel_size, drop.travel_size)
+        self.assertLess(breakdown.activity_density, drop.activity_density)
+        self.assertLess(breakdown.color_activity, drop.color_activity)
+        self.assertEqual(breakdown.palette, "cool")
+        self.assertEqual(drop.palette, "party_vivid")
+        self.assertFalse(breakdown.strobe_enabled)
+
+    def test_canonical_teacher_drop_selects_drop_choreography_without_loudness(self) -> None:
+        candidates = _choreography_candidates(MusicalContext(
+            energy_label="drop",
+            energy=0.5,
+            motion=0.5,
+            tension=0.6,
+        ))
+        self.assertTrue(candidates[0].sequence_id.startswith("movers-release-"))
+
+    @staticmethod
+    def _lane_observation(
+        timestamp: float,
+        phase: float,
+        *,
+        section: str = "groove",
+        loudness: float = 0.72,
+    ) -> MusicalObservation:
+        return MusicalObservation(
+            timestamp_s=timestamp,
+            loudness=loudness,
+            onset_strength=0.55 if loudness else 0.0,
+            low_energy=0.6 if loudness else 0.0,
+            mid_energy=0.5 if loudness else 0.0,
+            high_energy=0.4 if loudness else 0.0,
+            bar_phase=phase,
+            beat_pulse=0.8 if loudness else 0.0,
+            beat_confidence=0.9,
+            bpm=120.0,
+            section=section,
+            section_confidence=0.9,
+        )
+
+    def test_live_planner_runs_distinct_movers_and_center_lanes(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures, VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.step(self._lane_observation(0.0, 0.0))
+        snapshot = runtime.choreography_snapshot()
+        movers = snapshot["lanes"]["movers"]
+        center = snapshot["lanes"]["center"]
+        self.assertEqual(movers["active_step"]["routine"], "figure_eight")
+        self.assertEqual(center["active_step"]["routine"], "counter_rotate")
+        self.assertEqual(
+            movers["active_boundary_id"].replace(":movers:", ":"),
+            center["active_boundary_id"].replace(":center:", ":"),
+        )
+        self.assertNotEqual(
+            movers["active_sequence_id"], center["active_sequence_id"]
+        )
+        self.assertIn("Selected at a new", movers["reason"])
+        self.assertIn("Selected at a new", center["reason"])
+
+    def test_effective_output_trace_exposes_literal_feedback_axes(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.replace_feedback({
+            "overall": {
+                "motion_speed": 0.6,
+                "travel_size": -0.3,
+                "activity_density": -0.4,
+                "brightness": 0.2,
+                "strobe_enabled": 1.0,
+                "strobe_rate": 0.8,
+                "beat_sync": 0.4,
+                "cue_timing": -0.5,
+            }
+        })
+        frame = runtime.step(self._lane_observation(
+            0.0, 0.0, section="breakdown", loudness=0.45
+        ))
+        self.assertEqual(len(frame.effective_outputs), 3)
+        mover = frame.effective_outputs[0]
+        self.assertGreater(mover.motion_speed, 0.5)
+        self.assertLess(mover.travel_size, 1.0)
+        self.assertLess(mover.activity_density, 1.0)
+        # Positive preference cannot create a strobe outside an authored cue.
+        self.assertFalse(mover.strobe_enabled)
+        snapshot = runtime.choreography_snapshot()
+        self.assertIn(
+            rig.fixtures[0].fixture_id, snapshot["effective_outputs"]
+        )
+        self.assertEqual(
+            snapshot["effective_outputs"][rig.fixtures[0].fixture_id][
+                "strobe"
+            ]["rate"],
+            0.0,
+        )
+    def test_continuous_mover_routine_does_not_flash_its_dimmer_on_beats(
+        self,
+    ) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        dimmers: list[int] = []
+        strobes: list[int] = []
+        # The first eight-beat authored step is a continuous figure eight;
+        # stop before the next intentionally beam-gated opposing chase.
+        for index in range(20):
+            pulse = 1.0 if index % 5 == 0 else 0.05
+            result = runtime.step(replace(
+                self._lane_observation(
+                    index * 0.1, (index % 20) / 20.0
+                ),
+                beat_pulse=pulse,
+                onset_strength=0.8 if pulse > 0.5 else 0.15,
+            ))
+            # First mover starts at 31: dimmer is relative channel 6 and
+            # hardware strobe is relative channel 7.
+            dimmers.append(result.dmx.get_channel(0, 36))
+            strobes.append(result.dmx.get_channel(0, 37))
+        deltas = [
+            abs(current - previous)
+            for previous, current in zip(dimmers[5:], dimmers[6:])
+        ]
+        self.assertLessEqual(max(deltas), 12)
+        self.assertEqual(max(strobes), 0)
+
+    def test_same_section_develops_only_after_active_sequence_finishes(
+        self,
+    ) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.step(self._lane_observation(0.0, 0.0))
+        initial = runtime.choreography_snapshot()["lanes"]
+        initial_ids = {
+            lane: initial[lane]["active_sequence_id"]
+            for lane in ("movers", "center")
+        }
+
+        runtime.step(self._lane_observation(0.8, 0.9))
+        runtime.step(self._lane_observation(1.0, 0.1))
+        held = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(
+            {
+                lane: held[lane]["active_sequence_id"]
+                for lane in ("movers", "center")
+            },
+            initial_ids,
+        )
+
+        runtime.step(self._lane_observation(1.8, 0.9))
+        runtime.step(self._lane_observation(2.0, 0.1))
+        developed = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(
+            developed["movers"]["active_sequence_id"],
+            "movers-groove-wide-answer",
+        )
+        self.assertEqual(
+            developed["center"]["active_sequence_id"],
+            "center-groove-answer",
+        )
+
+    def test_section_change_waits_for_active_sequence_boundary(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.step(self._lane_observation(0.0, 0.0, section="groove"))
+        before = runtime.choreography_snapshot()["lanes"]
+        before_ids = {
+            lane: before[lane]["active_sequence_id"]
+            for lane in ("movers", "center")
+        }
+
+        runtime.step(self._lane_observation(0.5, 0.5, section="build"))
+        held = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(
+            {
+                lane: held[lane]["active_sequence_id"]
+                for lane in ("movers", "center")
+            },
+            before_ids,
+        )
+        runtime.step(self._lane_observation(0.8, 0.9, section="build"))
+        runtime.step(self._lane_observation(1.0, 0.1, section="build"))
+        runtime.step(self._lane_observation(1.8, 0.9, section="build"))
+        runtime.step(self._lane_observation(2.0, 0.1, section="build"))
+        after = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(
+            after["movers"]["active_sequence_id"],
+            "movers-build-and-answer",
+        )
+        self.assertEqual(
+            after["center"]["active_sequence_id"],
+            "center-build-chase",
+        )
+
+    def test_opposing_chase_trades_calibrated_position_and_beam(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+
+        def run(timestamp: float, phase: float):
+            runtime = PerformanceRuntime(
+                rig.fixtures,
+                VirtualDMXOutput(),
+                auxiliary_fixtures=rig.auxiliary_fixtures,
+                choreography_model=SequencePreferenceModel(),
+            )
+            frame = runtime.step(self._lane_observation(
+                timestamp,
+                phase,
+                section="release",
+                loudness=0.88,
+            ))
+            semantic_pan = []
+            for fixture, solution in zip(rig.fixtures, frame.solutions):
+                calibration = fixture.calibration
+                numeric = (
+                    solution.pan_deg - calibration.pan_min_deg
+                ) / (calibration.pan_max_deg - calibration.pan_min_deg)
+                semantic_pan.append(
+                    numeric
+                    if calibration.pan_direction > 0
+                    else 1.0 - numeric
+                )
+            dimmers = tuple(
+                frame.dmx.get_channel(
+                    fixture.universe,
+                    fixture.address + fixture.dimmer_channel - 1,
+                )
+                for fixture in rig.fixtures
+            )
+            return semantic_pan, dimmers
+
+        first_pan, first_dimmers = run(0.0, 0.0)
+        second_pan, second_dimmers = run(0.5, 0.25)
+        self.assertLess(first_pan[0], first_pan[1])
+        self.assertGreater(second_pan[0], second_pan[1])
+        self.assertGreater(first_dimmers[0], 0)
+        self.assertEqual(first_dimmers[1], 0)
+        self.assertEqual(second_dimmers[0], 0)
+        self.assertGreater(second_dimmers[1], 0)
+
+    def test_repeated_scoped_feedback_waits_and_changes_only_movers_lane(
+        self,
+    ) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures, VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.step(self._lane_observation(0.0, 0.9))
+        before = runtime.choreography_snapshot()["lanes"]
+        for index in range(4):
+            result = runtime.learn_choreography_feedback(
+                label="pick_it_up", value=1.0, urgency=1.0,
+                occurrences=3, scope="group", fixture_id="movers",
+                preferred_routine="beat_nod", event_id=f"crowd:{index}",
+            )
+            self.assertEqual(tuple(result["lanes"]), ("movers",))
+        runtime.step(self._lane_observation(0.2, 0.1))
+        held = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(
+            held["movers"]["active_sequence_id"],
+            before["movers"]["active_sequence_id"],
+        )
+        self.assertEqual(
+            held["center"]["active_sequence_id"],
+            before["center"]["active_sequence_id"],
+        )
+        runtime.step(self._lane_observation(1.8, 0.9))
+        runtime.step(self._lane_observation(2.0, 0.1))
+        after = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(after["movers"]["active_step"]["routine"], "beat_nod")
+        self.assertEqual(
+            after["center"]["active_sequence_id"],
+            before["center"]["active_sequence_id"],
+        )
+
+    def test_whole_rig_preference_addresses_both_lanes_at_boundary(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures, VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.step(self._lane_observation(0.0, 0.9))
+        learned = runtime.learn_choreography_feedback(
+            label="more_like_this", value=1.0, occurrences=5,
+            scope="overall", preferred_routine="counter_rotate",
+            event_id="crowd:whole-rig",
+        )
+        self.assertEqual(set(learned["lanes"]), {"movers", "center"})
+        runtime.step(self._lane_observation(0.2, 0.1))
+        runtime.step(self._lane_observation(1.8, 0.9))
+        runtime.step(self._lane_observation(2.0, 0.1))
+        lanes = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(lanes["movers"]["active_step"]["routine"], "counter_rotate")
+        self.assertEqual(lanes["center"]["active_step"]["routine"], "counter_rotate")
+
+    def test_whole_rig_feedback_accepts_independent_lane_consensus(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        model = SequencePreferenceModel()
+        runtime = PerformanceRuntime(
+            rig.fixtures, VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=model,
+        )
+        runtime.step(self._lane_observation(0.0, 0.9))
+        learned = runtime.learn_choreography_feedback(
+            label="pick_it_up",
+            value=1.0,
+            scope="overall",
+            event_ids_by_lane={
+                "movers": "batch:movers-context",
+                "center": "batch:center-context",
+            },
+            occurrences_by_lane={"movers": 4, "center": 2},
+            urgency_by_lane={"movers": 0.9, "center": 0.55},
+        )
+        assert learned is not None
+        events = model.state_dict()["events"]
+        self.assertEqual(
+            set(events), {"batch:movers-context", "batch:center-context"}
+        )
+        self.assertEqual(
+            events["batch:movers-context"]["example"]["feedback"][0][
+                "occurrences"
+            ],
+            4,
+        )
+        self.assertEqual(
+            events["batch:center-context"]["example"]["feedback"][0][
+                "occurrences"
+            ],
+            2,
+        )
+        self.assertEqual(
+            events["batch:movers-context"]["example"]["feedback"][0][
+                "urgency"
+            ],
+            0.9,
+        )
+        self.assertEqual(
+            events["batch:center-context"]["example"]["feedback"][0][
+                "urgency"
+            ],
+            0.55,
+        )
+
+    def test_characteristic_feedback_never_becomes_a_choreography_sequence(
+        self,
+    ) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        model = SequencePreferenceModel()
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=model,
+        )
+        runtime.step(self._lane_observation(0.0, 0.9))
+        learned = runtime.learn_choreography_feedback(
+            label="no_strobes",
+            value=1.0,
+            occurrences=4,
+            scope="overall",
+            event_id="characteristic-only",
+        )
+        assert learned is not None
+        self.assertFalse(learned["preferred_sequence_learned"])
+        self.assertIsNone(learned["preferred_sequence"])
+        self.assertEqual(model.learned_candidates(), ())
+
+    def test_silence_selects_calm_step_for_each_lane(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures, VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.set_structure_context(energy="silence", confidence=0.9)
+        runtime.step(self._lane_observation(
+            0.0, 0.0, section="silence", loudness=0.0
+        ))
+        lanes = runtime.choreography_snapshot()["lanes"]
+        self.assertEqual(lanes["movers"]["active_step"]["routine"], "breathe")
+        self.assertEqual(lanes["center"]["active_step"]["routine"], "breathe")
+
     def test_rehearsal_can_isolate_one_mover_and_fully_disable_center_light(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
         runtime = PerformanceRuntime(
@@ -254,13 +693,50 @@ class RuntimeTests(unittest.TestCase):
             )
         self.assertTrue(result.solutions[0].branch.startswith("quiet-hold"))
         self.assertEqual(result.dmx.get_channel(0, 1), 128)
-        self.assertEqual(result.dmx.get_channel(0, 2), 200)
+        self.assertEqual(result.dmx.get_channel(0, 2), 255)
         self.assertEqual(result.dmx.get_channel(0, 3), 128)
         self.assertEqual(result.dmx.get_channel(0, 4), 128)
         self.assertEqual(result.dmx.get_channel(0, 5), 24)
         self.assertEqual(result.dmx.get_channel(0, 6), 0)
         self.assertEqual(result.dmx.get_channel(0, 15), 0)
         self.assertEqual(result.dmx.get_channel(0, 16), 0)
+        center_output = next(
+            item
+            for item in runtime.choreography_snapshot()["effective_outputs"].values()
+            if item["lane"] == "center"
+        )
+        self.assertEqual(center_output["routine"], "parked")
+        self.assertEqual(center_output["activity_density"], 0.0)
+
+    def test_confirmed_silence_parks_center_without_second_delay(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+        )
+        runtime.step(MusicalObservation(
+            timestamp_s=0.0,
+            loudness=0.8,
+            onset_strength=0.5,
+            low_energy=0.5,
+            mid_energy=0.3,
+            high_energy=0.2,
+        ))
+        result = runtime.step(MusicalObservation(
+            timestamp_s=0.6,
+            loudness=0.0,
+            onset_strength=0.0,
+            low_energy=0.0,
+            mid_energy=0.0,
+            high_energy=0.0,
+            section="silence",
+            section_confidence=1.0,
+        ))
+        self.assertEqual(result.dmx.get_channel(0, 1), 128)
+        self.assertEqual(result.dmx.get_channel(0, 2), 255)
+        self.assertEqual(result.dmx.get_channel(0, 3), 128)
+        self.assertEqual(result.dmx.get_channel(0, 4), 128)
 
     def test_active_garage_rig_uses_room_and_center_fixture_on_beats(
         self,
@@ -318,7 +794,10 @@ class RuntimeTests(unittest.TestCase):
         self.assertGreater(max(center_body) - min(center_body), 200)
         self.assertGreater(max(center_arm_1) - min(center_arm_1), 190)
         self.assertGreater(max(center_arm_2) - min(center_arm_2), 190)
-        self.assertGreater(max(center_strobe), 150)
+        # Center strobe is opt-in through an authored center routine or
+        # feedback; high musical energy alone must not reintroduce the old
+        # always-strobing behavior.
+        self.assertEqual(max(center_strobe), 0)
 
     def test_phrase_routine_is_stable_within_bar_and_changes_between_bars(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
@@ -384,6 +863,28 @@ class RuntimeTests(unittest.TestCase):
         runtime.replace_feedback({})
         self.assertNotEqual(runtime.step(observation).decision.routine, "counter_rotate")
 
+    def test_playback_seek_releases_active_causal_choreography(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.set_media_context(99, "groove", "artist")
+        runtime.step(self._lane_observation(10.0, 0.2))
+        self.assertIsNotNone(
+            runtime.choreography_snapshot()["lanes"]["movers"]
+            ["active_sequence_id"]
+        )
+
+        runtime.notify_timeline_discontinuity()
+
+        lanes = runtime.choreography_snapshot()["lanes"]
+        self.assertIsNone(lanes["movers"]["active_sequence_id"])
+        self.assertIsNone(lanes["center"]["active_sequence_id"])
+        self.assertIsNone(runtime._last_bar_phase)
+
     def test_contextual_preference_breaks_conflicting_global_tie(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
         runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
@@ -421,6 +922,23 @@ class RuntimeTests(unittest.TestCase):
             )
             routines.append(result.decision.routine)
         self.assertEqual(len(set(routines)), 1)
+
+    def test_tempo_reacquisition_cannot_create_a_false_bar_wrap(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+        runtime.step(self._lane_observation(0.0, 0.90))
+        self.assertEqual(runtime._routine_bar_counter, 0)
+
+        unlocked = replace(
+            self._lane_observation(0.4, 0.0),
+            beat_confidence=0.0,
+            bpm=None,
+        )
+        runtime.step(unlocked)
+        self.assertIsNone(runtime._last_bar_phase)
+
+        runtime.step(self._lane_observation(0.8, 0.10))
+        self.assertEqual(runtime._routine_bar_counter, 0)
 
 
 if __name__ == "__main__":

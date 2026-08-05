@@ -19,6 +19,11 @@ const app = {
   roomCamera: { yaw: -0.55, pitch: 0.62, panX: 0, panY: 0, zoom: 1 },
   polling: null,
   pollInFlight: false,
+  systemRefreshing: false,
+  teachingRefreshing: false,
+  researchRefreshing: false,
+  lastStatusReceivedAt: 0,
+  statusLatencyMs: 0,
   controlTimer: null,
   disconnected: false,
   pollCount: 0,
@@ -32,7 +37,66 @@ const app = {
   calibrationCaptures: {},
   rehearsalTimer: null,
   motionTimer: null,
+  motionEditorScope: null,
+  participantId: null,
+  participantName: "",
+  feedbackReceipts: [],
+  teaching: null,
+  structureLibrary: null,
+  selectedStructureRecordingId: null,
+  sequenceDraft: [{ routine: "breathe", duration_beats: 8, intensity: 0.72, brightness: 0.72, motion_speed: 0.5, travel_size: 1, activity_density: 1, beat_sync: 1, palette: "", strobe: 0 }],
+  editingSequenceId: null,
+  editingPlacementId: null,
+  editingStructureTimelineId: null,
+  choreographyUndo: null,
+  touchBlockedUntil: Date.now() + 1200,
 };
+
+function blockWakeTouches(milliseconds = 1200) {
+  app.touchBlockedUntil = Math.max(
+    app.touchBlockedUntil,
+    Date.now() + milliseconds,
+  );
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") blockWakeTouches();
+});
+window.addEventListener("pageshow", () => blockWakeTouches());
+window.addEventListener("focus", () => blockWakeTouches());
+
+function initializeParticipantIdentity() {
+  const storageKey = "lumen.feedback.participant.v1";
+  const nameKey = "lumen.feedback.participantName.v1";
+  let participantId = window.localStorage.getItem(storageKey);
+  if (!participantId) {
+    participantId = window.crypto?.randomUUID?.()
+      || `listener-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    window.localStorage.setItem(storageKey, participantId);
+  }
+  app.participantId = participantId;
+  app.participantName = window.localStorage.getItem(nameKey) || "";
+}
+
+initializeParticipantIdentity();
+
+function renderParticipantIdentity() {
+  for (const id of ["feedback-listener-name", "remote-listener-name"]) {
+    const input = $(id);
+    if (input && document.activeElement !== input) {
+      input.value = app.participantName;
+    }
+  }
+}
+
+function updateParticipantName(value) {
+  app.participantName = String(value || "").trim().slice(0, 32);
+  window.localStorage.setItem(
+    "lumen.feedback.participantName.v1",
+    app.participantName
+  );
+  renderParticipantIdentity();
+}
 
 const $ = (id) => document.getElementById(id);
 const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
@@ -103,12 +167,14 @@ function toast(title, message = "", kind = "") {
 
 function setText(id, value) {
   const element = $(id);
-  if (element) element.textContent = value;
+  const next = String(value ?? "");
+  if (element && element.textContent !== next) element.textContent = next;
 }
 
 function setWidth(id, value) {
   const element = $(id);
-  if (element) element.style.width = `${clamp(value) * 100}%`;
+  const next = `${clamp(value) * 100}%`;
+  if (element && element.style.width !== next) element.style.width = next;
 }
 
 function setStatusClass(element, state) {
@@ -141,14 +207,23 @@ function setPage(name) {
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.nav === name));
   if (name === "rig") window.setTimeout(drawRig, 30);
   if (name === "performance") window.setTimeout(drawPerformanceRoom, 30);
-  if (name === "rehearsal") window.setTimeout(drawMotionPath, 30);
-  if (name === "audio") window.setTimeout(drawScope, 30);
+  if (name === "rehearsal") {
+    renderRehearsal(app.status?.rehearsal || {});
+    window.setTimeout(drawMotionPath, 30);
+  }
+  if (name === "audio") {
+    renderTrainingDataset(app.status?.training || {}, app.status?.engine || {});
+    window.setTimeout(drawScope, 30);
+  }
+  if (name === "system") renderDmx(app.status || {});
   if (name === "music") refreshSpotifyConsole(false);
 }
 
 async function initialize() {
   if (app.remote) document.body.classList.add("remote-mode");
   installHandlers();
+  renderParticipantIdentity();
+  renderSequenceDraft();
   updateClock();
   window.setInterval(updateClock, 1000);
   try {
@@ -158,6 +233,8 @@ async function initialize() {
     app.memory = app.bootstrap.memory;
     renderBootstrap();
     renderStatus();
+    await refreshSongTeaching();
+    await refreshStructureLibrary();
     refreshSpotifyConsole(false);
     app.disconnected = false;
     $("loading-screen").classList.add("loaded");
@@ -178,21 +255,21 @@ async function initialize() {
 async function pollStatus() {
   if (app.pollInFlight) return;
   app.pollInFlight = true;
+  const requestedAt = performance.now();
   try {
     const status = await api("/api/status");
+    app.statusLatencyMs = performance.now() - requestedAt;
+    app.lastStatusReceivedAt = Date.now();
     app.status = status;
     if (app.disconnected) toast("Lumen reconnected", "Live state is available again.", "success");
     app.disconnected = false;
     renderStatus();
     renderConnection(true);
     app.pollCount += 1;
-    if (app.pollCount % 50 === 0) {
-      app.system = await api("/api/system");
-      renderSystem(app.system);
-      updateComponentStatuses();
-    }
+    if (app.pollCount % 600 === 0) void refreshSystemStatus();
+    if (app.pollCount % 50 === 0) void refreshSongTeaching();
     const researchRunning = Boolean(app.bootstrap?.research?.worker?.running);
-    if (app.page === "audio" && app.pollCount % (researchRunning ? 20 : 200) === 0) await refreshResearch();
+    if (app.page === "audio" && app.pollCount % (researchRunning ? 50 : 300) === 0) void refreshResearch();
     if (app.pollCount % 100 === 0 && app.system?.spotify?.token_present) {
       refreshSpotifyConsole(false);
     }
@@ -205,6 +282,21 @@ async function pollStatus() {
     if (app.polling !== null) {
       app.polling = window.setTimeout(pollStatus, 100);
     }
+  }
+}
+
+async function refreshSystemStatus() {
+  if (app.systemRefreshing) return;
+  app.systemRefreshing = true;
+  try {
+    app.system = await api("/api/system");
+    renderSystem(app.system);
+    updateComponentStatuses();
+  } catch (_error) {
+    // Live status remains authoritative; a hardware inventory refresh may be
+    // retried later without marking the operator console disconnected.
+  } finally {
+    app.systemRefreshing = false;
   }
 }
 
@@ -234,10 +326,10 @@ function renderBootstrap() {
 function renderFeedbackTargets() {
   const options = ['<option value="overall">Overall performance</option>'];
   if (fixtures().filter((fixture) => fixture.kind === "moving").length > 1) {
-    options.push('<option value="group:movers">Both movers</option>');
+    options.push('<option value="group:movers">Movers</option>');
   }
-  for (const fixture of fixtures().filter((item) => item.kind !== "moving")) {
-    options.push(`<option value="fixture:${escapeHtml(fixture.id)}">${escapeHtml(fixture.name || fixture.id)} · Effect</option>`);
+  if (fixtures().some((fixture) => fixture.kind === "auxiliary")) {
+    options.push('<option value="group:center">Center multi-effect</option>');
   }
   ["feedback-scope", "remote-feedback-scope"].forEach((id) => {
     const select = $(id);
@@ -259,9 +351,8 @@ function renderRehearsal(rehearsal = {}) {
   const scopeSelect = $("rehearsal-scope");
   if (scopeSelect) {
     const scopeOptions = [
-      '<option value="movers">Both movers</option>',
-      ...fixtures().filter((fixture) => fixture.kind === "moving").map((fixture) => `<option value="fixture:${escapeHtml(fixture.id)}">${escapeHtml(fixture.name)} · DMX ${fixture.address}</option>`),
-      '<option value="center">Center effect</option>',
+      '<option value="movers">Movers</option>',
+      '<option value="center">Center multi-effect</option>',
       '<option value="overall">Whole rig</option>',
     ];
     const signature = scopeOptions.join("");
@@ -272,7 +363,6 @@ function renderRehearsal(rehearsal = {}) {
   }
   setText("rehearsal-routine-name", selected.name || label(rehearsal.routine || "figure_eight"));
   setText("rehearsal-routine-description", selected.description || "Select a movement to inspect it in isolation.");
-  setText("rehearsal-preferred-summary", `${selected.name || label(rehearsal.routine)} · ${label(rehearsal.scope || "movers")}`);
   const running = Boolean(app.status?.engine?.running && app.status?.engine?.mode === "rehearsal");
   setText("rehearsal-state", running ? "RUNNING" : "STOPPED");
   setText("rehearsal-output-badge", rehearsal.output === "live" ? "LIVE RIG" : "VIRTUAL PREVIEW");
@@ -306,7 +396,18 @@ function renderRehearsal(rehearsal = {}) {
 }
 
 function renderMotionEditor(editor = {}) {
-  const values = editor.values || {};
+  if (!app.motionEditorScope) app.motionEditorScope = editor.scope || "movers";
+  const scope = app.motionEditorScope;
+  const scopedEditor = editor.groups?.[scope] || editor;
+  const values = scopedEditor.values || {};
+  const scopeSelect = $("motion-editor-scope");
+  if (scopeSelect && document.activeElement !== scopeSelect) {
+    scopeSelect.value = scope;
+  }
+  $("motion-mover-controls")?.classList.toggle("hidden", scope !== "movers");
+  $("motion-mover-preview")?.classList.toggle("hidden", scope !== "movers");
+  $("motion-center-controls")?.classList.toggle("hidden", scope !== "center");
+  $("motion-center-preview")?.classList.toggle("hidden", scope !== "center");
   const controls = {
     "motion-cycle": values.cycle_beats,
     "motion-pan-size": Number(values.pan_size) * 100,
@@ -315,30 +416,78 @@ function renderMotionEditor(editor = {}) {
     "motion-tilt-center": Number(values.tilt_center) * 100,
     "motion-relationship": values.relationship,
     "motion-direction": values.direction,
-    "motion-body-size": Number(values.body_size) * 100,
-    "motion-arm-size": Number(values.arm_size) * 100,
   };
-  for (const [id, value] of Object.entries(controls)) {
-    const element = $(id);
-    if (element && document.activeElement !== element && value !== undefined) element.value = value;
+  if (scope === "movers") {
+    for (const [id, value] of Object.entries(controls)) {
+      const element = $(id);
+      if (element && document.activeElement !== element && value !== undefined) element.value = value;
+    }
+    setText("motion-cycle-value", `${Number(values.cycle_beats || 0).toFixed(0)} beats`);
+    setText("motion-pan-size-value", percent(values.pan_size));
+    setText("motion-tilt-size-value", percent(values.tilt_size));
+    setText("motion-pan-center-value", percent(values.pan_center));
+    setText("motion-tilt-center-value", percent(values.tilt_center));
   }
-  setText("motion-cycle-value", `${Number(values.cycle_beats || 0).toFixed(0)} beats`);
-  setText("motion-pan-size-value", percent(values.pan_size));
-  setText("motion-tilt-size-value", percent(values.tilt_size));
-  setText("motion-pan-center-value", percent(values.pan_center));
-  setText("motion-tilt-center-value", percent(values.tilt_center));
-  setText("motion-body-size-value", percent(values.body_size));
-  setText("motion-arm-size-value", percent(values.arm_size));
-  setText("motion-editor-status", editor.modified ? "CUSTOM · SAVED" : "DEFAULT · SAVED");
-  const velocity = editor.velocity || [];
+  const centerControls = {
+    "center-cycle": values.cycle_beats,
+    "center-relationship": values.relationship,
+    "center-body-travel": Number(values.body_travel) * 100,
+    "center-body-speed": Number(values.body_speed) * 8,
+    "center-body-phase": Number(values.body_phase) * 100,
+    "center-body-direction": values.body_direction,
+    "center-arm-1-travel": Number(values.arm_1_travel) * 100,
+    "center-arm-1-speed": Number(values.arm_1_speed) * 8,
+    "center-arm-1-phase": Number(values.arm_1_phase) * 100,
+    "center-arm-1-direction": values.arm_1_direction,
+    "center-arm-2-travel": Number(values.arm_2_travel) * 100,
+    "center-arm-2-speed": Number(values.arm_2_speed) * 8,
+    "center-arm-2-phase": Number(values.arm_2_phase) * 100,
+    "center-arm-2-direction": values.arm_2_direction,
+    "center-emitter-pattern": values.emitter_pattern,
+    "center-color-pattern": values.color_pattern,
+    "center-laser-mode": values.laser_mode,
+    "center-laser-level": Number(values.laser_level) * 100,
+    "center-strip-program": values.strip_program,
+    "center-strip-speed": Number(values.strip_speed) * 100,
+    "center-strobe-level": Number(values.strobe_level) * 100,
+    "center-intensity": Number(values.intensity) * 100,
+    "center-blackout-accent": Number(values.blackout_accent) * 100,
+  };
+  if (scope === "center") {
+    for (const [id, value] of Object.entries(centerControls)) {
+      const element = $(id);
+      if (element && document.activeElement !== element && value !== undefined) element.value = value;
+    }
+    setText("center-cycle-value", `${Number(values.cycle_beats || 0).toFixed(0)} beats`);
+    setText("center-body-travel-value", percent(values.body_travel));
+    setText("center-body-speed-value", `${Number(values.body_speed || 0).toFixed(2)}×`);
+    setText("center-body-phase-value", percent(values.body_phase));
+    setText("center-arm-1-travel-value", percent(values.arm_1_travel));
+    setText("center-arm-1-speed-value", `${Number(values.arm_1_speed || 0).toFixed(2)}×`);
+    setText("center-arm-1-phase-value", percent(values.arm_1_phase));
+    setText("center-arm-2-travel-value", percent(values.arm_2_travel));
+    setText("center-arm-2-speed-value", `${Number(values.arm_2_speed || 0).toFixed(2)}×`);
+    setText("center-arm-2-phase-value", percent(values.arm_2_phase));
+    setText("center-laser-level-value", percent(values.laser_level));
+    setText("center-strip-program-value", Math.round(Number(values.strip_program || 0)));
+    setText("center-strip-speed-value", percent(values.strip_speed));
+    setText("center-strobe-level-value", Number(values.strobe_level || 0) ? percent(values.strobe_level) : "Off");
+    setText("center-intensity-value", percent(values.intensity));
+    setText("center-blackout-accent-value", Number(values.blackout_accent || 0) ? percent(values.blackout_accent) : "Off");
+    setText("center-preview-body", `${Number(values.body_speed || 0).toFixed(2)}× · ${percent(values.body_travel)}`);
+    setText("center-preview-arm-1", `${Number(values.arm_1_speed || 0).toFixed(2)}× · ${percent(values.arm_1_travel)}`);
+    setText("center-preview-arm-2", `${Number(values.arm_2_speed || 0).toFixed(2)}× · ${percent(values.arm_2_travel)}`);
+  }
+  setText("motion-editor-status", scopedEditor.modified ? `${scope.toUpperCase()} · CUSTOM · SAVED` : `${scope.toUpperCase()} · DEFAULT · SAVED`);
+  const velocity = scopedEditor.velocity || [];
   const worst = velocity.reduce((current, item) => Math.max(
     current,
     Number(item.required_pan_deg_s || 0) / Math.max(1, Number(item.maximum_pan_deg_s || 1)),
     Number(item.required_tilt_deg_s || 0) / Math.max(1, Number(item.maximum_tilt_deg_s || 1)),
   ), 0);
-  setText("motion-velocity-status", editor.velocity_feasible === false ? `TOO FAST · ${Math.round(worst * 100)}%` : `VELOCITY OK · ${Math.round(worst * 100)}%`);
-  $("motion-velocity-status")?.classList.toggle("warn", editor.velocity_feasible === false);
-  drawMotionPath(editor.paths || []);
+  setText("motion-velocity-status", scope === "center" ? "CENTER CONTROLS" : scopedEditor.velocity_feasible === false ? `TOO FAST · ${Math.round(worst * 100)}%` : `VELOCITY OK · ${Math.round(worst * 100)}%`);
+  $("motion-velocity-status")?.classList.toggle("warn", scopedEditor.velocity_feasible === false);
+  if (scope === "movers") drawMotionPath(scopedEditor.paths || []);
 }
 
 function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || []) {
@@ -373,7 +522,7 @@ function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || [
     });
     ctx.stroke();
     if (path.length) {
-      const cycle = Number(app.status?.rehearsal?.motion_editor?.values?.cycle_beats || 1);
+      const cycle = Number(app.status?.rehearsal?.motion_editor?.groups?.movers?.values?.cycle_beats || 1);
       const beats = Number(app.status?.engine?.uptime_s || 0) * Number(app.status?.rehearsal?.bpm || 120) / 60;
       const marker = path[Math.floor((beats % cycle) / cycle * (path.length - 1))];
       if (marker) {
@@ -387,6 +536,33 @@ function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || [
 }
 
 function motionFormValues() {
+  if (app.motionEditorScope === "center") {
+    return {
+      cycle_beats: Number($("center-cycle")?.value || 8),
+      relationship: $("center-relationship")?.value || "synchronized",
+      body_travel: Number($("center-body-travel")?.value || 0) / 100,
+      body_speed: Number($("center-body-speed")?.value || 8) / 8,
+      body_phase: Number($("center-body-phase")?.value || 0) / 100,
+      body_direction: Number($("center-body-direction")?.value || 1),
+      arm_1_travel: Number($("center-arm-1-travel")?.value || 0) / 100,
+      arm_1_speed: Number($("center-arm-1-speed")?.value || 8) / 8,
+      arm_1_phase: Number($("center-arm-1-phase")?.value || 0) / 100,
+      arm_1_direction: Number($("center-arm-1-direction")?.value || 1),
+      arm_2_travel: Number($("center-arm-2-travel")?.value || 0) / 100,
+      arm_2_speed: Number($("center-arm-2-speed")?.value || 8) / 8,
+      arm_2_phase: Number($("center-arm-2-phase")?.value || 0) / 100,
+      arm_2_direction: Number($("center-arm-2-direction")?.value || 1),
+      emitter_pattern: $("center-emitter-pattern")?.value || "both",
+      color_pattern: $("center-color-pattern")?.value || "palette",
+      laser_mode: $("center-laser-mode")?.value || "off",
+      laser_level: Number($("center-laser-level")?.value || 0) / 100,
+      strip_program: Number($("center-strip-program")?.value || 0),
+      strip_speed: Number($("center-strip-speed")?.value || 0) / 100,
+      strobe_level: Number($("center-strobe-level")?.value || 0) / 100,
+      intensity: Number($("center-intensity")?.value || 0) / 100,
+      blackout_accent: Number($("center-blackout-accent")?.value || 0) / 100,
+    };
+  }
   return {
     cycle_beats: Number($("motion-cycle")?.value || 8),
     pan_size: Number($("motion-pan-size")?.value || 0) / 100,
@@ -395,14 +571,12 @@ function motionFormValues() {
     tilt_center: Number($("motion-tilt-center")?.value || 50) / 100,
     relationship: $("motion-relationship")?.value || "synchronized",
     direction: Number($("motion-direction")?.value || 1),
-    body_size: Number($("motion-body-size")?.value || 0) / 100,
-    arm_size: Number($("motion-arm-size")?.value || 0) / 100,
   };
 }
 
 async function patchMotionRoutine(values, action = null) {
   try {
-    const body = { routine: app.status?.rehearsal?.routine, values };
+    const body = { routine: app.status?.rehearsal?.routine, scope: app.motionEditorScope || "movers", values };
     if (action) body.action = action;
     app.status = await api("/api/motion-routine", { method: "POST", body });
     renderStatus();
@@ -463,35 +637,551 @@ function stepRehearsal(direction) {
   if (next) patchRehearsal({ routine: next.id, tour: false });
 }
 
-async function teachRehearsal(kind) {
-  const rehearsal = app.status?.rehearsal || {};
-  const labelValue = kind === "musical_context" ? $("rehearsal-context-label")?.value : rehearsal.routine;
-  const centerFixture = fixtures().find((fixture) => fixture.kind === "auxiliary");
-  const selectedFixtureId = rehearsal.scope?.startsWith("fixture:") ? rehearsal.scope.slice(8) : null;
-  const scope = rehearsal.scope === "movers" ? "group" : rehearsal.scope === "center" || selectedFixtureId ? "fixture" : "overall";
+function songTime(milliseconds) {
+  if (milliseconds === null || milliseconds === undefined) return "No position";
+  const totalSeconds = Math.max(0, Math.floor(Number(milliseconds) / 1000));
+  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, "0")}`;
+}
+
+async function refreshSongTeaching(force = false) {
+  if (app.teachingRefreshing) return;
+  app.teachingRefreshing = true;
   try {
-    const result = await api("/api/training/annotation", {
+    app.teaching = await api(`/api/choreography${force ? "?force=1" : ""}`);
+    renderSongTeaching(app.teaching);
+  } catch (error) {
+    setText("teacher-timeline-summary", `Song memory unavailable · ${error.message}`);
+  } finally {
+    app.teachingRefreshing = false;
+  }
+}
+
+function renderSongTeaching(teaching = app.teaching || app.status?.song_teaching || {}) {
+  setText("sequence-song-position", teaching.available ? `SONG ${teaching.song_id} · ${songTime(teaching.position_ms)}` : "No identified song");
+  setText("remote-sequence-position", teaching.available ? songTime(teaching.position_ms) : "No song identity");
+  const cached = teaching.cached_structure;
+  if (cached?.axes) {
+    const axes = ["functional", "energy", "content"].map((axis) => {
+      const value = cached.axes[axis];
+      return `${label(axis)}: ${label(value?.label || "unknown")} ${value ? percent(value.confidence) : ""}`;
+    });
+    const next = cached.boundary?.next;
+    const authorities = [...new Set(Object.values(cached.axes)
+      .filter(Boolean)
+      .map((value) => value.recall_authority || value.teacher?.name || "cached teacher"))];
+    setText("teacher-timeline-summary", `${axes.join(" · ")}${next ? ` · next boundary in ${songTime(next.in_ms)}` : ""} · ${authorities.map(label).join(" + ")} · line-in audio still drives beats`);
+  } else {
+    setText("teacher-timeline-summary", "No cached teacher timeline for this recording yet. Live analysis remains active.");
+  }
+  if (!app.structureLibrary) renderStructureTimelines(teaching);
+  renderSequenceHistory(teaching);
+}
+
+async function refreshStructureLibrary(recordingId = app.selectedStructureRecordingId) {
+  try {
+    const query = recordingId
+      ? `?recording_id=${encodeURIComponent(recordingId)}`
+      : "";
+    app.structureLibrary = await api(`/api/structure/library${query}`);
+    app.selectedStructureRecordingId = app.structureLibrary.selected_recording_id || null;
+    renderStructureLibrary();
+  } catch (error) {
+    setText("structure-library-status", `Song training library unavailable · ${error.message}`);
+  }
+}
+
+function structureCatalogLabel(item) {
+  const state = {
+    needs_review: "NEEDS REVIEW",
+    approved: "APPROVED",
+    corrected: "CORRECTED",
+    rejected: "REJECTED",
+    diagnostic_only: "DIAGNOSTIC",
+  }[item.review_status] || label(item.review_status);
+  const artist = (item.artists || []).join(", ");
+  return `${state} · ${item.title}${artist ? ` — ${artist}` : ""}`;
+}
+
+function filteredStructureCatalog() {
+  const catalog = app.structureLibrary?.catalog || [];
+  const needle = ($("structure-song-search")?.value || "").trim().toLocaleLowerCase();
+  const statusFilter = $("structure-song-filter")?.value || "all";
+  return catalog.filter((item) => {
+    const haystack = `${item.title} ${(item.artists || []).join(" ")} ${item.album || ""}`.toLocaleLowerCase();
+    const statusMatches = statusFilter === "all"
+      || (statusFilter === "reviewed" && item.reviewed)
+      || item.review_status === statusFilter
+      || item.recording_id === app.selectedStructureRecordingId;
+    return statusMatches && (!needle || haystack.includes(needle));
+  });
+}
+
+function renderStructureSongOptions() {
+  const select = $("structure-song-select");
+  if (!select) return;
+  const catalog = app.structureLibrary?.catalog || [];
+  const matches = filteredStructureCatalog();
+  select.innerHTML = matches.length
+    ? matches.map((item) => `<option value="${escapeHtml(item.recording_id)}">${escapeHtml(structureCatalogLabel(item))}</option>`).join("")
+    : `<option value="">${catalog.length ? "No songs match this search" : "No analyzed songs available"}</option>`;
+  if (matches.some((item) => item.recording_id === app.selectedStructureRecordingId)) {
+    select.value = app.selectedStructureRecordingId;
+  } else {
+    select.value = "";
+  }
+}
+
+function renderStructureCatalogTable() {
+  const body = $("structure-catalog-body");
+  if (!body) return;
+  const matches = filteredStructureCatalog();
+  const trainingLabel = {
+    active_student_source: "Used by active model",
+    ready_for_next_training: "Ready for next training",
+    excluded_partial_capture: "Excluded: partial capture",
+    diagnostic_only: "Not a training source",
+  };
+  body.innerHTML = matches.length ? matches.map((item) => `
+    <tr data-structure-recording="${escapeHtml(item.recording_id)}" class="${item.recording_id === app.selectedStructureRecordingId ? "selected" : ""}">
+      <td><button data-structure-recording="${escapeHtml(item.recording_id)}"><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.album || "")}</small></button></td>
+      <td>${escapeHtml((item.artists || []).join(", ") || "—")}</td>
+      <td>${songTime(item.duration_ms)}</td>
+      <td>${escapeHtml((item.teacher_sources || []).join(" + ") || "Local")}</td>
+      <td><span class="catalog-state state-${escapeHtml(item.review_status)}">${escapeHtml(label(item.review_status))}</span><small>${item.timeline_count} ${item.timeline_count === 1 ? "timeline" : "timelines"}</small></td>
+      <td><span class="catalog-state training-${escapeHtml(item.training_status)}">${escapeHtml(trainingLabel[item.training_status] || label(item.training_status))}</span><small>${escapeHtml(label(item.capture_status || "unknown capture"))}</small></td>
+      <td>${escapeHtml(label(item.split || "—"))}</td>
+      <td>${formatElapsed(item.latest_timeline_unix_ms)}</td>
+    </tr>`).join("") : '<tr><td colspan="8">No songs match the current search and status filter.</td></tr>';
+}
+
+function renderStructureLibrary() {
+  const library = app.structureLibrary || {};
+  renderStructureSongOptions();
+  renderStructureCatalogTable();
+  const selected = library.selected_recording;
+  setText(
+    "structure-timeline-count",
+    `${Number(library.needs_review || 0)} TO REVIEW · ${Number(library.recordings || 0)} SONGS`,
+  );
+  setText(
+    "structure-library-status",
+    selected
+      ? `${label(selected.review_status)} · ${selected.title}${(selected.artists || []).length ? ` — ${selected.artists.join(", ")}` : ""} · ${songTime(selected.duration_ms)} · ${selected.timeline_count} ${selected.timeline_count === 1 ? "timeline" : "timelines"}`
+      : "No analyzed song timelines are available yet.",
+  );
+  setText("structure-selected-title", selected?.title || "No song selected");
+  setText("structure-selected-artist", (selected?.artists || []).join(", ") || selected?.album || "Choose a song above");
+  setText("structure-selected-total", songTime(selected?.duration_ms || 0));
+  renderStructureOverview(library);
+  renderStructureTimelines(library);
+}
+
+function structureOverviewTimeline(library = {}) {
+  const timelines = library.structure_timelines || [];
+  return timelines.find((item) => item.provenance === "operator_correction")
+    || timelines.find((item) => item.review?.status === "approved")
+    || timelines.find((item) => item.review_eligible !== false)
+    || timelines[0]
+    || null;
+}
+
+function renderStructureOverview(library = {}) {
+  const container = $("structure-overview");
+  if (!container) return;
+  const selected = library.selected_recording;
+  const timeline = structureOverviewTimeline(library);
+  if (!selected || !timeline?.segments?.length) {
+    container.innerHTML = '<span class="empty-state">Select an analyzed song to display its section map.</span>';
+    return;
+  }
+  const duration = Math.max(1, Number(selected.duration_ms || timeline.segments.at(-1)?.end_ms || 1));
+  const segments = timeline.segments.map((segment, index) => {
+    const start = Math.max(0, Number(segment.start_ms || 0));
+    const end = Math.max(start, Number(segment.end_ms ?? duration));
+    const width = Math.max(0.4, (end - start) / duration * 100);
+    const energy = segment.energy_label || "unknown";
+    const primary = segment.functional_label || energy || segment.raw_label || "unknown";
+    return `<button class="structure-overview-segment energy-${escapeHtml(energy)}" data-overview-segment="${index}" style="width:${width}%" title="${escapeHtml(`${songTime(start)}–${songTime(end)} · ${label(primary)} · ${label(energy)}`)}"><b>${escapeHtml(label(primary))}</b><small>${songTime(start)}</small></button>`;
+  }).join("");
+  container.innerHTML = `<div class="structure-overview-track">${segments}<i id="structure-overview-playhead"></i></div><div class="structure-overview-legend"><span>Breakdown</span><span>Build</span><span>Drop</span><span>Groove</span><em>${escapeHtml(timeline.teacher?.name || timeline.provenance || "Timeline")}</em></div>`;
+  updateStructureOverviewPlayhead(app.status || {});
+}
+
+function updateStructureOverviewPlayhead(status = {}) {
+  const selectedId = app.structureLibrary?.selected_recording_id;
+  const playingId = app.teaching?.recording_id || status.song_teaching?.recording_id;
+  const selected = app.structureLibrary?.selected_recording;
+  const isPlaying = Boolean(selectedId && selectedId === playingId);
+  const position = isPlaying ? Number(status.media?.live_position_ms || app.teaching?.position_ms || 0) : 0;
+  const duration = Number(selected?.duration_ms || 0);
+  const progress = duration > 0 ? clamp(position / duration) : 0;
+  const playhead = $("structure-overview-playhead");
+  if (playhead) {
+    playhead.style.left = `${progress * 100}%`;
+    playhead.classList.toggle("inactive", !isPlaying);
+  }
+  setText("structure-selected-position", isPlaying ? songTime(position) : "Not playing");
+}
+
+const STRUCTURE_LABELS = {
+  functional: ["", "intro", "verse", "pre_chorus", "chorus", "post_chorus", "bridge", "outro"],
+  energy: ["", "silence", "intro", "breakdown", "build", "drop", "groove", "outro"],
+  content: ["", "vocal", "instrumental", "solo", "transition"],
+};
+const STRUCTURE_EVENTS = ["", "section_start", "energy_rise", "energy_fall", "build_start", "drop_onset", "breakdown_onset", "groove_return", "outro_start", "track_end"];
+
+function structureSelect(axis, value, index) {
+  const values = [...(STRUCTURE_LABELS[axis] || [""])];
+  const current = value || "";
+  if (current && !values.includes(current)) values.push(current);
+  return `<select data-structure-axis="${axis}" data-segment-index="${index}">${values.map((item) => `<option value="${escapeHtml(item)}"${item === current ? " selected" : ""}>${escapeHtml(item ? label(item) : "Not supplied")}</option>`).join("")}</select>`;
+}
+
+function structureEventSelect(value, index) {
+  const current = value || "";
+  return `<select data-structure-event="${index}">${STRUCTURE_EVENTS.map((item) => `<option value="${item}"${item === current ? " selected" : ""}>${escapeHtml(item ? label(item) : "No event")}</option>`).join("")}</select>`;
+}
+
+function structureTransitionEvent(segment = {}) {
+  // Current normalized timelines use transition_event. Keep the old event
+  // alias readable so existing local operator corrections remain editable.
+  return segment.provenance?.transition_event
+    || segment.provenance?.event
+    || segment.transition_event
+    || "";
+}
+
+function renderStructureTimelines(teaching = {}) {
+  const container = $("structure-timeline-list");
+  const count = $("structure-timeline-count");
+  if (!container) return;
+  const timelines = teaching.structure_timelines || [];
+  if (count) count.textContent = `${timelines.length} ${timelines.length === 1 ? "TIMELINE" : "TIMELINES"}`;
+  if (!timelines.length) {
+    container.innerHTML = '<p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p>';
+    return;
+  }
+  container.innerHTML = timelines.map((timeline) => {
+    const teacher = timeline.teacher?.name || timeline.provenance || "Local timeline";
+    const scored = Number(timeline.confidence || 0) > 0;
+    const review = timeline.review?.status || "unreviewed";
+    const isEditing = app.editingStructureTimelineId === timeline.id;
+    const correctedFrom = timeline.metadata?.corrects_timeline_id;
+    const rows = (timeline.segments || []).map((segment, index) => {
+      const cells = isEditing
+        ? `<td>${structureSelect("functional", segment.functional_label, index)}</td><td>${structureSelect("energy", segment.energy_label, index)}</td><td>${structureSelect("content", segment.content_label, index)}</td><td>${structureEventSelect(structureTransitionEvent(segment), index)}</td>`
+        : `<td>${escapeHtml(label(segment.functional_label || "—"))}</td><td>${escapeHtml(label(segment.energy_label || "—"))}</td><td>${escapeHtml(label(segment.content_label || "—"))}</td><td>${escapeHtml(label(structureTransitionEvent(segment) || "—"))}</td>`;
+      const start = Number(segment.start_ms || 0) / 1000;
+      const end = segment.end_ms === null || segment.end_ms === undefined ? "" : Number(segment.end_ms) / 1000;
+      const timing = isEditing
+        ? `<td class="structure-time-edit"><input data-structure-start="${index}" type="number" min="0" step="0.1" value="${start}"><span>to</span><input data-structure-end="${index}" type="number" min="0" step="0.1" value="${end}"></td>`
+        : `<td>${songTime(segment.start_ms)}–${segment.end_ms === null ? "end" : songTime(segment.end_ms)}</td>`;
+      return `<tr data-structure-segment="${index}">${timing}${cells}<td title="Original teacher label">${escapeHtml(segment.raw_label || "—")}</td><td>${segment.label_confidence > 0 ? percent(segment.label_confidence) : "unscored"}</td></tr>`;
+    }).join("");
+    const reviewDisabled = timeline.review_eligible === false ? " disabled title=\"Diagnostic evidence cannot be approved for Live recall\"" : "";
+    return `<article class="structure-timeline-card${review === "approved" ? " approved" : review === "rejected" ? " rejected" : ""}">
+      <header><div><b>${escapeHtml(teacher)}</b><span>${scored ? `${percent(timeline.confidence)} model confidence` : "unscored model output"} · ${escapeHtml(label(timeline.recall_authority || review))}</span><small>${escapeHtml(timeline.timeline_version || "unknown version")}${correctedFrom ? ` · correction of ${escapeHtml(correctedFrom)}` : ""}</small></div><div class="structure-review-actions"><button data-timeline-review="approved" data-timeline-id="${escapeHtml(timeline.id)}"${reviewDisabled}>Approve</button><button data-timeline-review="rejected" data-timeline-id="${escapeHtml(timeline.id)}">Reject</button><button data-timeline-correct="${escapeHtml(timeline.id)}">${isEditing ? "Cancel correction" : "Correct labels"}</button></div></header>
+      <div class="structure-table-wrap"><table><thead><tr><th>Time</th><th>Function</th><th>Energy</th><th>Content</th><th>Transition event</th><th>Raw teacher label</th><th>Model score</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${isEditing ? `<div class="structure-correction-actions"><label><span>Correction note</span><input id="structure-correction-note" maxlength="1000" placeholder="What did the teacher get wrong?"></label><button class="primary" data-timeline-save="${escapeHtml(timeline.id)}">Save immutable correction</button></div>` : ""}
+    </article>`;
+  }).join("");
+}
+
+async function reviewStructureTimeline(timelineId, status) {
+  try {
+    await api("/api/structure/review", { method: "POST", body: {
+      timeline_id: timelineId,
+      recording_id: app.selectedStructureRecordingId,
+      status,
+      participant_id: app.participantId,
+      participant_name: app.participantName || null,
+    }});
+    await refreshStructureLibrary(app.selectedStructureRecordingId);
+    await refreshSongTeaching(true);
+    toast("Timeline review saved", `${label(status)} · model probability was not changed`, "success");
+  } catch (error) {
+    toast("Timeline review failed", error.message, "error");
+  }
+}
+
+async function saveStructureCorrection(timelineId) {
+  const timeline = (app.structureLibrary?.structure_timelines || app.teaching?.structure_timelines || []).find((item) => item.id === timelineId);
+  if (!timeline) return;
+  const container = $("structure-timeline-list");
+  const segments = (timeline.segments || []).map((segment, index) => {
+    const readAxis = (axis) => container.querySelector(`[data-structure-axis="${axis}"][data-segment-index="${index}"]`)?.value || null;
+    const start = Number(container.querySelector(`[data-structure-start="${index}"]`)?.value || 0);
+    const endInput = container.querySelector(`[data-structure-end="${index}"]`)?.value;
+    return {
+      segment_index: index,
+      start_ms: Math.round(start * 1000),
+      end_ms: endInput === "" ? null : Math.round(Number(endInput) * 1000),
+      functional_label: readAxis("functional"),
+      energy_label: readAxis("energy"),
+      content_label: readAxis("content"),
+      event: container.querySelector(`[data-structure-event="${index}"]`)?.value || null,
+    };
+  });
+  try {
+    await api("/api/structure/correct", { method: "POST", body: {
+      base_timeline_id: timelineId,
+      recording_id: app.selectedStructureRecordingId,
+      segments,
+      note: $("structure-correction-note")?.value || null,
+      participant_id: app.participantId,
+      participant_name: app.participantName || null,
+    }});
+    app.editingStructureTimelineId = null;
+    await refreshStructureLibrary(app.selectedStructureRecordingId);
+    await refreshSongTeaching(true);
+    toast("Correction saved", "The teacher original remains intact; this recording now recalls your revision.", "success");
+  } catch (error) {
+    toast("Correction could not be saved", error.message, "error");
+  }
+}
+
+function renderSequenceDraft() {
+  const container = $("sequence-steps");
+  if (!container) return;
+  let startBeat = 0;
+  container.innerHTML = app.sequenceDraft.map((step, index) => {
+    const rowStart = startBeat;
+    startBeat += Number(step.duration_beats || 0);
+    const paletteOptions = [
+      ["", "Automatic"], ["party_vivid", "Party vivid"], ["midnight_teal", "Midnight teal"],
+      ["cool", "Cool"], ["warm", "Warm"], ["magenta_blue", "Magenta / blue"],
+      ["cyan_violet", "Cyan / violet"], ["red_amber", "Red / amber"],
+    ].map(([value, name]) => `<option value="${value}"${step.palette === value ? " selected" : ""}>${name}</option>`).join("");
+    const routineOptions = ["breathe", "fan_sweep", "figure_eight", "opposing_chase", "beat_nod", "counter_rotate"]
+      .map((routine) => `<option value="${routine}"${step.routine === routine ? " selected" : ""}>${label(routine)}</option>`).join("");
+    return `<div class="sequence-step" data-sequence-step="${index}">
+      <div class="sequence-step-number"><b>${index + 1}</b><span>beat ${rowStart.toFixed(0)}</span></div>
+      <label><span>Movement</span><select data-step-field="routine">${routineOptions}</select></label>
+      <label><span>Length</span><input data-step-field="duration_beats" type="number" min="1" max="128" step="1" value="${Number(step.duration_beats || 8)}"></label>
+      <label><span>Intensity <output>${Math.round(Number(step.intensity || 0) * 100)}%</output></span><input data-step-field="intensity" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.intensity || 0) * 100)}"></label>
+      <label><span>Brightness <output>${Math.round(Number(step.brightness ?? step.intensity ?? 0) * 100)}%</output></span><input data-step-field="brightness" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.brightness ?? step.intensity ?? 0) * 100)}"></label>
+      <label><span>Motion speed <output>${Math.round(Number(step.motion_speed ?? 0.5) * 100)}%</output></span><input data-step-field="motion_speed" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.motion_speed ?? 0.5) * 100)}"></label>
+      <label><span>Travel <output>${Math.round(Number(step.travel_size ?? 1) * 100)}%</output></span><input data-step-field="travel_size" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.travel_size ?? 1) * 100)}"></label>
+      <label><span>Activity <output>${Math.round(Number(step.activity_density ?? 1) * 100)}%</output></span><input data-step-field="activity_density" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.activity_density ?? 1) * 100)}"></label>
+      <label><span>Beat sync <output>${Math.round(Number(step.beat_sync ?? 1) * 100)}%</output></span><input data-step-field="beat_sync" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.beat_sync ?? 1) * 100)}"></label>
+      <label><span>Palette</span><select data-step-field="palette">${paletteOptions}</select></label>
+      <label><span>Strobe <output>${Number(step.strobe || 0) ? `${Math.round(Number(step.strobe) * 100)}%` : "Off"}</output></span><input data-step-field="strobe" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.strobe || 0) * 100)}"></label>
+      <button data-step-remove="${index}"${app.sequenceDraft.length === 1 ? " disabled" : ""}>Remove</button>
+    </div>`;
+  }).join("");
+}
+
+function syncSequenceDraftFromDom() {
+  $$('[data-sequence-step]').forEach((row) => {
+    const index = Number(row.dataset.sequenceStep);
+    const current = app.sequenceDraft[index];
+    if (!current) return;
+    row.querySelectorAll('[data-step-field]').forEach((input) => {
+      const field = input.dataset.stepField;
+      current[field] = field === "duration_beats"
+        ? Math.max(1, Number(input.value || 1))
+        : ["intensity", "brightness", "motion_speed", "travel_size", "activity_density", "beat_sync", "strobe"].includes(field)
+          ? Number(input.value || 0) / 100
+          : input.value;
+    });
+  });
+  let startBeat = 0;
+  app.sequenceDraft.forEach((step) => {
+    step.start_beat = startBeat;
+    startBeat += Number(step.duration_beats || 0);
+  });
+}
+
+function clearSequenceDraft() {
+  app.sequenceDraft = [{ routine: "breathe", duration_beats: 8, intensity: 0.72, brightness: 0.72, motion_speed: 0.5, travel_size: 1, activity_density: 1, beat_sync: 1, palette: "", strobe: 0 }];
+  app.editingSequenceId = null;
+  app.editingPlacementId = null;
+  if ($("sequence-name")) $("sequence-name").value = "";
+  renderSequenceDraft();
+}
+
+async function saveSequenceHere(remote = false) {
+  if (remote) {
+    app.sequenceDraft = [{
+      routine: $("remote-sequence-routine")?.value || "breathe",
+      duration_beats: Number($("remote-sequence-duration")?.value || 8),
+      intensity: Number($("remote-sequence-intensity")?.value || 75) / 100,
+      palette: "",
+      strobe: 0,
+      start_beat: 0,
+    }];
+  } else {
+    syncSequenceDraftFromDom();
+  }
+  const scope = remote ? $("remote-sequence-scope")?.value || "movers" : $("sequence-scope")?.value || "movers";
+  const clientEventId = window.crypto?.randomUUID?.() || `sequence-${Date.now()}-${Math.random()}`;
+  try {
+    const result = await api("/api/choreography/save", {
       method: "POST",
       body: {
-        kind,
-        label: labelValue,
+        sequence_id: remote ? null : app.editingSequenceId,
+        placement_id: remote ? null : app.editingPlacementId,
+        name: remote ? `${label(app.sequenceDraft[0].routine)} at ${songTime(app.teaching?.position_ms)}` : $("sequence-name")?.value.trim() || "Taught lighting phrase",
         scope,
-        group_id: scope === "group" ? "movers" : null,
-        fixture_id: scope === "fixture" ? selectedFixtureId || centerFixture?.id || null : null,
-        intensity: 1,
+        section_label: remote ? null : $("sequence-section")?.value || null,
+        steps: app.sequenceDraft,
+        participant_id: app.participantId,
+        participant_name: app.participantName || null,
+        client_event_id: clientEventId,
+        place: true,
       },
     });
-    toast(kind === "musical_context" ? "Song context saved" : "Routine placed", `${label(labelValue)}${result.linked_to_audio ? " · linked to PCM" : " · saved at the current song position"}`, "success");
+    app.editingSequenceId = result.sequence_id;
+    app.editingPlacementId = result.placement_id;
+    app.choreographyUndo = { kind: "sequence", id: result.sequence_id };
+    if ($("sequence-undo-history")) $("sequence-undo-history").disabled = false;
+    await refreshSongTeaching(true);
+    toast("Sequence taught", `${label(scope)} · ${result.steps} step${result.steps === 1 ? "" : "s"} · active from the next matching phrase boundary`, "success");
   } catch (error) {
-    toast("Rehearsal teaching failed", error.message, "error");
+    toast("Sequence could not be saved", error.message, "error");
+  }
+}
+
+function renderSequenceHistory(teaching = {}) {
+  const container = $("sequence-history-list");
+  if (!container) return;
+  const placementsBySequence = new Map();
+  for (const placement of teaching.placements || []) {
+    if (!placementsBySequence.has(placement.sequence_id)) placementsBySequence.set(placement.sequence_id, []);
+    placementsBySequence.get(placement.sequence_id).push(placement);
+  }
+  const sequences = (teaching.sequences || []).filter((sequence) => sequence.source === "operator_sequence_editor");
+  container.innerHTML = sequences.length ? sequences.map((sequence) => {
+    const placements = placementsBySequence.get(sequence.id) || [];
+    const placement = placements[0];
+    const owner = sequence.participant_name || (sequence.participant_id === app.participantId ? "This device" : "Listener");
+    return `<article class="sequence-history-item">
+      <div><b>${escapeHtml(sequence.name || "Taught sequence")}</b><span>${label(sequence.fixture_scope)} · ${sequence.steps.length} steps · revision ${sequence.revision} · ${escapeHtml(owner)}</span><small>${placement ? `${songTime(placement.start_ms)} · ${label(placement.section_label || "time anchor")}` : "Not placed"}</small></div>
+      <div><button data-sequence-load="${escapeHtml(sequence.id)}">Edit</button>${placement ? `<button data-placement-delete="${escapeHtml(placement.id)}">Remove placement</button>` : ""}<button data-sequence-delete="${escapeHtml(sequence.id)}">Delete</button></div>
+    </article>`;
+  }).join("") : '<p class="empty-state">No explicit sequences saved for this song. Build one above or use the mobile one-action teacher.</p>';
+}
+
+function loadSequenceForEdit(sequenceId) {
+  const sequence = (app.teaching?.sequences || []).find((item) => item.id === sequenceId);
+  if (!sequence) return;
+  app.sequenceDraft = sequence.steps.map((step) => ({
+    routine: step.routine,
+    duration_beats: Number(step.duration_beats),
+    intensity: Number(step.intensity),
+    brightness: Number(step.parameters?.brightness ?? step.intensity),
+    motion_speed: Number(step.parameters?.motion_speed ?? 0.5),
+    travel_size: Number(step.parameters?.travel_size ?? 1),
+    activity_density: Number(step.parameters?.activity_density ?? 1),
+    beat_sync: Number(step.parameters?.beat_sync ?? 1),
+    palette: step.palette || "",
+    strobe: typeof step.strobe === "object" ? Number(step.strobe.rate || 0) : Number(step.strobe || 0),
+  }));
+  app.editingSequenceId = sequence.id;
+  app.editingPlacementId = (app.teaching?.placements || []).find((item) => item.sequence_id === sequence.id)?.id || null;
+  if ($("sequence-name")) $("sequence-name").value = sequence.name || "";
+  if ($("sequence-scope")) $("sequence-scope").value = sequence.fixture_scope || "movers";
+  renderSequenceDraft();
+}
+
+async function changeChoreographyHistory(kind, action, id) {
+  try {
+    await api("/api/choreography/history", { method: "POST", body: { kind, action, id, participant_id: app.participantId } });
+    app.choreographyUndo = action === "delete" ? { kind, id } : null;
+    if ($("sequence-undo-history")) $("sequence-undo-history").disabled = !app.choreographyUndo;
+    await refreshSongTeaching(true);
+    toast(`${label(action)} complete`, `${label(kind)} memory updated`, "success");
+  } catch (error) {
+    toast("Song memory was not changed", error.message, "error");
   }
 }
 
 async function undoLastFeedback() {
-  if (!app.memory) app.memory = await api("/api/memory");
-  const latest = app.memory?.recent_feedback?.[0];
-  if (!latest) return toast("Nothing to undo", "No feedback has been recorded yet.");
-  await deleteFeedback(latest.id);
+  const feedbackId = app.feedbackReceipts.pop();
+  if (!feedbackId) {
+    return toast(
+      "Nothing to undo",
+      "This device has not submitted feedback since the page was opened."
+    );
+  }
+  await deleteFeedback(feedbackId, true);
+}
+
+function effectiveCueSummary(output = {}) {
+  const strobe = output.strobe?.enabled
+    ? `strobe ${percent(output.strobe.rate)}`
+    : "strobe off";
+  return `${label(output.routine || "waiting")} · speed ${percent(output.motion_speed)} · travel ${percent(output.travel_size)} · activity ${percent(output.activity_density)} · brightness ${percent(output.brightness)} · ${label(output.palette || "automatic palette")} · ${strobe}`;
+}
+
+function renderLiveTeachingReference(status = {}) {
+  const media = status.media || {};
+  const observation = status.observation || {};
+  const decision = status.decision || {};
+  const expression = decision.expression || {};
+  const resolution = status.structure_model?.effective_resolution || {};
+  const energyAxis = resolution.axes?.energy || {};
+  const position = Number(media.live_position_ms || 0);
+  const duration = Number(media.duration_ms || 0);
+  const progress = duration > 0 ? clamp(position / duration) : 0;
+  setText("teaching-track-title", media.title || "No identified song");
+  setText("teaching-track-artist", (media.artists || []).join(", ") || media.album || "Start Live with Spotify connected");
+  setText("teaching-position", songTime(position));
+  setText("teaching-duration", songTime(duration));
+  if ($("teaching-progress-fill")) $("teaching-progress-fill").style.width = `${progress * 100}%`;
+  if ($("teaching-progress-marker")) $("teaching-progress-marker").style.left = `${progress * 100}%`;
+  setText("teaching-energy", percent(expression.energy));
+  setText("teaching-energy-detail", `Loudness ${percent(observation.loudness)} · rhythm density ${percent(observation.rhythm_density)} · bass share ${percent(observation.low_energy)}`);
+  setText("teaching-structure", `${label(energyAxis.label || observation.section || "unknown")} · ${percent(energyAxis.decision_confidence ?? observation.section_confidence)}`);
+  setText("teaching-structure-detail", `${label(energyAxis.source || "live analyzer")} · ${label(observation.transition_event || "no transition event")}`);
+  setText("teaching-reference-source", label(energyAxis.source || "waiting for Live"));
+  setText("teaching-rhythm", observation.bpm ? `${Number(observation.bpm).toFixed(1)} BPM` : "No lock");
+  setText("teaching-rhythm-detail", `${percent(observation.beat_confidence)} beat confidence · ${percent(observation.beat_phase)} beat phase`);
+  const change = Math.max(Number(observation.arrangement_change || 0), Number(observation.novelty || 0), Number(observation.harmonic_change || 0));
+  setText("teaching-change", percent(change));
+  setText("teaching-change-detail", `Arrangement ${percent(observation.arrangement_change)} · novelty ${percent(observation.novelty)} · harmony ${percent(observation.harmonic_change)}`);
+  for (const lane of ["movers", "center"]) {
+    const plan = status.choreography?.lanes?.[lane] || {};
+    const outputs = plan.effective_outputs || [];
+    const first = outputs[0];
+    setText(`teaching-${lane}-output`, first ? `${label(first.routine)} · ${outputs.length} fixture${outputs.length === 1 ? "" : "s"}` : "Waiting");
+    setText(`teaching-${lane}-detail`, first ? effectiveCueSummary(first) : "No effective cue");
+  }
+  updateStructureOverviewPlayhead(status);
+}
+
+function captureLiveCue(lane) {
+  const status = app.status || {};
+  const plan = status.choreography?.lanes?.[lane] || {};
+  const outputs = plan.effective_outputs || [];
+  if (!outputs.length) {
+    toast("No live cue to copy", `Lumen has not published an effective ${lane} output yet.`, "error");
+    return;
+  }
+  const first = outputs[0];
+  const average = (field, fallback) => outputs.reduce((total, item) => total + Number(item[field] ?? fallback), 0) / outputs.length;
+  const strobeRate = Math.max(...outputs.map((item) => item.strobe?.enabled ? Number(item.strobe.rate || 0) : 0));
+  app.sequenceDraft = [{
+    routine: first.routine === "parked" || first.routine === "hold" ? "breathe" : first.routine,
+    duration_beats: Number(plan.active_step?.duration_beats || 8),
+    intensity: Number(plan.active_step?.intensity ?? average("brightness", 0.72)),
+    brightness: average("brightness", 0.72),
+    motion_speed: average("motion_speed", 0.5),
+    travel_size: average("travel_size", 1),
+    activity_density: average("activity_density", 1),
+    beat_sync: average("beat_sync", 1),
+    palette: first.palette || "",
+    strobe: strobeRate,
+    start_beat: 0,
+  }];
+  app.editingSequenceId = null;
+  app.editingPlacementId = null;
+  if ($("sequence-scope")) $("sequence-scope").value = lane;
+  if ($("sequence-section")) $("sequence-section").value = status.observation?.section || "";
+  if ($("sequence-name")) $("sequence-name").value = `${label(first.routine)} response`;
+  renderSequenceDraft();
+  $("sequence-steps")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  toast("Live cue loaded", "Review every characteristic below; it has not been saved or taught yet.", "success");
 }
 
 function renderStatus() {
@@ -504,21 +1194,41 @@ function renderStatus() {
   const expression = decision?.expression || { energy: 0, tension: 0, motion: 0, intimacy: 0.5, confidence: 0 };
   const running = Boolean(engine.running);
   const fault = engine.phase === "fault";
+  const tempoClock = status.audio?.tempo_clock || {};
+  const spectralTempo = tempoClock.spectral || {};
+  const tempoAmbiguous = Number(spectralTempo.family_ambiguity || 0) >= 0.62
+    && !spectralTempo.octave_promoted;
   const mood = `${label(decision?.gesture || "standing_by")} · ${label(observation?.section || "waiting")} · ${label(decision?.routine || "no_routine")}`;
   setText("analysis-mood", mood);
   setText("analysis-mood-detail", decision?.reason || "Waiting for a musical observation.");
   setText("analysis-energy", percent(expression.energy));
   setText("analysis-motion", percent(expression.motion));
-  setText("analysis-timing", observation?.bpm ? `${Number(observation.bpm).toFixed(1)} BPM · ${percent(observation.beat_confidence)} lock` : "Searching for tempo");
+  setText(
+    "analysis-timing",
+    observation?.bpm
+      ? `${Number(observation.bpm).toFixed(1)} BPM · ${percent(observation.beat_confidence)} ${tempoAmbiguous ? "family ambiguity" : "lock"}`
+      : tempoAmbiguous ? "Resolving half/double-time family" : "Searching for tempo",
+  );
   const branch = status.solutions?.[0]?.branch || "No fixture solution";
   setText("analysis-resolution", branch.replaceAll("/", " → "));
   const structure = status.structure_model || {};
+  const cachedTeacher = structure.cached_timeline;
   const student = structure.prediction;
   const selectedByStudent = student && student.selected_axis === "student_energy";
   const acceptedStudentAxes = student
     ? Object.entries(student.accepted_axes || {}).filter(([, accepted]) => accepted).map(([axis]) => axis)
     : [];
-  if (structure.state === "error") {
+  if (cachedTeacher?.axes) {
+    const axes = ["functional", "energy", "content"]
+      .map((axis) => cachedTeacher.axes[axis])
+      .filter(Boolean);
+    const primary = cachedTeacher.axes.energy || cachedTeacher.axes.functional || axes[0];
+    setText("analysis-structure", `${label(primary?.label || "teacher context")} · ${percent(cachedTeacher.confidence || primary?.confidence)}`);
+    setText(
+      "analysis-structure-detail",
+      `Cached ${axes.map((axis) => `${label(axis.label)} ${percent(axis.confidence)}`).join(" · ")} · offline lookup ${structure.memory_context?.lookup_duration_ms ?? "—"} ms · line-in remains beat authority.`,
+    );
+  } else if (structure.state === "error") {
     setText("analysis-structure", "Model load error");
     setText("analysis-structure-detail", structure.error || "The saved student artifact could not be loaded.");
   } else if (selectedByStudent) {
@@ -548,6 +1258,27 @@ function renderStatus() {
     setText("analysis-structure", "Live analyzer only");
     setText("analysis-structure-detail", "No validated streaming student is active; Lumen is using its live authored analyzer.");
   }
+  const choreography = status.choreography || {};
+  for (const lane of ["movers", "center"]) {
+    const plan = choreography.lanes?.[lane] || {};
+    const step = plan.active_step;
+    setText(`analysis-${lane}-plan`, step ? `${label(step.routine)} · ${Number(step.duration_beats || 0).toFixed(0)} beats` : "Waiting");
+    setText(
+      `analysis-${lane}-plan-detail`,
+      step
+        ? `${label(plan.active_sequence_source || "authored")} · ${percent(plan.confidence)} selection confidence${(choreography.replan_pending_lanes || []).includes(lane) ? " · feedback queued for next phrase" : " · phrase held"}`
+        : "No phrase lease yet.",
+    );
+  }
+  const learning = status.learning || {};
+  const evidence = Object.values(learning.applied_feedback_evidence || {});
+  const listenerEvidence = evidence.reduce((highest, item) => Math.max(highest, Number(item.listeners || 0)), 0);
+  const eventEvidence = evidence.reduce((total, item) => total + Number(item.events || 0), 0);
+  setText("analysis-learning", evidence.length ? `${listenerEvidence} listener${listenerEvidence === 1 ? "" : "s"} · ${eventEvidence} weighted events` : "No applied evidence yet");
+  setText(
+    "analysis-learning-detail",
+    `${learning.application_rule || "Feedback waits for a phrase boundary."} Model revision ${learning.model_revision || 0} · ${learning.learned_sequence_candidates || 0} learned sequence candidates.`,
+  );
 
   setText("engine-status", "");
   const engineStatus = $("engine-status");
@@ -563,7 +1294,7 @@ function renderStatus() {
   setText("remote-output-state", status.output ? `${status.output.backend} · ${status.output.frames_sent || 0} frames` : "No output active");
   setText("audio-device-name", engine.audio_device);
   renderAudioDiagnostics(status.audio, engine);
-  renderTrainingDataset(status.training || {}, engine);
+  if (app.page === "audio") renderTrainingDataset(status.training || {}, engine);
   const researchSnapshot = app.bootstrap?.research || {};
   const researchBusy = Boolean(
     researchSnapshot.worker?.running || researchSnapshot.preparation?.running
@@ -591,12 +1322,18 @@ function renderStatus() {
 
   renderEngineButtons(engine);
   renderControls(controls);
-  renderRehearsal(status.rehearsal || {});
+  if (app.page === "rehearsal") renderRehearsal(status.rehearsal || {});
+  if (app.page === "rehearsal") renderLiveTeachingReference(status);
   renderMedia(status.media, observation);
-  renderExpression(decision, expression, observation);
-  renderDmx(status);
-  renderEvents(status.events || []);
-  renderTargetSolutions(status.target_solutions || []);
+  renderExpression(
+    decision,
+    expression,
+    observation,
+    tempoClock,
+  );
+  if (app.page === "system") renderDmx(status);
+  if (app.page === "performance") renderEvents(status.events || []);
+  if (["performance", "rig"].includes(app.page)) renderTargetSolutions(status.target_solutions || []);
   renderConnection(true);
   updateComponentStatuses();
 
@@ -697,6 +1434,9 @@ function renderTrainingDataset(training = {}, engine = {}) {
   setText("training-features", Number((history.feature_frames || 0) + (current.semantic_frames || 0)).toLocaleString());
   setText("training-feedback", Number((history.linked_feedback || 0) + (training.current_linked_feedback || 0)).toLocaleString());
   setText("training-annotations", Number((history.annotations || 0) + (training.current_annotations || 0)).toLocaleString());
+  setText("training-musical-annotations", Number(history.musical_annotations || 0).toLocaleString());
+  setText("training-consensus-anchors", Number(history.consensus_anchors || 0).toLocaleString());
+  setText("training-structure-participants", Number(history.structure_participants || 0).toLocaleString());
   setText("training-size", formatBytes(training.total_bytes || history.bytes || 0));
   setText("training-free", formatBytes(training.disk_free_bytes || 0));
   setText("training-dropped", Number(current.dropped_frames || history.dropped_frames || 0).toLocaleString());
@@ -749,6 +1489,8 @@ function renderResearch(research = {}) {
       ? "Load error"
       : model.active && latestCandidateRejected
         ? "Active · latest candidate rejected"
+        : model.active && staleCandidate
+          ? "Active · retrain recommended"
         : model.active
           ? "Active"
           : latestCandidateRejected
@@ -783,7 +1525,9 @@ function renderResearch(research = {}) {
       const memoryStatus = Number(resources.rss_bytes || 0) > 0
         ? ` Memory ${formatBytes(resources.rss_bytes)}${Number(resources.memory_limit_bytes || 0) > 0 ? ` of ${formatBytes(resources.memory_limit_bytes)} limit` : ""}.`
         : "";
-      readiness.textContent = cancelRequested
+      readiness.textContent = research.worker?.externally_managed
+        ? `Running ${jobName} in a separate local Lumen worker.${memoryStatus} This console will not start another analysis, training, or Live process while that worker owns the job.`
+        : cancelRequested
         ? `Pausing ${jobName} at its cancellation checkpoint. Completed jobs are retained and the unfinished job will return to the queue.${recoveryNote}`
         : `Running ${jobName}: ${done} of ${batch} jobs finished, ${eta}.${memoryStatus} You may pause and resume without losing completed work.${recoveryNote}`;
       readiness.className = "research-readiness active";
@@ -849,8 +1593,11 @@ function renderResearch(research = {}) {
   }
   const cancelButton = $("research-cancel-button");
   if (cancelButton) {
-    cancelButton.disabled = !Boolean(research.worker?.running) || cancelRequested;
-    cancelButton.textContent = cancelRequested ? "Pausing…" : "Pause analysis";
+    const cancelSupported = research.worker?.cancel_supported !== false;
+    cancelButton.disabled = !Boolean(research.worker?.running) || cancelRequested || !cancelSupported;
+    cancelButton.textContent = !cancelSupported && research.worker?.running
+      ? "Managed by local worker"
+      : cancelRequested ? "Pausing…" : "Pause analysis";
   }
   if ($("research-train-button")) {
     $("research-train-button").disabled = engineRunning || preparationRunning || Boolean(research.worker?.running) || !training.train_ready;
@@ -882,12 +1629,16 @@ function renderResearch(research = {}) {
 }
 
 async function refreshResearch() {
+  if (app.researchRefreshing) return;
+  app.researchRefreshing = true;
   try {
     const research = await api("/api/research");
     app.bootstrap.research = research;
     renderResearch(research);
   } catch (error) {
     toast("Research status failed", error.message, "error");
+  } finally {
+    app.researchRefreshing = false;
   }
 }
 
@@ -1326,7 +2077,7 @@ async function spotifyCommand(action, values = {}) {
   }
 }
 
-function renderExpression(decision, expression, observation) {
+function renderExpression(decision, expression, observation, tempoClock = {}) {
   const gesture = decision ? label(decision.gesture) : "Standing by";
   const reason = decision?.reason || "Start Monitor, Perform, or Demo to begin interpretation.";
   const confidence = decision?.confidence || 0;
@@ -1359,7 +2110,32 @@ function renderExpression(decision, expression, observation) {
   setText("beat-phase-detail", Number(observation.beat_phase || 0).toFixed(2));
   setText("novelty-detail", Number(observation.novelty || 0).toFixed(2));
   setText("beat-pulse-detail", percent(observation.beat_pulse || 0));
-  setText("beat-lock-badge", observation.beat_confidence >= 0.5 ? "LOCKED" : "SEARCHING");
+  const spectralTempo = tempoClock.spectral || {};
+  const familyAmbiguous = Number(spectralTempo.family_ambiguity || 0) >= 0.62
+    && !spectralTempo.octave_promoted;
+  setText(
+    "beat-lock-badge",
+    familyAmbiguous
+      ? "AMBIGUOUS"
+      : observation.beat_confidence >= 0.5 ? "LOCKED" : "SEARCHING",
+  );
+  setText("beat-clock-source", label(tempoClock.source || "none"));
+  setText(
+    "beat-candidate-detail",
+    Number(spectralTempo.candidate_bpm || 0) > 0
+      ? `${Number(spectralTempo.candidate_bpm).toFixed(1)} BPM`
+      : "—",
+  );
+  setText(
+    "beat-spectral-lock",
+    Number(spectralTempo.locked_bpm || 0) > 0
+      ? `${Number(spectralTempo.locked_bpm).toFixed(1)} BPM`
+      : "—",
+  );
+  setText(
+    "beat-octave-detail",
+    spectralTempo.octave_promoted ? "Fast pulse supported" : "Standard pulse",
+  );
   const circumference = 2 * Math.PI * 66;
   const phase = clamp(observation.beat_phase);
   const previousBeatPhase = app.lastBeatPhase;
@@ -1397,6 +2173,8 @@ function renderDmx(status) {
   const map = new Map((status.dmx?.active_channels || []).map((item) => [item.channel, item.value]));
   $$(".dmx-cell").forEach((cell) => {
     const value = map.get(Number(cell.dataset.channel)) || 0;
+    if (cell.dataset.value === String(value)) return;
+    cell.dataset.value = String(value);
     cell.classList.toggle("active", value > 0);
     cell.style.setProperty("--dmx-value", value);
     cell.style.setProperty("--dmx-hue", 175 + (Number(cell.dataset.channel) % 5) * 17);
@@ -1408,6 +2186,9 @@ function renderDmx(status) {
 function renderEvents(events) {
   const container = $("event-log");
   if (!container) return;
+  const signature = events.slice(0, 40).map((event) => `${event.time}|${event.kind}|${event.message}`).join("\n");
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
   if (!events.length) {
     container.innerHTML = `<div class="event-row"><time>--:--:--</time><em>system</em><span>No engine events yet.</span></div>`;
     return;
@@ -1702,7 +2483,7 @@ function installFeedbackButton(button) {
   let touchArmed = false;
   button.addEventListener("pointerdown", (event) => {
     start = { x: event.clientX, y: event.clientY, pointerType: event.pointerType };
-    cancelled = false;
+    cancelled = event.pointerType === "touch" && Date.now() < app.touchBlockedUntil;
     touchArmed = false;
   });
   button.addEventListener("pointermove", (event) => {
@@ -1722,6 +2503,30 @@ function installFeedbackButton(button) {
     touchArmed = false;
     const surface = button.closest(".remote-section") ? "remote" : "desktop";
     sendFeedback(button.dataset.feedback, button.dataset.value, null, surface);
+  });
+}
+
+function installWakeProtectedAction(button, action) {
+  if (!button) return;
+  let start = null;
+  let allowed = false;
+  button.addEventListener("pointerdown", (event) => {
+    start = { x: event.clientX, y: event.clientY, type: event.pointerType };
+    allowed = event.pointerType !== "touch" || Date.now() >= app.touchBlockedUntil;
+  });
+  button.addEventListener("pointermove", (event) => {
+    if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 12) {
+      allowed = false;
+    }
+  });
+  button.addEventListener("pointercancel", () => { allowed = false; });
+  button.addEventListener("click", (event) => {
+    if (start?.type === "touch" && !allowed) {
+      event.preventDefault();
+      return;
+    }
+    allowed = false;
+    action(event);
   });
 }
 
@@ -2139,9 +2944,15 @@ function renderMemory(memory) {
   }
 }
 
-async function deleteFeedback(feedbackId) {
+async function deleteFeedback(feedbackId, participantScoped = false) {
   try {
-    await api("/api/feedback/delete", { method: "POST", body: { feedback_id: Number(feedbackId) } });
+    await api("/api/feedback/delete", {
+      method: "POST",
+      body: {
+        feedback_id: Number(feedbackId),
+        participant_id: participantScoped ? app.participantId : null,
+      },
+    });
     app.memory = await api("/api/memory");
     renderMemory(app.memory);
     toast("Feedback removed", "Its preference weight was recomputed.", "success");
@@ -2314,15 +3125,43 @@ async function applyPreset(preset) {
 
 async function sendFeedback(labelValue, value, note = null, surface = "desktop") {
   const selector = $(surface === "remote" ? "remote-feedback-scope" : "feedback-scope");
+  const lifetimeSelector = $(surface === "remote" ? "remote-feedback-lifetime" : "feedback-lifetime");
   const selected = selector?.value || "overall";
+  const lifetime = lifetimeSelector?.value || "cue";
   const [scope, fixtureId, groupId] = selected.startsWith("fixture:")
     ? ["fixture", selected.slice(8), null]
     : selected.startsWith("group:")
       ? ["group", null, selected.slice(6)]
       : ["overall", null, null];
   try {
-    await api("/api/feedback", { method: "POST", body: { label: labelValue, value: Number(value), note, scope, fixture_id: fixtureId, group_id: groupId } });
-    toast("Feedback remembered", note || label(labelValue), "success");
+    const clientEventId = window.crypto?.randomUUID?.()
+      || `event-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const result = await api("/api/feedback", {
+      method: "POST",
+      body: {
+        label: labelValue,
+        value: Number(value),
+        note,
+        scope,
+        fixture_id: fixtureId,
+        group_id: groupId,
+        lifetime,
+        participant_id: app.participantId,
+        participant_name: app.participantName || null,
+        client_event_id: clientEventId,
+      },
+    });
+    if (result.feedback_id && result.created !== false) {
+      app.feedbackReceipts.push(Number(result.feedback_id));
+      app.feedbackReceipts = app.feedbackReceipts.slice(-30);
+    }
+    toast(
+      result.created === false ? "Feedback already received" : "Feedback remembered",
+      result.created === false
+        ? "A network retry was ignored; its learning weight was not duplicated."
+        : `${note || label(labelValue)} · ${result.participant_agreement || 1} listener agreement · applies at a phrase boundary`,
+      "success",
+    );
     app.memory = await api("/api/memory");
     renderMemory(app.memory);
     if ($("feedback-note")) $("feedback-note").value = "";
@@ -2335,20 +3174,35 @@ async function sendFeedback(labelValue, value, note = null, surface = "desktop")
 async function sendTrainingAnnotation(kind, labelValue, surface = "desktop") {
   const selector = $(surface === "remote" ? "remote-feedback-scope" : "feedback-scope");
   const selected = selector?.value || "overall";
-  const [scope, fixtureId, groupId] = selected.startsWith("fixture:")
-    ? ["fixture", selected.slice(8), null]
-    : selected.startsWith("group:")
-      ? ["group", null, selected.slice(6)]
-      : ["overall", null, null];
+  const [scope, fixtureId, groupId] = kind === "musical_context"
+    ? ["overall", null, null]
+    : selected.startsWith("fixture:")
+      ? ["fixture", selected.slice(8), null]
+      : selected.startsWith("group:")
+        ? ["group", null, selected.slice(6)]
+        : ["overall", null, null];
   const note = $(surface === "remote" ? "remote-feedback-note" : "feedback-note")?.value.trim() || null;
   try {
+    const clientEventId = window.crypto?.randomUUID?.()
+      || `annotation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const result = await api("/api/training/annotation", {
       method: "POST",
-      body: { kind, label: labelValue, scope, fixture_id: fixtureId, group_id: groupId, note, intensity: 1 },
+      body: {
+        kind,
+        label: labelValue,
+        scope,
+        fixture_id: fixtureId,
+        group_id: groupId,
+        note,
+        intensity: 1,
+        participant_id: app.participantId,
+        participant_name: app.participantName || null,
+        client_event_id: clientEventId,
+      },
     });
     toast(
       "Training label saved",
-      `${label(labelValue)}${result.linked_to_audio ? " · linked to PCM" : " · no active PCM link"}`,
+      `${label(labelValue)}${result.linked_to_audio ? " · linked to PCM" : " · no active PCM link"}${result.structure_consensus ? " · consensus updates after this run" : ""}`,
       "success",
     );
   } catch (error) {
@@ -2430,6 +3284,11 @@ function toggleBlackout() {
 }
 
 function installHandlers() {
+  for (const id of ["feedback-listener-name", "remote-listener-name"]) {
+    $(id)?.addEventListener("change", (event) => {
+      updateParticipantName(event.target.value);
+    });
+  }
   $$("[data-nav]").forEach((button) => button.addEventListener("click", () => setPage(button.dataset.nav)));
   $("monitor-button")?.addEventListener("click", () => startEngine("monitor"));
   $("live-button")?.addEventListener("click", () => startEngine("live"));
@@ -2475,14 +3334,168 @@ function installHandlers() {
       setText("motion-tilt-size-value", percent(values.tilt_size));
       setText("motion-pan-center-value", percent(values.pan_center));
       setText("motion-tilt-center-value", percent(values.tilt_center));
-      setText("motion-body-size-value", percent(values.body_size));
-      setText("motion-arm-size-value", percent(values.arm_size));
+      queueMotionRoutine();
+    });
+  });
+  $("motion-editor-scope")?.addEventListener("change", (event) => {
+    app.motionEditorScope = event.target.value;
+    renderMotionEditor(app.status?.rehearsal?.motion_editor || {});
+  });
+  $$('[data-center-motion-control]').forEach((input) => {
+    input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {
+      const values = motionFormValues();
+      setText("center-cycle-value", `${values.cycle_beats.toFixed(0)} beats`);
+      setText("center-body-travel-value", percent(values.body_travel));
+      setText("center-body-speed-value", `${values.body_speed.toFixed(2)}×`);
+      setText("center-body-phase-value", percent(values.body_phase));
+      setText("center-arm-1-travel-value", percent(values.arm_1_travel));
+      setText("center-arm-1-speed-value", `${values.arm_1_speed.toFixed(2)}×`);
+      setText("center-arm-1-phase-value", percent(values.arm_1_phase));
+      setText("center-arm-2-travel-value", percent(values.arm_2_travel));
+      setText("center-arm-2-speed-value", `${values.arm_2_speed.toFixed(2)}×`);
+      setText("center-arm-2-phase-value", percent(values.arm_2_phase));
+      setText("center-laser-level-value", percent(values.laser_level));
+      setText("center-strip-program-value", values.strip_program.toFixed(0));
+      setText("center-strip-speed-value", percent(values.strip_speed));
+      setText("center-strobe-level-value", values.strobe_level ? percent(values.strobe_level) : "Off");
+      setText("center-intensity-value", percent(values.intensity));
+      setText("center-blackout-accent-value", values.blackout_accent ? percent(values.blackout_accent) : "Off");
       queueMotionRoutine();
     });
   });
   $("motion-reset-defaults")?.addEventListener("click", () => patchMotionRoutine({}, "reset"));
-  $("rehearsal-context-button")?.addEventListener("click", () => teachRehearsal("musical_context"));
-  $("rehearsal-use-here")?.addEventListener("click", () => teachRehearsal("preferred_action"));
+  $$('[data-capture-live-cue]').forEach((button) => {
+    button.addEventListener("click", () => captureLiveCue(button.dataset.captureLiveCue));
+  });
+  $("sequence-add-step")?.addEventListener("click", () => {
+    syncSequenceDraftFromDom();
+    const previous = app.sequenceDraft.at(-1) || {};
+    app.sequenceDraft.push({
+      routine: previous.routine || "breathe",
+      duration_beats: 8,
+      intensity: Number(previous.intensity ?? 0.72),
+      brightness: Number(previous.brightness ?? previous.intensity ?? 0.72),
+      motion_speed: Number(previous.motion_speed ?? 0.5),
+      travel_size: Number(previous.travel_size ?? 1),
+      activity_density: Number(previous.activity_density ?? 1),
+      beat_sync: Number(previous.beat_sync ?? 1),
+      palette: previous.palette || "",
+      strobe: Number(previous.strobe || 0),
+    });
+    renderSequenceDraft();
+  });
+  $("sequence-save-here")?.addEventListener("click", () => saveSequenceHere(false));
+  installWakeProtectedAction(
+    $("remote-sequence-save"),
+    () => saveSequenceHere(true),
+  );
+  $("sequence-clear")?.addEventListener("click", clearSequenceDraft);
+  $("sequence-undo-history")?.addEventListener("click", () => {
+    const undo = app.choreographyUndo;
+    if (undo) changeChoreographyHistory(undo.kind, "undo", undo.id);
+  });
+  $("sequence-steps")?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-step-remove]");
+    if (!remove || app.sequenceDraft.length <= 1) return;
+    syncSequenceDraftFromDom();
+    app.sequenceDraft.splice(Number(remove.dataset.stepRemove), 1);
+    renderSequenceDraft();
+  });
+  $("sequence-steps")?.addEventListener("input", (event) => {
+    const input = event.target.closest("[data-step-field]");
+    if (!input) return;
+    const row = input.closest("[data-sequence-step]");
+    const output = input.closest("label")?.querySelector("output");
+    if (output && ["intensity", "brightness", "motion_speed", "travel_size", "activity_density", "beat_sync", "strobe"].includes(input.dataset.stepField)) {
+      output.textContent = Number(input.value) ? `${input.value}%` : "Off";
+    }
+    if (input.dataset.stepField === "duration_beats") {
+      syncSequenceDraftFromDom();
+    } else if (row) {
+      syncSequenceDraftFromDom();
+    }
+  });
+  $("sequence-steps")?.addEventListener("change", (event) => {
+    if (event.target?.dataset?.stepField === "duration_beats") {
+      syncSequenceDraftFromDom();
+      renderSequenceDraft();
+    }
+  });
+  $("sequence-history-list")?.addEventListener("click", (event) => {
+    const load = event.target.closest("[data-sequence-load]");
+    const deleteSequence = event.target.closest("[data-sequence-delete]");
+    const deletePlacement = event.target.closest("[data-placement-delete]");
+    if (load) loadSequenceForEdit(load.dataset.sequenceLoad);
+    else if (deleteSequence) changeChoreographyHistory("sequence", "delete", deleteSequence.dataset.sequenceDelete);
+    else if (deletePlacement) changeChoreographyHistory("placement", "delete", deletePlacement.dataset.placementDelete);
+  });
+  $("structure-timeline-list")?.addEventListener("click", (event) => {
+    const review = event.target.closest("[data-timeline-review]");
+    const correct = event.target.closest("[data-timeline-correct]");
+    const save = event.target.closest("[data-timeline-save]");
+    if (review) {
+      reviewStructureTimeline(
+        review.dataset.timelineId,
+        review.dataset.timelineReview,
+      );
+    } else if (correct) {
+      app.editingStructureTimelineId = (
+        app.editingStructureTimelineId === correct.dataset.timelineCorrect
+          ? null
+          : correct.dataset.timelineCorrect
+      );
+      renderStructureTimelines(app.structureLibrary || app.teaching || {});
+    } else if (save) {
+      saveStructureCorrection(save.dataset.timelineSave);
+    }
+  });
+  $("structure-song-select")?.addEventListener("change", (event) => {
+    const recordingId = event.target.value;
+    if (!recordingId) return;
+    app.editingStructureTimelineId = null;
+    app.selectedStructureRecordingId = recordingId;
+    void refreshStructureLibrary(recordingId);
+  });
+  $("structure-song-search")?.addEventListener("input", () => {
+    renderStructureSongOptions();
+    renderStructureCatalogTable();
+  });
+  $("structure-song-filter")?.addEventListener("change", () => {
+    renderStructureSongOptions();
+    renderStructureCatalogTable();
+  });
+  $("structure-catalog-body")?.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-structure-recording]");
+    const recordingId = row?.dataset.structureRecording;
+    if (!recordingId) return;
+    app.editingStructureTimelineId = null;
+    app.selectedStructureRecordingId = recordingId;
+    void refreshStructureLibrary(recordingId);
+  });
+  $("structure-song-playing")?.addEventListener("click", () => {
+    const recordingId = app.teaching?.recording_id;
+    if (!recordingId) {
+      toast("No recognized playing song", "Start a Spotify track that Lumen has analyzed, or select one from the library.", "error");
+      return;
+    }
+    if (!(app.structureLibrary?.catalog || []).some((item) => item.recording_id === recordingId)) {
+      toast("Playing song has no timeline", "Analyze the complete recording before reviewing it.", "error");
+      return;
+    }
+    app.editingStructureTimelineId = null;
+    app.selectedStructureRecordingId = recordingId;
+    void refreshStructureLibrary(recordingId);
+  });
+  $("structure-overview")?.addEventListener("click", (event) => {
+    const segment = event.target.closest("[data-overview-segment]");
+    if (!segment) return;
+    const row = $("structure-timeline-list")?.querySelector(
+      `[data-structure-segment="${segment.dataset.overviewSegment}"]`,
+    );
+    row?.scrollIntoView({ behavior: "smooth", block: "center" });
+    row?.classList.add("selected");
+    window.setTimeout(() => row?.classList.remove("selected"), 1800);
+  });
 
   $$("[data-control]").forEach((input) => {
     input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => queueControl(input.dataset.control, input.tagName === "SELECT" ? input.value : Number(input.value) / 100));
@@ -2530,8 +3543,8 @@ function installHandlers() {
     if (note) sendFeedback("operator_note", 0, note, "desktop");
   });
   $("feedback-undo-button")?.addEventListener("click", undoLastFeedback);
-  $("remote-feedback-undo")?.addEventListener("click", undoLastFeedback);
-  $("remote-feedback-note-button")?.addEventListener("click", () => {
+  installWakeProtectedAction($("remote-feedback-undo"), undoLastFeedback);
+  installWakeProtectedAction($("remote-feedback-note-button"), () => {
     const note = $("remote-feedback-note").value.trim();
     if (note) sendFeedback("operator_note", 0, note, "remote");
   });
@@ -2545,10 +3558,10 @@ function installHandlers() {
   $("feedback-action-button")?.addEventListener("click", () => {
     sendTrainingAnnotation("preferred_action", $("feedback-action-label")?.value, "desktop");
   });
-  $("remote-context-button")?.addEventListener("click", () => {
+  installWakeProtectedAction($("remote-context-button"), () => {
     sendTrainingAnnotation("musical_context", $("remote-context-label")?.value, "remote");
   });
-  $("remote-action-button")?.addEventListener("click", () => {
+  installWakeProtectedAction($("remote-action-button"), () => {
     sendTrainingAnnotation("preferred_action", $("remote-action-label")?.value, "remote");
   });
   $("feedback-history")?.addEventListener("click", (event) => {
@@ -2808,6 +3821,15 @@ function updateClock() {
   const clock = now.toLocaleTimeString([], { hour12: false });
   setText("clock", clock);
   setText("footer-time", clock.slice(0, 5));
+  if (app.page === "audio") {
+    const age = app.lastStatusReceivedAt ? Date.now() - app.lastStatusReceivedAt : Infinity;
+    setText(
+      "analysis-rate",
+      age > 750
+        ? `DISPLAY STALE · ${Math.round(age)} ms`
+        : `PCM 10 Hz · UI ${Math.round(app.statusLatencyMs)} ms`,
+    );
+  }
 }
 
 initialize();

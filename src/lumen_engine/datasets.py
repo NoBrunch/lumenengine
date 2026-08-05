@@ -13,7 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 import unicodedata
 
 from .structure import (
@@ -28,6 +28,7 @@ from .structure import (
     StructureTrack,
     StructureValidationError,
     TrackIdentity,
+    transition_event_for,
     validate_dataset,
 )
 
@@ -123,18 +124,24 @@ def normalize_structure_label(raw_label: str) -> StructuralLabel:
     energy = EnergySection.UNKNOWN
     if re.search(r"\b(silence|silent|pause)\b", words):
         energy = EnergySection.SILENCE
+    elif re.search(r"\b(re ?intro|intro|introduction|opening|fade in)\b", words):
+        energy = EnergySection.INTRO
+    elif re.search(
+        r"\b(outro|ending|closing|coda|codetta|finale|fade out)\b", words
+    ):
+        energy = EnergySection.OUTRO
     elif re.search(r"\b(breakdown|break down|break)\b", words):
         energy = EnergySection.BREAKDOWN
     elif re.search(r"\b(buildup|build up|build|riser|rising)\b", words):
         energy = EnergySection.BUILD
     elif re.search(r"\b(drop|release|climax)\b", words):
-        energy = EnergySection.RELEASE
+        energy = EnergySection.DROP
     elif re.search(r"\b(groove)\b", words):
         energy = EnergySection.GROOVE
     elif re.search(r"\b(quiet|calm|soft|slow|low energy)\b", words):
-        energy = EnergySection.LOW
+        energy = EnergySection.BREAKDOWN
     elif re.search(r"\b(sustain|sustained|plateau)\b", words):
-        energy = EnergySection.SUSTAINED
+        energy = EnergySection.GROOVE
 
     content = ContentRole.UNKNOWN
     if re.search(r"\b(silence|silent|pause)\b", words):
@@ -186,6 +193,29 @@ def normalize_structure_label(raw_label: str) -> StructuralLabel:
     )
 
 
+def normalize_techno_structure_label(raw_label: str) -> StructuralLabel:
+    """Map one EDM/techno label onto the canonical sustained-state axis.
+
+    EDMFormer and EDM-98 describe energy form, not pop functional form or
+    vocal content. Keep those unrelated axes unknown even when a raw token
+    such as ``intro`` happens to overlap their vocabulary.
+    """
+
+    normalized = normalize_structure_label(raw_label)
+    return StructuralLabel(
+        raw=normalized.raw,
+        functional=FunctionalSection.UNKNOWN,
+        energy=normalized.energy,
+        content=ContentRole.UNKNOWN,
+        normalized=(
+            normalized.energy.value
+            if normalized.energy is not EnergySection.UNKNOWN
+            else "unknown"
+        ),
+        qualifiers=normalized.qualifiers,
+    )
+
+
 def _is_terminal(label: str) -> bool:
     return _words(label) in _TERMINATORS
 
@@ -199,6 +229,7 @@ def _timeline_from_boundaries(
     beats: tuple[BeatEvent, ...] = (),
     metadata: dict[str, object] | None = None,
     inherit_unknown_axes: bool = False,
+    label_normalizer: Callable[[str], StructuralLabel] = normalize_structure_label,
 ) -> StructureTrack:
     ordered = sorted(
         ((float(time_s), str(label).strip()) for time_s, label in entries),
@@ -263,7 +294,7 @@ def _timeline_from_boundaries(
     labels: list[StructuralLabel] = []
     previous: StructuralLabel | None = None
     for _, raw_label in materialized:
-        label = normalize_structure_label(raw_label)
+        label = label_normalizer(raw_label)
         if inherit_unknown_axes and previous is not None and not _is_terminal(raw_label):
             label = StructuralLabel(
                 raw=label.raw,
@@ -303,6 +334,15 @@ def _timeline_from_boundaries(
             label=label,
             provenance=provenance,
             terminal=index == len(materialized) - 1,
+            event=transition_event_for(
+                (
+                    None
+                    if index == 0
+                    else labels[index - 1].energy
+                ),
+                label.energy,
+                terminal=index == len(materialized) - 1,
+            ),
         )
         for index, ((time_s, _), label) in enumerate(zip(materialized, labels))
     )
@@ -391,7 +431,12 @@ def parse_edm98(dataset_path: str | Path) -> list[StructureTrack]:
                 details={"line_number": line_number},
             )
             tracks.append(
-                _timeline_from_boundaries(identity, entries, provenance)
+                _timeline_from_boundaries(
+                    identity,
+                    entries,
+                    provenance,
+                    label_normalizer=normalize_techno_structure_label,
+                )
             )
     validate_dataset(tracks)
     return tracks
@@ -666,6 +711,7 @@ def _ccmusic_track_from_rows(
                 else boundary.provenance
             ),
             terminal=boundary.terminal,
+            event=boundary.event,
         )
         for boundary in track.boundaries
     )

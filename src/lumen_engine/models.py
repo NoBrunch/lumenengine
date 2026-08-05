@@ -217,6 +217,11 @@ class MusicalObservation:
     rhythm_density: float = 0.0
     harmonic_change: float = 0.0
     arrangement_change: float = 0.0
+    # Canonical musical transition observed on this exact audio frame.  A
+    # sustained section (for example ``drop``) and its onset event are
+    # deliberately independent so choreography can react once without
+    # relabeling the whole section as a transition.
+    transition_event: str | None = None
 
     def __post_init__(self) -> None:
         bounded = (

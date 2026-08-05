@@ -23,7 +23,49 @@ def _runner_module():
 
 
 class EDMFormerCPURunnerTests(unittest.TestCase):
-    def test_window_is_strictly_bounded_to_target_pc_range(self):
+    def test_bounded_attention_is_installed_only_for_worker_model_lifetime(self):
+        runner = _runner_module()
+
+        class FakeAttention:
+            position_embeddings_type = "rotary"
+
+            def forward(self, *_args, **_kwargs):
+                return "eager"
+
+        def fake_model():
+            attention = FakeAttention()
+            model = SimpleNamespace(
+                conformer=SimpleNamespace(
+                    layers=[SimpleNamespace(self_attn=attention)]
+                )
+            )
+            return model, attention
+
+        class FakePipeline:
+            def _create_muq_model(self):
+                return fake_model()[0]
+
+            def _create_musicfm_model(self):
+                return fake_model()[0]
+
+        original_muq = FakePipeline._create_muq_model
+        original_musicfm = FakePipeline._create_musicfm_model
+        upstream = SimpleNamespace(InferencePipeline=FakePipeline)
+
+        with runner._bounded_foundation_model_attention(upstream):
+            model = FakePipeline()._create_muq_model()
+            attention = model.conformer.layers[0].self_attn
+            self.assertTrue(attention._lumen_sdpa_installed)
+            self.assertIs(attention.forward.__self__, attention)
+            self.assertIs(
+                attention.forward.__func__,
+                runner._sdpa_rotary_attention_forward,
+            )
+
+        self.assertIs(FakePipeline._create_muq_model, original_muq)
+        self.assertIs(FakePipeline._create_musicfm_model, original_musicfm)
+
+    def test_validation_accepts_published_context_and_rejects_long_song(self):
         runner = _runner_module()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -32,6 +74,11 @@ class EDMFormerCPURunnerTests(unittest.TestCase):
                 path = root / name
                 path.touch()
                 files.append(path)
+            with wave.open(str(files[0]), "wb") as target:
+                target.setnchannels(1)
+                target.setsampwidth(2)
+                target.setframerate(8_000)
+                target.writeframes(b"\0\0" * 8_000)
             base = SimpleNamespace(
                 audio=files[0],
                 checkpoint=files[1],
@@ -43,13 +90,16 @@ class EDMFormerCPURunnerTests(unittest.TestCase):
             base.musicfm_source = root / "musicfm"
             (base.musicfm_source / "model").mkdir(parents=True)
             (base.musicfm_source / "model" / "musicfm_25hz.py").touch()
-            for value in (30, 45, 60):
-                base.window_seconds = value
+            runner._validate_arguments(base)
+
+            with wave.open(str(files[0]), "wb") as target:
+                target.setnchannels(1)
+                target.setsampwidth(2)
+                target.setframerate(8)
+                target.setnframes(0)
+                target.writeframes(b"\0\0" * 3_361)
+            with self.assertRaisesRegex(ValueError, "published 420-second"):
                 runner._validate_arguments(base)
-            for value in (29, 61, 420):
-                base.window_seconds = value
-                with self.assertRaisesRegex(ValueError, "between 30 and 60"):
-                    runner._validate_arguments(base)
 
     def test_segment_timeline_is_contiguous_merged_and_song_length_exact(self):
         runner = _runner_module()
@@ -89,7 +139,7 @@ class EDMFormerCPURunnerTests(unittest.TestCase):
             self.assertEqual(json.loads(output.read_text()), segments)
             self.assertFalse(output.with_suffix(".json.partial").exists())
 
-    def test_command_defaults_to_sixty_seconds_and_four_threads(self):
+    def test_command_defaults_to_four_threads_without_context_override(self):
         runner = _runner_module()
         args = runner._arguments(
             [
@@ -110,10 +160,10 @@ class EDMFormerCPURunnerTests(unittest.TestCase):
                 "output.json",
             ]
         )
-        self.assertEqual(args.window_seconds, 60)
+        self.assertFalse(hasattr(args, "window_seconds"))
         self.assertEqual(args.threads, 4)
 
-    def test_predict_overrides_only_child_context_and_requires_low_memory(self):
+    def test_predict_preserves_full_context_and_requires_low_memory(self):
         runner = _runner_module()
 
         class FakeTorch:
@@ -167,12 +217,11 @@ class EDMFormerCPURunnerTests(unittest.TestCase):
                 musicfm_model=root / "music.pt",
                 musicfm_source=root / "musicfm",
                 hf_cache_dir=root / "cache",
-                window_seconds=45,
                 threads=3,
             )
             result = runner._predict(args, upstream=upstream)
 
-        self.assertEqual(captured["context_during_call"], 45)
+        self.assertEqual(captured["context_during_call"], 420)
         self.assertEqual(upstream.TIME_DUR, 420)
         self.assertEqual(FakeNumpy.current["invalid"], "warn")
         self.assertEqual(FakeNumpy.current["divide"], "warn")

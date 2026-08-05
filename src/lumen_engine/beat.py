@@ -12,6 +12,9 @@ import numpy as np
 from lumen_engine.models import clamp
 
 
+MIN_PUBLISHED_TEMPO_CONFIDENCE = 0.18
+
+
 @dataclass(frozen=True, slots=True)
 class BeatState:
     bpm: float
@@ -27,7 +30,7 @@ class BeatTracker:
     def __init__(
         self,
         min_bpm: float = 60.0,
-        max_bpm: float = 160.0,
+        max_bpm: float = 200.0,
         default_bpm: float = 120.0,
         history_seconds: float = 6.0,
         interval_history_seconds: float = 24.0,
@@ -72,12 +75,20 @@ class BeatTracker:
         self._last_energy = energy
         if beat:
             self._record_beat(now)
+        confidence = self._tempo_confidence()
+        published_bpm = (
+            self._bpm
+            if confidence >= MIN_PUBLISHED_TEMPO_CONFIDENCE
+            else 0.0
+        )
         return BeatState(
-            bpm=self._bpm,
+            bpm=published_bpm,
             beat=beat,
             beat_count=max(self._beat_count, 0),
-            bar_progress=self._bar_progress(now),
-            confidence=self._tempo_confidence(),
+            bar_progress=(
+                self._bar_progress(now) if published_bpm > 0.0 else 0.0
+            ),
+            confidence=(confidence if published_bpm > 0.0 else 0.0),
         )
 
     def _tempo_confidence(self) -> float:
@@ -196,7 +207,7 @@ class SpectralTempoTracker:
         self,
         updates_per_second: float,
         min_bpm: float = 72.0,
-        max_bpm: float = 165.0,
+        max_bpm: float = 200.0,
         history_seconds: float = 18.0,
         minimum_history_seconds: float = 5.0,
     ) -> None:
@@ -220,6 +231,29 @@ class SpectralTempoTracker:
         self._last_grid_index: int | None = None
         self._pending_bpm: float | None = None
         self._pending_count = 0
+        self._pending_confidence = 0.0
+        self._lock_score = 0.0
+        self._challenger_score = 0.0
+        self._challenger_confidence = 0.0
+        self._latest_candidate_bpm = 0.0
+        self._latest_candidate_score = 0.0
+        self._latest_candidate_confidence = 0.0
+        self._latest_octave_promoted = False
+        self._latest_family_ambiguity = 0.0
+
+    @property
+    def diagnostics(self) -> dict[str, float]:
+        return {
+            "locked_bpm": self._bpm,
+            "locked_confidence": self._confidence,
+            "candidate_bpm": self._latest_candidate_bpm,
+            "candidate_score": self._latest_candidate_score,
+            "candidate_confidence": self._latest_candidate_confidence,
+            "octave_promoted": self._latest_octave_promoted,
+            "family_ambiguity": self._latest_family_ambiguity,
+            "minimum_bpm": self.min_bpm,
+            "maximum_bpm": self.max_bpm,
+        }
 
     def update(self, activation: float, now: float) -> BeatState:
         value = clamp(float(activation), 0.0, 1.0)
@@ -234,7 +268,10 @@ class SpectralTempoTracker:
             self._last_estimate_at = now
             self._estimate_tempo()
 
-        if self._bpm <= 0.0:
+        if (
+            self._bpm <= 0.0
+            or self._confidence < MIN_PUBLISHED_TEMPO_CONFIDENCE
+        ):
             self._previous_activation = value
             return BeatState(
                 bpm=0.0,
@@ -319,48 +356,72 @@ class SpectralTempoTracker:
         novelty = np.maximum(0.0, normalized - floor)
         novelty -= float(np.mean(novelty))
 
-        minimum_lag = max(
-            2, round(self.updates_per_second * 60.0 / self.max_bpm)
+        # Search musical tempo directly at fractional lags. At Lumen's normal
+        # 23.4375-Hz packet rate, whole-frame lags can represent 140.625 and
+        # 156.25 BPM but not the common tempos between them. That quantization
+        # was enough to report a real 147-BPM pulse as either neighbor. Linear
+        # delay interpolation retains the dependency-free live path while
+        # giving the clock quarter-BPM resolution.
+        tempos = np.arange(
+            self.min_bpm,
+            self.max_bpm + 0.125,
+            0.25,
+            dtype=np.float64,
         )
-        maximum_lag = round(
-            self.updates_per_second * 60.0 / self.min_bpm
-        )
-        lags = list(range(minimum_lag, maximum_lag + 1))
-        correlations: list[float] = []
-        for lag in lags:
-            current = novelty[lag:]
-            delayed = novelty[:-lag]
-            denominator = float(
-                np.linalg.norm(current) * np.linalg.norm(delayed)
-            )
-            correlations.append(
-                0.0
-                if denominator <= 1e-9
-                else float(np.dot(current, delayed) / denominator)
-            )
+        lags = self.updates_per_second * 60.0 / tempos
+        correlations = [
+            _fractional_correlation(novelty, float(lag)) for lag in lags
+        ]
         best_offset = max(
             range(len(correlations)),
             key=correlations.__getitem__,
         )
-        best_lag = float(lags[best_offset])
+        self._latest_octave_promoted = False
+        self._latest_family_ambiguity = 0.0
+        coarse_bpm = float(tempos[best_offset])
+        # Autocorrelation often gives the bar-accent/half-time lag a slightly
+        # higher score even when clear transients also support every beat. If
+        # the best result is slow, inspect the neighborhood of its half lag.
+        # Promote that octave only when it retains most of the slow peak's
+        # correlation. A genuinely slow pulse has no such intervening evidence
+        # and therefore remains slow.
+        ambiguous_slow_octave = False
+        if coarse_bpm < 105.0 and coarse_bpm * 2.0 <= self.max_bpm:
+            octave_offset = min(
+                range(len(tempos)),
+                key=lambda index: abs(
+                    float(tempos[index]) - coarse_bpm * 2.0
+                ),
+            )
+            octave_score = correlations[octave_offset]
+            slow_score = correlations[best_offset]
+            octave_ratio = octave_score / max(slow_score, 1e-9)
+            self._latest_family_ambiguity = clamp(
+                octave_ratio, 0.0, 1.0
+            )
+            ambiguous_slow_octave = bool(
+                octave_score >= 0.12 and octave_ratio >= 0.62
+            )
+            # Alternating strong/weak beats normally make the half-time peak
+            # larger. The faster family is accepted when intervening pulses
+            # still retain substantial independent correlation. If support is
+            # only suggestive, confidence is suppressed below publication
+            # rather than confidently announcing the slow answer.
+            if (
+                octave_score >= 0.14
+                and octave_ratio >= 0.72
+                and octave_score >= slow_score - 0.20
+            ):
+                best_offset = octave_offset
+                self._latest_octave_promoted = True
         best_score = correlations[best_offset]
-        if 0 < best_offset < len(correlations) - 1:
-            left = correlations[best_offset - 1]
-            center = correlations[best_offset]
-            right = correlations[best_offset + 1]
-            denominator = left - 2.0 * center + right
-            if abs(denominator) > 1e-9:
-                best_lag += clamp(
-                    0.5 * (left - right) / denominator,
-                    -0.5,
-                    0.5,
-                )
-        candidate_bpm = 60.0 * self.updates_per_second / best_lag
+        candidate_bpm = float(tempos[best_offset])
 
         competitors = [
             score
             for index, score in enumerate(correlations)
-            if abs(index - best_offset) > 1
+            if abs(float(tempos[index]) - candidate_bpm)
+            > max(4.0, candidate_bpm * 0.04)
         ]
         second_score = max(competitors, default=0.0)
         prominence = best_score - second_score
@@ -373,47 +434,531 @@ class SpectralTempoTracker:
         # A strong half-time harmonic is normal in four-on-the-floor music;
         # it should modestly temper confidence rather than prevent lock.
         distinctness = 0.45 + 0.55 * clamp(prominence / 0.14, 0.0, 1.0)
-        confidence = clamp(evidence * quality * distinctness, 0.0, 1.0)
-        self._confidence = 0.45 * self._confidence + 0.55 * confidence
+        candidate_confidence = clamp(
+            evidence * quality * distinctness, 0.0, 1.0
+        )
+        if ambiguous_slow_octave and not self._latest_octave_promoted:
+            candidate_confidence = min(
+                candidate_confidence,
+                MIN_PUBLISHED_TEMPO_CONFIDENCE * 0.80,
+            )
+        self._latest_candidate_bpm = candidate_bpm
+        self._latest_candidate_score = best_score
+        self._latest_candidate_confidence = candidate_confidence
 
+        locked_score = 0.0
+        locked_confidence = 0.0
+        if self._bpm > 0.0:
+            current_offset = min(
+                range(len(tempos)),
+                key=lambda index: abs(float(tempos[index]) - self._bpm),
+            )
+            locked_score = correlations[current_offset]
+            locked_competitors = [
+                score
+                for index, score in enumerate(correlations)
+                if abs(float(tempos[index]) - self._bpm)
+                > max(4.0, self._bpm * 0.04)
+            ]
+            locked_prominence = locked_score - max(
+                locked_competitors, default=0.0
+            )
+            locked_confidence = self._peak_confidence(
+                score=locked_score,
+                prominence=locked_prominence,
+                evidence=evidence,
+            )
+        self._consider_tempo_candidate(
+            candidate_bpm=candidate_bpm,
+            candidate_score=best_score,
+            candidate_confidence=candidate_confidence,
+            locked_score=locked_score,
+            locked_confidence=locked_confidence,
+        )
+
+    @staticmethod
+    def _peak_confidence(
+        *, score: float, prominence: float, evidence: float
+    ) -> float:
+        quality = clamp((score - 0.04) / 0.34, 0.0, 1.0)
+        distinctness = 0.45 + 0.55 * clamp(
+            prominence / 0.14, 0.0, 1.0
+        )
+        return clamp(evidence * quality * distinctness, 0.0, 1.0)
+
+    def _consider_tempo_candidate(
+        self,
+        *,
+        candidate_bpm: float,
+        candidate_score: float,
+        candidate_confidence: float,
+        locked_score: float,
+        locked_confidence: float,
+    ) -> None:
+        """Arbitrate a correlation peak without contaminating the lock.
+
+        Candidate confidence describes the candidate only. Until a challenger
+        is committed, the public lock is smoothed exclusively from evidence at
+        the locked tempo. This prevents a strong 4:3 or double-time peak from
+        making the old BPM appear confidently supported while it is not.
+        """
+        candidate_bpm = clamp(candidate_bpm, self.min_bpm, self.max_bpm)
+        candidate_confidence = clamp(candidate_confidence, 0.0, 1.0)
         if self._bpm <= 0.0:
-            if confidence >= 0.12:
-                self._bpm = candidate_bpm
+            self._remember_challenger(
+                candidate_bpm,
+                candidate_score,
+                candidate_confidence,
+            )
+            if (
+                self._pending_count >= 3
+                and self._pending_confidence
+                >= MIN_PUBLISHED_TEMPO_CONFIDENCE
+            ):
+                self._commit_challenger()
             return
+
         difference = abs(candidate_bpm - self._bpm) / self._bpm
         if difference <= 0.08:
             self._bpm += (candidate_bpm - self._bpm) * 0.24
-            self._pending_bpm = None
-            self._pending_count = 0
+            self._lock_score = candidate_score
+            self._confidence = (
+                0.45 * self._confidence + 0.55 * candidate_confidence
+            )
+            self._clear_challenger()
             return
-        current_lag = self.updates_per_second * 60.0 / self._bpm
-        current_offset = min(
-            range(len(lags)),
-            key=lambda index: abs(lags[index] - current_lag),
+
+        self._lock_score = locked_score
+        self._confidence = (
+            0.82 * self._confidence + 0.18 * locked_confidence
         )
-        # Do not jump between octave/harmonic rivals unless the new peak is
-        # decisively better than the correlation at the locked tempo.
-        if best_score - correlations[current_offset] < 0.065:
-            self._pending_bpm = None
-            self._pending_count = 0
-            self._confidence *= 0.92
+        self._challenger_score = candidate_score
+        self._challenger_confidence = candidate_confidence
+
+        # Triplets and 3:4/4:3 subdivisions remain alternate readings of the
+        # established meter. An octave-promoted candidate is different: it
+        # means intervening transients explicitly support every fast beat, so
+        # allow sustained evidence to repair an earlier half-time lock.
+        if _same_metrical_family(candidate_bpm, self._bpm):
+            ratio = candidate_bpm / self._bpm
+            is_supported_double = bool(
+                self._latest_octave_promoted
+                and 1.90 <= ratio <= 2.10
+                and candidate_score >= locked_score - 0.20
+                and candidate_confidence >= 0.35
+            )
+            if not is_supported_double:
+                self._clear_challenger()
+                return
+            self._remember_challenger(
+                candidate_bpm,
+                candidate_score,
+                candidate_confidence,
+            )
+            # While the fast family is being confirmed, do not continue to
+            # advertise near-perfect certainty in the contradicted half-time
+            # lock. The clock remains continuous, but the public confidence
+            # now honestly represents the unresolved family.
+            self._confidence = min(
+                self._confidence,
+                max(
+                    MIN_PUBLISHED_TEMPO_CONFIDENCE,
+                    candidate_confidence * 0.72,
+                ),
+            )
+            if self._pending_count >= 12:
+                self._commit_challenger()
             return
+
+        if (
+            candidate_score - locked_score < 0.065
+            or candidate_confidence < 0.35
+        ):
+            self._clear_challenger()
+            return
+        self._remember_challenger(
+            candidate_bpm,
+            candidate_score,
+            candidate_confidence,
+        )
+        # A real non-harmonic tempo change remains possible, but it must be
+        # sustained for several independent 0.45-second estimates.
+        if self._pending_count >= 12 and self._pending_confidence >= 0.45:
+            self._commit_challenger()
+
+    def _remember_challenger(
+        self, bpm: float, score: float, confidence: float
+    ) -> None:
         if (
             self._pending_bpm is not None
-            and abs(candidate_bpm - self._pending_bpm)
+            and abs(bpm - self._pending_bpm)
             / max(self._pending_bpm, 1e-6)
             <= 0.05
         ):
-            self._pending_bpm += (candidate_bpm - self._pending_bpm) * 0.35
+            self._pending_bpm += (bpm - self._pending_bpm) * 0.35
+            self._pending_confidence += (
+                confidence - self._pending_confidence
+            ) * 0.35
             self._pending_count += 1
         else:
-            self._pending_bpm = candidate_bpm
+            self._pending_bpm = bpm
+            self._pending_confidence = confidence
             self._pending_count = 1
-        if self._pending_count >= 8 and confidence >= 0.45:
-            self._bpm = self._pending_bpm
-            self._confidence = min(self._confidence, confidence * 0.55)
-            self._pending_bpm = None
-            self._pending_count = 0
+        self._challenger_score = score
+        self._challenger_confidence = confidence
+
+    def _commit_challenger(self) -> None:
+        if self._pending_bpm is None:
+            return
+        previous_bpm = self._bpm
+        self._bpm = self._pending_bpm
+        self._confidence = self._pending_confidence
+        self._lock_score = self._challenger_score
+        self._clear_challenger()
+        if previous_bpm > 0.0:
+            # Do not reinterpret the old grid under a new period. Anchor the
+            # replacement to a measured onset and start its beat counter clean.
+            self._origin_time = (
+                self._recent_peak_time
+                if self._recent_peak_time is not None
+                else self._last_estimate_at
+            )
+            self._last_grid_index = None
+
+    def _clear_challenger(self) -> None:
+        self._pending_bpm = None
+        self._pending_count = 0
+        self._pending_confidence = 0.0
+        self._challenger_score = 0.0
+        self._challenger_confidence = 0.0
+
+
+class TempoSourceArbiter:
+    """Hold a stable tracker source while a second clock warms or disagrees."""
+
+    def __init__(self) -> None:
+        self.source = "none"
+        self._pending_source: str | None = None
+        self._pending_count = 0
+        self._published: BeatState | None = None
+        self._published_phase_beats = 0.0
+        self._published_beat_count = 0
+        self._last_now: float | None = None
+        self._dropout_packets = 0
+        self.clock_discontinuities = 0
+
+    @property
+    def diagnostics(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "pending_source": self._pending_source,
+            "pending_packets": self._pending_count,
+            "dropout_packets": self._dropout_packets,
+            "clock_discontinuities": self.clock_discontinuities,
+            "published_bpm": (
+                None if self._published is None else self._published.bpm
+            ),
+            "published_confidence": (
+                0.0 if self._published is None else self._published.confidence
+            ),
+            "published_bar_phase": (
+                None if self._published is None else self._published.bar_progress
+            ),
+        }
+
+    def select(
+        self,
+        *,
+        spectral: BeatState,
+        fallback: BeatState,
+        now: float | None = None,
+    ) -> BeatState:
+        candidates = {"spectral": spectral, "fallback": fallback}
+        valid = {
+            name: state
+            for name, state in candidates.items()
+            if state.bpm > 0.0
+            and state.confidence >= MIN_PUBLISHED_TEMPO_CONFIDENCE
+        }
+        if self.source == "none":
+            if not valid:
+                return self._hold_or_unlock(spectral, fallback, now)
+            self.source = max(
+                valid,
+                key=lambda name: (
+                    valid[name].confidence,
+                    name == "spectral",
+                ),
+            )
+            return self._publish(valid[self.source], now)
+
+        current = valid.get(self.source)
+        other_source = "fallback" if self.source == "spectral" else "spectral"
+        challenger = valid.get(other_source)
+        if current is not None and self._published is not None:
+            current_jump = (
+                abs(current.bpm - self._published.bpm)
+                / max(self._published.bpm, 1e-6)
+            )
+            if current_jump > 0.08:
+                # A tracker may internally retune even though the alternative
+                # clock still supports the established tempo. Do not let that
+                # internal state change bypass source arbitration.
+                if (
+                    challenger is not None
+                    and abs(challenger.bpm - self._published.bpm)
+                    / max(self._published.bpm, 1e-6)
+                    <= 0.08
+                ):
+                    self.source = other_source
+                    self._clear_pending_source()
+                    return self._publish(challenger, now)
+                tempo_token = f"{self.source}:tempo-change"
+                if self._pending_source == tempo_token:
+                    self._pending_count += 1
+                else:
+                    self._pending_source = tempo_token
+                    self._pending_count = 1
+                required_tempo_packets = (
+                    12 if self.source == "spectral" else 120
+                )
+                if self._pending_count < required_tempo_packets:
+                    return self._hold_or_unlock(
+                        spectral,
+                        fallback,
+                        now,
+                        maximum_hold_packets=required_tempo_packets,
+                    )
+                self._clear_pending_source()
+        if challenger is None:
+            self._clear_pending_source()
+            if current is not None:
+                return self._publish(current, now)
+            return self._hold_or_unlock(spectral, fallback, now)
+        if current is None:
+            published_bpm = (
+                self._published.bpm if self._published is not None else 0.0
+            )
+            close_to_published = bool(
+                published_bpm > 0.0
+                and abs(challenger.bpm - published_bpm) / published_bpm
+                <= 0.08
+            )
+            # A close replacement can take over immediately. A non-close
+            # fallback must persist for several seconds before replacing a
+            # spectral clock; otherwise one sparse breakdown can publish a
+            # brief 140 BPM interval inside a stable 176 BPM song.
+            required = (
+                2
+                if close_to_published
+                else 8 if other_source == "spectral" else 120
+            )
+        else:
+            close = abs(challenger.bpm - current.bpm) / current.bpm <= 0.08
+            ratio = challenger.bpm / current.bpm
+            supported_spectral_double = bool(
+                other_source == "spectral"
+                and 1.90 <= ratio <= 2.10
+                and challenger.confidence >= 0.35
+            )
+            supported_fallback_double = bool(
+                other_source == "fallback"
+                and 1.90 <= ratio <= 2.10
+                and challenger.confidence >= 0.78
+            )
+            if (
+                not close
+                and _same_metrical_family(challenger.bpm, current.bpm)
+                and not supported_spectral_double
+                and not supported_fallback_double
+            ):
+                self._clear_pending_source()
+                return self._publish(current, now)
+            preferred_spectral = other_source == "spectral" and close
+            confidence_margin = (
+                -0.55
+                if supported_spectral_double
+                else -0.25
+                if supported_fallback_double
+                else -0.20
+                if preferred_spectral
+                else 0.12
+            )
+            if challenger.confidence < current.confidence + confidence_margin:
+                self._clear_pending_source()
+                return self._publish(current, now)
+            required = (
+                4
+                if close
+                else 12
+                if supported_spectral_double
+                else 24
+                if supported_fallback_double
+                else 12 if other_source == "spectral" else 120
+            )
+        if self._pending_source == other_source:
+            self._pending_count += 1
+        else:
+            self._pending_source = other_source
+            self._pending_count = 1
+        if self._pending_count >= required:
+            self.source = other_source
+            self._clear_pending_source()
+            return self._publish(challenger, now)
+        if current is not None:
+            return self._publish(current, now)
+        return self._hold_or_unlock(
+            spectral,
+            fallback,
+            now,
+            maximum_hold_packets=max(8, required),
+        )
+
+    def reset(self) -> None:
+        self.source = "none"
+        self._clear_pending_source()
+        self._published = None
+        self._published_phase_beats = 0.0
+        self._published_beat_count = 0
+        self._last_now = None
+        self._dropout_packets = 0
+        self.clock_discontinuities += 1
+
+    def _clear_pending_source(self) -> None:
+        self._pending_source = None
+        self._pending_count = 0
+
+    def _hold_or_unlock(
+        self,
+        spectral: BeatState,
+        fallback: BeatState,
+        now: float | None,
+        *,
+        maximum_hold_packets: int = 8,
+    ) -> BeatState:
+        if (
+            self._published is not None
+            and self._dropout_packets < maximum_hold_packets
+        ):
+            dropout_packets = self._dropout_packets + 1
+            held = BeatState(
+                bpm=self._published.bpm,
+                beat=False,
+                beat_count=self._published.beat_count,
+                bar_progress=self._published.bar_progress,
+                confidence=self._published.confidence * 0.86,
+            )
+            published = self._publish(held, now)
+            self._dropout_packets = dropout_packets
+            return published
+        self.source = "none"
+        self._published = None
+        self._last_now = now
+        self.clock_discontinuities += 1
+        return _unlocked_beat_state(spectral, fallback)
+
+    def _publish(
+        self, candidate: BeatState, now: float | None
+    ) -> BeatState:
+        self._dropout_packets = 0
+        if self._published is None or now is None:
+            self._published = candidate
+            self._published_phase_beats = candidate.bar_progress * 4.0
+            self._published_beat_count = candidate.beat_count
+            self._last_now = now
+            return candidate
+        elapsed = (
+            0.0
+            if self._last_now is None
+            else max(0.0, min(0.25, now - self._last_now))
+        )
+        self._last_now = now
+        previous_phase = self._published_phase_beats
+        phase_step = elapsed * candidate.bpm / 60.0
+        predicted_phase = self._published_phase_beats + phase_step
+        # Tracker sources have independent bar origins, so correcting the full
+        # four-beat phase would introduce a bar jump at handoff. Correct only
+        # the within-beat phase, gently, toward measured onset timing. This
+        # keeps one continuous published bar clock while preventing it from
+        # drifting away from the audio-derived tracker.
+        measured_phase = (candidate.bar_progress * 4.0) % 1.0
+        predicted_beat_phase = predicted_phase % 1.0
+        phase_error = (
+            (measured_phase - predicted_beat_phase + 0.5) % 1.0 - 0.5
+        )
+        correction_gain = 0.04 + 0.08 * clamp(
+            candidate.confidence, 0.0, 1.0
+        )
+        # Limit correction to a fraction of this packet's forward movement.
+        # A low BPM or duplicate timestamp must never make the public clock run
+        # backward or jump forward without elapsed audio.
+        maximum_correction = min(0.04, phase_step * 0.35)
+        phase_correction = clamp(
+            phase_error * correction_gain,
+            -maximum_correction,
+            maximum_correction,
+        )
+        self._published_phase_beats = predicted_phase + phase_correction
+        crossed_beats = max(
+            0,
+            math.floor(self._published_phase_beats + 1e-9)
+            - math.floor(previous_phase + 1e-9),
+        )
+        self._published_beat_count += crossed_beats
+        published = BeatState(
+            bpm=candidate.bpm,
+            # Candidate pulses belong to the candidate's independent phase.
+            # Emit pulses only when the continuous published clock crosses a
+            # beat, after measured phase correction has been applied.
+            beat=bool(crossed_beats),
+            beat_count=self._published_beat_count,
+            bar_progress=(self._published_phase_beats % 4.0) / 4.0,
+            confidence=candidate.confidence,
+        )
+        self._published = published
+        return published
+
+
+def _same_metrical_family(first_bpm: float, second_bpm: float) -> bool:
+    if first_bpm <= 0.0 or second_bpm <= 0.0:
+        return False
+    ratio = first_bpm / second_bpm
+    relatives = (0.5, 2.0 / 3.0, 0.75, 4.0 / 3.0, 1.5, 2.0)
+    return any(
+        abs(ratio - relative) / relative <= 0.04
+        for relative in relatives
+    )
+
+
+def _fractional_correlation(values: np.ndarray, lag: float) -> float:
+    """Normalized correlation at a non-integral delay in analysis frames."""
+
+    start = max(1, int(math.ceil(lag)))
+    if len(values) - start < 16:
+        return 0.0
+    positions = np.arange(start, len(values), dtype=np.float64)
+    current = values[start:]
+    delayed = np.interp(
+        positions - lag,
+        np.arange(len(values), dtype=np.float64),
+        values,
+    )
+    denominator = float(np.linalg.norm(current) * np.linalg.norm(delayed))
+    if denominator <= 1e-9:
+        return 0.0
+    return float(np.dot(current, delayed) / denominator)
+
+
+def _unlocked_beat_state(
+    spectral: BeatState, fallback: BeatState
+) -> BeatState:
+    return BeatState(
+        bpm=0.0,
+        beat=spectral.beat or fallback.beat,
+        beat_count=0,
+        bar_progress=0.0,
+        confidence=0.0,
+    )
 
 
 def _percentile(sorted_values: list[float], percentile: float) -> float:

@@ -41,6 +41,7 @@ FEATURE_NAMES = (
 )
 
 CONTEXT_SECONDS = (0.5, 2.0, 8.0, 30.0, 60.0)
+ELAPSED_CONTEXT_SECONDS = (30.0, 60.0, 120.0, 240.0, 480.0)
 
 LABELS = {
     "functional": tuple(value.value for value in FunctionalSection),
@@ -50,7 +51,12 @@ LABELS = {
 
 _LEGACY_LABEL_ALIASES = {
     "functional": {"instrumental_section": "instrumental"},
-    "energy": {"restrained": "low"},
+    "energy": {
+        "restrained": "breakdown",
+        "low": "breakdown",
+        "sustained": "groove",
+        "release": "drop",
+    },
     "content": {"vocal_focus": "vocal"},
 }
 
@@ -146,15 +152,19 @@ class StableStructureDecoder:
 class StreamingStructureStudent:
     """A compact MLP over causal multi-timescale musical state."""
 
-    format_version = 2
+    format_version = 5
 
     def __init__(self, hidden_size: int = 32, *, seed: int = 20260730) -> None:
         if hidden_size < 4:
             raise ValueError("hidden_size must be at least 4")
         self.hidden_size = int(hidden_size)
+        self._training_seed = int(seed)
         self.feature_size = len(FEATURE_NAMES)
         # Current frame, five causal exponential memories, and frame delta.
-        self.context_size = self.feature_size * (2 + len(CONTEXT_SECONDS))
+        self.context_size = (
+            self.feature_size * (2 + len(CONTEXT_SECONDS))
+            + len(ELAPSED_CONTEXT_SECONDS)
+        )
         generator = np.random.default_rng(seed)
         scale = np.sqrt(2.0 / (self.context_size + self.hidden_size))
         self.input_weights = generator.normal(
@@ -173,12 +183,25 @@ class StreamingStructureStudent:
             axis: np.zeros(len(labels), dtype=np.float64)
             for axis, labels in LABELS.items()
         }
+        # A direct normalized-context path prevents the shared nonlinear
+        # representation from erasing a useful axis while the other heads
+        # learn. The hidden path still models cross-feature interactions.
+        self.residual_weights = {
+            axis: np.zeros((self.context_size, len(labels)), dtype=np.float64)
+            for axis, labels in LABELS.items()
+        }
         self.boundary_weights = generator.normal(
             0.0,
             np.sqrt(2.0 / (self.hidden_size + 1)),
             self.hidden_size,
         ).astype(np.float64)
         self.boundary_bias = 0.0
+        self.boundary_residual_weights = np.zeros(
+            self.context_size, dtype=np.float64
+        )
+        self.context_mean = np.zeros(self.context_size, dtype=np.float64)
+        self.context_scale = np.ones(self.context_size, dtype=np.float64)
+        self.approved_axes = set((*LABELS.keys(), "boundary"))
         self.training_examples = 0
         self.reset()
 
@@ -190,6 +213,7 @@ class StreamingStructureStudent:
         self._previous = np.zeros(self.feature_size, dtype=np.float64)
         self._started = False
         self._last_timestamp_s: float | None = None
+        self._stream_elapsed_s = 0.0
 
     def predict(
         self,
@@ -197,13 +221,19 @@ class StreamingStructureStudent:
         *,
         timestamp_s: float | None = None,
     ) -> StudentPrediction:
-        context = self._causal_context(features, timestamp_s=timestamp_s)
+        context = self._normalize_context(
+            self._causal_context(features, timestamp_s=timestamp_s)
+        )
         hidden = np.tanh(context @ self.input_weights + self.input_bias)
         probabilities: dict[str, dict[str, float]] = {}
         selected: dict[str, str] = {}
         confidence: dict[str, float] = {}
         for axis, labels in LABELS.items():
-            values = _softmax(hidden @ self.head_weights[axis] + self.head_bias[axis])
+            values = _softmax(
+                hidden @ self.head_weights[axis]
+                + context @ self.residual_weights[axis]
+                + self.head_bias[axis]
+            )
             index = int(np.argmax(values))
             selected[axis] = labels[index]
             confidence[axis] = float(values[index])
@@ -212,7 +242,11 @@ class StreamingStructureStudent:
                 for label_index, label in enumerate(labels)
             }
         boundary_probability = _sigmoid(
-            float(hidden @ self.boundary_weights + self.boundary_bias)
+            float(
+                hidden @ self.boundary_weights
+                + context @ self.boundary_residual_weights
+                + self.boundary_bias
+            )
         )
         return StudentPrediction(
             functional=selected["functional"],
@@ -228,154 +262,359 @@ class StreamingStructureStudent:
         examples: Iterable[dict[str, Any]],
         *,
         epochs: int = 20,
-        learning_rate: float = 0.025,
+        learning_rate: float = 0.001,
         l2: float = 1e-5,
+        batch_size: int = 256,
+        validation_examples: Iterable[dict[str, Any]] = (),
+        early_stopping_patience: int = 8,
         cancel_check: Callable[[], bool | None] | None = None,
     ) -> dict[str, Any]:
         rows = list(examples)
+        validation_rows = list(validation_examples)
         if not rows:
             raise ValueError("student training requires examples")
         if epochs < 1:
             raise ValueError("epochs must be positive")
-        losses: list[float] = []
-        labeled = 0
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         class_weights = _class_weights(rows)
         boundary_weights = _binary_class_weights(
             [float(row["boundary"]) for row in rows if "boundary" in row]
         )
+        sequences = _causal_sequences(rows)
+        raw_contexts = self._prepare_causal_contexts(sequences, cancel_check)
+        self.context_mean = np.mean(raw_contexts, axis=0)
+        context_std = np.std(raw_contexts, axis=0)
+        self.context_scale = np.where(context_std >= 1e-5, context_std, 1.0)
+        contexts = (raw_contexts - self.context_mean) / self.context_scale
+        targets = _student_targets(rows)
+        validation_sequences = _causal_sequences(validation_rows)
+        validation_contexts = (
+            (
+                self._prepare_causal_contexts(
+                    validation_sequences, cancel_check
+                )
+                - self.context_mean
+            )
+            / self.context_scale
+            if validation_rows
+            else np.empty((0, self.context_size), dtype=np.float64)
+        )
+        validation_targets = _student_targets(validation_rows)
+
+        parameters = self._training_parameters()
+        first_moment = {
+            name: np.zeros_like(value) for name, value in parameters.items()
+        }
+        second_moment = {
+            name: np.zeros_like(value) for name, value in parameters.items()
+        }
+        generator = np.random.default_rng(self._training_seed)
+        step = 0
+        losses: list[float] = []
+        validation_losses: list[float] = []
+        initial_loss = self._frozen_loss(
+            contexts, targets, class_weights, boundary_weights
+        )
+        best_loss = float("inf")
+        best_parameters: dict[str, np.ndarray] | None = None
+        epochs_without_improvement = 0
         for _ in range(epochs):
             _check_cancel(cancel_check)
-            self.reset()
-            previous_group: str | None = None
-            previous_offset_ms: int | None = None
-            total_loss = 0.0
-            total_labels = 0
-            for row_index, row in enumerate(rows):
-                if row_index % 64 == 0:
-                    _check_cancel(cancel_check)
-                group = _context_sequence_key(row)
-                offset_ms = _context_offset_ms(row)
-                if previous_group is not None and (
-                    group != previous_group
-                    or (
-                        offset_ms is not None
-                        and previous_offset_ms is not None
-                        and offset_ms <= previous_offset_ms
-                    )
-                ):
-                    self.reset()
-                previous_group = group
-                previous_offset_ms = offset_ms
-                context = self._causal_context(
-                    row["features"],
-                    timestamp_s=(
-                        offset_ms / 1000.0
-                        if offset_ms is not None
-                        else None
-                    ),
+            order = generator.permutation(len(rows))
+            for start in range(0, len(order), batch_size):
+                _check_cancel(cancel_check)
+                batch = order[start : start + batch_size]
+                gradients = self._batch_gradients(
+                    contexts[batch],
+                    {name: values[batch] for name, values in targets.items()},
+                    class_weights,
+                    boundary_weights,
+                    l2=l2,
                 )
-                preactivation = (
-                    context @ self.input_weights + self.input_bias
+                step += 1
+                for name, gradient in gradients.items():
+                    gradient_norm = float(np.linalg.norm(gradient))
+                    if gradient_norm > 5.0:
+                        gradient = gradient * (5.0 / gradient_norm)
+                    first_moment[name] = (
+                        0.9 * first_moment[name] + 0.1 * gradient
+                    )
+                    second_moment[name] = (
+                        0.999 * second_moment[name]
+                        + 0.001 * gradient * gradient
+                    )
+                    corrected_first = first_moment[name] / (1.0 - 0.9**step)
+                    corrected_second = second_moment[name] / (
+                        1.0 - 0.999**step
+                    )
+                    parameters[name] -= learning_rate * corrected_first / (
+                        np.sqrt(corrected_second) + 1e-8
+                    )
+                self.boundary_bias = float(parameters["boundary_bias"][0])
+            frozen_loss = self._frozen_loss(
+                contexts, targets, class_weights, boundary_weights
+            )
+            losses.append(frozen_loss)
+            selection_loss = frozen_loss
+            if validation_rows:
+                selection_loss = self._frozen_loss(
+                    validation_contexts,
+                    validation_targets,
+                    class_weights,
+                    boundary_weights,
                 )
-                hidden = np.tanh(preactivation)
-                hidden_gradient = np.zeros_like(hidden)
-                head_updates: list[
-                    tuple[str, np.ndarray, np.ndarray, np.ndarray]
-                ] = []
-                for axis, labels in LABELS.items():
-                    label = row.get(axis)
-                    if label is None:
-                        continue
-                    label = _canonical_label(axis, label)
-                    if label == "unknown":
-                        continue
-                    if label not in labels:
-                        raise ValueError(f"unknown {axis} label {label!r}")
-                    probabilities = _softmax(
-                        hidden @ self.head_weights[axis]
-                        + self.head_bias[axis]
-                    )
-                    target_index = labels.index(label)
-                    example_weight = class_weights[axis].get(label, 1.0)
-                    total_loss -= example_weight * float(
-                        np.log(max(probabilities[target_index], 1e-12))
-                    )
-                    total_labels += example_weight
-                    logits_gradient = probabilities.copy()
-                    logits_gradient[target_index] -= 1.0
-                    logits_gradient *= example_weight
-                    hidden_gradient += (
-                        self.head_weights[axis] @ logits_gradient
-                    )
-                    head_updates.append(
-                        (
-                            axis,
-                            np.outer(hidden, logits_gradient),
-                            logits_gradient,
-                            probabilities,
-                        )
-                    )
-                boundary_update: tuple[np.ndarray, float] | None = None
-                if "boundary" in row:
-                    boundary_target = 1.0 if float(row["boundary"]) >= 0.5 else 0.0
-                    boundary_probability = _sigmoid(
-                        float(hidden @ self.boundary_weights + self.boundary_bias)
-                    )
-                    boundary_weight = boundary_weights[int(boundary_target)]
-                    total_loss -= boundary_weight * (
-                        boundary_target
-                        * math.log(max(boundary_probability, 1e-12))
-                        + (1.0 - boundary_target)
-                        * math.log(max(1.0 - boundary_probability, 1e-12))
-                    )
-                    total_labels += boundary_weight
-                    boundary_gradient = boundary_weight * (
-                        boundary_probability - boundary_target
-                    )
-                    hidden_gradient += self.boundary_weights * boundary_gradient
-                    boundary_update = (
-                        hidden * boundary_gradient,
-                        boundary_gradient,
-                    )
-                if not head_updates and boundary_update is None:
-                    continue
-                preactivation_gradient = (
-                    hidden_gradient * (1.0 - hidden * hidden)
-                )
-                input_gradient = np.outer(
-                    context, preactivation_gradient
-                )
-                for axis, weight_gradient, bias_gradient, _ in head_updates:
-                    self.head_weights[axis] -= learning_rate * (
-                        weight_gradient + l2 * self.head_weights[axis]
-                    )
-                    self.head_bias[axis] -= learning_rate * bias_gradient
-                if boundary_update is not None:
-                    boundary_weight_gradient, boundary_bias_gradient = boundary_update
-                    self.boundary_weights -= learning_rate * (
-                        boundary_weight_gradient + l2 * self.boundary_weights
-                    )
-                    self.boundary_bias -= learning_rate * boundary_bias_gradient
-                self.input_weights -= learning_rate * (
-                    input_gradient + l2 * self.input_weights
-                )
-                self.input_bias -= learning_rate * preactivation_gradient
-            if total_labels == 0:
-                raise ValueError("student examples contain no recognized labels")
-            losses.append(total_loss / total_labels)
-            labeled = total_labels
-            _check_cancel(cancel_check)
+                validation_losses.append(selection_loss)
+            if selection_loss < best_loss - 1e-6:
+                best_loss = selection_loss
+                best_parameters = {
+                    name: value.copy() for name, value in parameters.items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+            if (
+                early_stopping_patience > 0
+                and epochs_without_improvement >= early_stopping_patience
+            ):
+                break
+        if best_parameters is not None:
+            for name, value in best_parameters.items():
+                parameters[name][...] = value
+            self.boundary_bias = float(parameters["boundary_bias"][0])
+        final_loss = self._frozen_loss(
+            contexts, targets, class_weights, boundary_weights
+        )
         self.training_examples += len(rows)
         return {
             "examples": len(rows),
-            "labels_per_epoch": labeled,
-            "epochs": epochs,
-            "initial_loss": losses[0],
-            "final_loss": losses[-1],
+            "epochs": len(losses),
+            "requested_epochs": epochs,
+            "initial_loss": initial_loss,
+            "final_loss": final_loss,
             "losses": losses,
+            "validation_losses": validation_losses,
+            "best_selection_loss": best_loss,
+            "batch_size": batch_size,
+            "optimizer": "adam",
+            "gradient_clip_norm": 5.0,
             "class_weights": class_weights,
             "boundary_class_weights": boundary_weights,
+            "causal_sequences": len(sequences),
+            "epoch_ordering": "precomputed_causal_context_minibatch_shuffle",
         }
+
+    def _prepare_causal_contexts(
+        self,
+        sequences: list[list[dict[str, Any]]],
+        cancel_check: Callable[[], bool | None] | None,
+    ) -> np.ndarray:
+        contexts: list[np.ndarray] = []
+        visited = 0
+        for sequence in sequences:
+            self.reset()
+            for row in sequence:
+                if visited % 64 == 0:
+                    _check_cancel(cancel_check)
+                visited += 1
+                offset_ms = _context_offset_ms(row)
+                contexts.append(
+                    self._causal_context(
+                        row["features"],
+                        timestamp_s=(
+                            offset_ms / 1000.0
+                            if offset_ms is not None
+                            else None
+                        ),
+                    )
+                )
+        if not contexts:
+            return np.empty((0, self.context_size), dtype=np.float64)
+        return np.vstack(contexts)
+
+    def _normalize_context(self, context: np.ndarray) -> np.ndarray:
+        return (context - self.context_mean) / self.context_scale
+
+    def _training_parameters(self) -> dict[str, np.ndarray]:
+        parameters = {
+            "input_weights": self.input_weights,
+            "input_bias": self.input_bias,
+            "boundary_weights": self.boundary_weights,
+            "boundary_residual_weights": self.boundary_residual_weights,
+            "boundary_bias": np.asarray([self.boundary_bias], dtype=np.float64),
+        }
+        for axis in LABELS:
+            parameters[f"{axis}_weights"] = self.head_weights[axis]
+            parameters[f"{axis}_residual_weights"] = self.residual_weights[
+                axis
+            ]
+            parameters[f"{axis}_bias"] = self.head_bias[axis]
+        return parameters
+
+    def _batch_gradients(
+        self,
+        contexts: np.ndarray,
+        targets: dict[str, np.ndarray],
+        class_weights: dict[str, dict[str, float]],
+        boundary_weights: dict[int, float],
+        *,
+        l2: float,
+    ) -> dict[str, np.ndarray]:
+        hidden = np.tanh(contexts @ self.input_weights + self.input_bias)
+        hidden_gradient = np.zeros_like(hidden)
+        gradients = {
+            name: np.zeros_like(value)
+            for name, value in self._training_parameters().items()
+        }
+        objectives = 0
+        for axis, labels in LABELS.items():
+            axis_targets = targets[axis]
+            mask = axis_targets >= 0
+            if not np.any(mask):
+                continue
+            selected_hidden = hidden[mask]
+            selected_targets = axis_targets[mask]
+            probabilities = _softmax_rows(
+                selected_hidden @ self.head_weights[axis]
+                + contexts[mask] @ self.residual_weights[axis]
+                + self.head_bias[axis]
+            )
+            weights = np.asarray(
+                [class_weights[axis][labels[int(index)]] for index in selected_targets],
+                dtype=np.float64,
+            )
+            normalizer = max(float(np.sum(weights)), 1e-12)
+            logits_gradient = probabilities
+            logits_gradient[
+                np.arange(len(selected_targets)), selected_targets
+            ] -= 1.0
+            logits_gradient *= weights[:, None] / normalizer
+            gradients[f"{axis}_weights"] = (
+                selected_hidden.T @ logits_gradient
+                + l2 * self.head_weights[axis]
+            )
+            gradients[f"{axis}_residual_weights"] = (
+                contexts[mask].T @ logits_gradient
+                + l2 * self.residual_weights[axis]
+            )
+            gradients[f"{axis}_bias"] = np.sum(logits_gradient, axis=0)
+            hidden_gradient[mask] += (
+                logits_gradient @ self.head_weights[axis].T
+            )
+            objectives += 1
+        boundary_targets = targets["boundary"]
+        boundary_mask = boundary_targets >= 0
+        if np.any(boundary_mask):
+            selected_hidden = hidden[boundary_mask]
+            selected_targets = boundary_targets[boundary_mask].astype(
+                np.float64
+            )
+            logits = (
+                selected_hidden @ self.boundary_weights
+                + contexts[boundary_mask]
+                @ self.boundary_residual_weights
+                + self.boundary_bias
+            )
+            probabilities = 1.0 / (1.0 + np.exp(-np.clip(logits, -40.0, 40.0)))
+            weights = np.asarray(
+                [boundary_weights[int(value)] for value in selected_targets],
+                dtype=np.float64,
+            )
+            normalizer = max(float(np.sum(weights)), 1e-12)
+            logits_gradient = (
+                probabilities - selected_targets
+            ) * weights / normalizer
+            gradients["boundary_weights"] = (
+                selected_hidden.T @ logits_gradient
+                + l2 * self.boundary_weights
+            )
+            gradients["boundary_residual_weights"] = (
+                contexts[boundary_mask].T @ logits_gradient
+                + l2 * self.boundary_residual_weights
+            )
+            gradients["boundary_bias"][0] = float(
+                np.sum(logits_gradient)
+            )
+            hidden_gradient[boundary_mask] += (
+                logits_gradient[:, None] * self.boundary_weights[None, :]
+            )
+            objectives += 1
+        if objectives == 0:
+            raise ValueError("student examples contain no recognized labels")
+        hidden_gradient /= objectives
+        preactivation_gradient = hidden_gradient * (1.0 - hidden * hidden)
+        gradients["input_weights"] = (
+            contexts.T @ preactivation_gradient
+            + l2 * self.input_weights
+        )
+        gradients["input_bias"] = np.sum(
+            preactivation_gradient, axis=0
+        )
+        return gradients
+
+    def _frozen_loss(
+        self,
+        contexts: np.ndarray,
+        targets: dict[str, np.ndarray],
+        class_weights: dict[str, dict[str, float]],
+        boundary_weights: dict[int, float],
+    ) -> float:
+        if len(contexts) == 0:
+            return 0.0
+        hidden = np.tanh(contexts @ self.input_weights + self.input_bias)
+        losses: list[float] = []
+        for axis, labels in LABELS.items():
+            axis_targets = targets[axis]
+            mask = axis_targets >= 0
+            if not np.any(mask):
+                continue
+            selected_targets = axis_targets[mask]
+            probabilities = _softmax_rows(
+                hidden[mask] @ self.head_weights[axis]
+                + contexts[mask] @ self.residual_weights[axis]
+                + self.head_bias[axis]
+            )
+            weights = np.asarray(
+                [class_weights[axis][labels[int(index)]] for index in selected_targets],
+                dtype=np.float64,
+            )
+            selected = probabilities[
+                np.arange(len(selected_targets)), selected_targets
+            ]
+            losses.append(
+                float(
+                    np.sum(-weights * np.log(np.maximum(selected, 1e-12)))
+                    / max(float(np.sum(weights)), 1e-12)
+                )
+            )
+        boundary_targets = targets["boundary"]
+        mask = boundary_targets >= 0
+        if np.any(mask):
+            selected_targets = boundary_targets[mask].astype(np.float64)
+            logits = (
+                hidden[mask] @ self.boundary_weights
+                + contexts[mask] @ self.boundary_residual_weights
+                + self.boundary_bias
+            )
+            probabilities = 1.0 / (1.0 + np.exp(-np.clip(logits, -40.0, 40.0)))
+            weights = np.asarray(
+                [boundary_weights[int(value)] for value in selected_targets],
+                dtype=np.float64,
+            )
+            cross_entropy = -(
+                selected_targets * np.log(np.maximum(probabilities, 1e-12))
+                + (1.0 - selected_targets)
+                * np.log(np.maximum(1.0 - probabilities, 1e-12))
+            )
+            losses.append(
+                float(
+                    np.sum(weights * cross_entropy)
+                    / max(float(np.sum(weights)), 1e-12)
+                )
+            )
+        if not losses:
+            raise ValueError("student examples contain no recognized labels")
+        return float(np.mean(losses))
 
     def evaluate(self, examples: Iterable[dict[str, Any]]) -> dict[str, Any]:
         counts = {axis: 0 for axis in LABELS}
@@ -468,16 +707,22 @@ class StreamingStructureStudent:
             "labels": LABELS,
             "training_examples": self.training_examples,
             "context_seconds": CONTEXT_SECONDS,
+            "elapsed_context_seconds": ELAPSED_CONTEXT_SECONDS,
+            "approved_axes": sorted(self.approved_axes),
         }
         arrays: dict[str, Any] = {
             "metadata": np.asarray(json.dumps(metadata, sort_keys=True)),
             "input_weights": self.input_weights,
             "input_bias": self.input_bias,
+            "context_mean": self.context_mean,
+            "context_scale": self.context_scale,
             "boundary_weights": self.boundary_weights,
+            "boundary_residual_weights": self.boundary_residual_weights,
             "boundary_bias": np.asarray(self.boundary_bias),
         }
         for axis in LABELS:
             arrays[f"{axis}_weights"] = self.head_weights[axis]
+            arrays[f"{axis}_residual_weights"] = self.residual_weights[axis]
             arrays[f"{axis}_bias"] = self.head_bias[axis]
         with temporary.open("wb") as output:
             np.savez_compressed(output, **arrays)
@@ -503,6 +748,13 @@ class StreamingStructureStudent:
                     raise ValueError(
                         "student model causal-context contract does not match"
                     )
+                if (
+                    tuple(metadata.get("elapsed_context_seconds", ()))
+                    != ELAPSED_CONTEXT_SECONDS
+                ):
+                    raise ValueError(
+                        "student model elapsed-context contract does not match"
+                    )
                 model = cls(hidden_size=int(metadata["hidden_size"]))
                 arrays = {
                     "input_weights": archive["input_weights"].astype(
@@ -511,9 +763,18 @@ class StreamingStructureStudent:
                     "input_bias": archive["input_bias"].astype(
                         np.float64, copy=True
                     ),
+                    "context_mean": archive["context_mean"].astype(
+                        np.float64, copy=True
+                    ),
+                    "context_scale": archive["context_scale"].astype(
+                        np.float64, copy=True
+                    ),
                     "boundary_weights": archive["boundary_weights"].astype(
                         np.float64, copy=True
                     ),
+                    "boundary_residual_weights": archive[
+                        "boundary_residual_weights"
+                    ].astype(np.float64, copy=True),
                     "boundary_bias": np.asarray(
                         archive["boundary_bias"], dtype=np.float64
                     ),
@@ -521,7 +782,10 @@ class StreamingStructureStudent:
                 expected_shapes = {
                     "input_weights": (model.context_size, model.hidden_size),
                     "input_bias": (model.hidden_size,),
+                    "context_mean": (model.context_size,),
+                    "context_scale": (model.context_size,),
                     "boundary_weights": (model.hidden_size,),
+                    "boundary_residual_weights": (model.context_size,),
                     "boundary_bias": (),
                 }
                 for name, expected_shape in expected_shapes.items():
@@ -535,7 +799,16 @@ class StreamingStructureStudent:
                         )
                 model.input_weights = arrays["input_weights"]
                 model.input_bias = arrays["input_bias"]
+                model.context_mean = arrays["context_mean"]
+                model.context_scale = arrays["context_scale"]
+                if np.any(model.context_scale <= 0.0):
+                    raise ValueError(
+                        "student model context scale must be positive"
+                    )
                 model.boundary_weights = arrays["boundary_weights"]
+                model.boundary_residual_weights = arrays[
+                    "boundary_residual_weights"
+                ]
                 model.boundary_bias = float(arrays["boundary_bias"])
                 for axis, labels in LABELS.items():
                     if tuple(metadata["labels"].get(axis, ())) != labels:
@@ -545,6 +818,9 @@ class StreamingStructureStudent:
                     weights = archive[f"{axis}_weights"].astype(
                         np.float64, copy=True
                     )
+                    residual_weights = archive[
+                        f"{axis}_residual_weights"
+                    ].astype(np.float64, copy=True)
                     bias = archive[f"{axis}_bias"].astype(
                         np.float64, copy=True
                     )
@@ -552,21 +828,40 @@ class StreamingStructureStudent:
                         raise ValueError(
                             f"student model {axis} weights shape does not match"
                         )
+                    if residual_weights.shape != (
+                        model.context_size,
+                        len(labels),
+                    ):
+                        raise ValueError(
+                            f"student model {axis} residual shape does not match"
+                        )
                     if bias.shape != (len(labels),):
                         raise ValueError(
                             f"student model {axis} bias shape does not match"
                         )
-                    if not np.all(np.isfinite(weights)) or not np.all(
-                        np.isfinite(bias)
+                    if (
+                        not np.all(np.isfinite(weights))
+                        or not np.all(np.isfinite(residual_weights))
+                        or not np.all(np.isfinite(bias))
                     ):
                         raise ValueError(
                             f"student model {axis} head contains non-finite values"
                         )
                     model.head_weights[axis] = weights
+                    model.residual_weights[axis] = residual_weights
                     model.head_bias[axis] = bias
                 model.training_examples = int(
                     metadata.get("training_examples", 0)
                 )
+                approved_axes = {
+                    str(axis) for axis in metadata.get("approved_axes", ())
+                }
+                known_axes = {*LABELS.keys(), "boundary"}
+                if not approved_axes.issubset(known_axes):
+                    raise ValueError(
+                        "student model approved axes are not recognized"
+                    )
+                model.approved_axes = approved_axes
                 return model
         except (KeyError, TypeError, json.JSONDecodeError) as error:
             raise ValueError("invalid Lumen student model archive") from error
@@ -601,10 +896,13 @@ class StreamingStructureStudent:
                         "student timestamps must be strictly increasing"
                     )
             self._last_timestamp_s = resolved_timestamp
-        if not self._started:
+        was_started = self._started
+        if not was_started:
             self._memories = [current.copy() for _ in CONTEXT_SECONDS]
             self._previous = current.copy()
             self._started = True
+        else:
+            self._stream_elapsed_s += elapsed_s
         delta = current - self._previous
         for index, seconds in enumerate(CONTEXT_SECONDS):
             alpha = 1.0 - math.exp(-elapsed_s / seconds)
@@ -612,7 +910,16 @@ class StreamingStructureStudent:
                 current - self._memories[index]
             )
         self._previous = current.copy()
-        return np.concatenate((current, *self._memories, delta))
+        elapsed_context = np.asarray(
+            [
+                min(1.0, self._stream_elapsed_s / seconds)
+                for seconds in ELAPSED_CONTEXT_SECONDS
+            ],
+            dtype=np.float64,
+        )
+        return np.concatenate(
+            (current, *self._memories, delta, elapsed_context)
+        )
 
 
 def semantic_frame_features(payload: dict[str, Any]) -> np.ndarray:
@@ -642,8 +949,20 @@ def semantic_frame_features(payload: dict[str, Any]) -> np.ndarray:
             ),
             max(0.0, min(1.0, bpm / 240.0)),
             _unit(observation.get("beat_confidence")),
-            _unit(observation.get("tempo_confidence")),
-            _unit(observation.get("silence_confidence")),
+            _unit(
+                observation.get(
+                    "tempo_confidence",
+                    observation.get("beat_confidence"),
+                )
+            ),
+            _unit(
+                observation.get(
+                    "silence_confidence",
+                    1.0
+                    if _unit(observation.get("loudness")) <= 0.0
+                    else 0.0,
+                )
+            ),
             _unit(clipping),
             _unit(
                 observation.get(
@@ -692,6 +1011,35 @@ def _context_offset_ms(row: dict[str, Any]) -> int | None:
     return int(value) if value is not None else None
 
 
+def _causal_sequences(
+    rows: Iterable[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split ordered examples without ever reordering frames inside a stream."""
+    sequences: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    previous_group: str | None = None
+    previous_offset_ms: int | None = None
+    for row in rows:
+        group = _context_sequence_key(row)
+        offset_ms = _context_offset_ms(row)
+        if current and (
+            group != previous_group
+            or (
+                offset_ms is not None
+                and previous_offset_ms is not None
+                and offset_ms <= previous_offset_ms
+            )
+        ):
+            sequences.append(current)
+            current = []
+        current.append(row)
+        previous_group = group
+        previous_offset_ms = offset_ms
+    if current:
+        sequences.append(current)
+    return sequences
+
+
 def _check_cancel(
     cancel_check: Callable[[], bool | None] | None,
 ) -> None:
@@ -699,10 +1047,39 @@ def _check_cancel(
         raise InterruptedError("student training canceled")
 
 
+def _student_targets(rows: list[dict[str, Any]]) -> dict[str, np.ndarray]:
+    targets = {
+        axis: np.full(len(rows), -1, dtype=np.int64) for axis in LABELS
+    }
+    targets["boundary"] = np.full(len(rows), -1, dtype=np.int64)
+    for row_index, row in enumerate(rows):
+        for axis, labels in LABELS.items():
+            value = row.get(axis)
+            if value is None:
+                continue
+            label = _canonical_label(axis, value)
+            if label == "unknown":
+                continue
+            if label not in labels:
+                raise ValueError(f"unknown {axis} label {label!r}")
+            targets[axis][row_index] = labels.index(label)
+        if "boundary" in row:
+            targets["boundary"][row_index] = int(
+                float(row["boundary"]) >= 0.5
+            )
+    return targets
+
+
 def _softmax(values: np.ndarray) -> np.ndarray:
     shifted = values - float(np.max(values))
     exponentials = np.exp(shifted)
     return exponentials / np.sum(exponentials)
+
+
+def _softmax_rows(values: np.ndarray) -> np.ndarray:
+    shifted = values - np.max(values, axis=1, keepdims=True)
+    exponentials = np.exp(shifted)
+    return exponentials / np.sum(exponentials, axis=1, keepdims=True)
 
 
 def _sigmoid(value: float) -> float:

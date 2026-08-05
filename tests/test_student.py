@@ -13,10 +13,61 @@ from lumen_engine.student import (
     StudentPrediction,
     StreamingStructureStudent,
     semantic_frame_features,
+    _binary_class_weights,
+    _causal_sequences,
+    _class_weights,
+    _student_targets,
 )
 
 
 class StreamingStudentTests(unittest.TestCase):
+    def test_training_precomputes_each_causal_sequence_before_shuffling(self) -> None:
+        class TrackingStudent(StreamingStructureStudent):
+            def __init__(self) -> None:
+                self.visited_sequences: list[list[tuple[float, float]]] = []
+                super().__init__(hidden_size=8, seed=41)
+
+            def reset(self) -> None:
+                super().reset()
+                self.visited_sequences.append([])
+
+            def _causal_context(self, features, *, timestamp_s=None):
+                values = tuple(float(value) for value in features)
+                self.visited_sequences[-1].append(
+                    (values[0], float(timestamp_s or 0.0))
+                )
+                return super()._causal_context(
+                    values, timestamp_s=timestamp_s
+                )
+
+        examples = []
+        for group_index in range(3):
+            for frame_index in range(2):
+                features = np.zeros(len(FEATURE_NAMES))
+                features[0] = (group_index + 1) / 10.0
+                examples.append(
+                    {
+                        "split_group_id": f"song-{group_index}",
+                        "recording_offset_ms": frame_index * 100,
+                        "features": features,
+                        "energy": "build",
+                    }
+                )
+
+        model = TrackingStudent()
+        report = model.train(examples, epochs=8, learning_rate=0.005)
+        visited = [sequence for sequence in model.visited_sequences if sequence]
+
+        self.assertEqual(report["causal_sequences"], 3)
+        self.assertEqual(
+            report["epoch_ordering"],
+            "precomputed_causal_context_minibatch_shuffle",
+        )
+        self.assertEqual(len(visited), 3)
+        for sequence in visited:
+            self.assertEqual([timestamp for _, timestamp in sequence], [0.0, 0.1])
+            self.assertEqual(sequence[0][0], sequence[1][0])
+
     def test_causal_memories_follow_wall_clock_at_different_call_rates(self):
         def memories(rate_hz: float, duration_s: float) -> list[np.ndarray]:
             model = StreamingStructureStudent(hidden_size=8, seed=11)
@@ -93,6 +144,7 @@ class StreamingStudentTests(unittest.TestCase):
                     "functional": "intro",
                     "energy": "restrained",
                     "content": "instrumental",
+                    "split_group_id": "restrained-song",
                 }
             )
         for _ in range(30):
@@ -102,10 +154,11 @@ class StreamingStudentTests(unittest.TestCase):
                     "functional": "transition",
                     "energy": "build",
                     "content": "transition",
+                    "split_group_id": "build-song",
                 }
             )
         model = StreamingStructureStudent(hidden_size=20, seed=7)
-        report = model.train(examples, epochs=35, learning_rate=0.035)
+        report = model.train(examples, epochs=35, learning_rate=0.003)
         self.assertLess(report["final_loss"], report["initial_loss"])
         metrics = model.evaluate(examples)
         self.assertGreaterEqual(metrics["energy"]["accuracy"], 0.95)
@@ -158,6 +211,46 @@ class StreamingStudentTests(unittest.TestCase):
         self.assertEqual(metrics["functional"]["examples"], 0)
         self.assertEqual(metrics["content"]["examples"], 0)
         self.assertEqual(metrics["energy"]["examples"], 1)
+
+    def test_reported_final_loss_is_the_restored_frozen_model_loss(self) -> None:
+        examples = []
+        for group_index, energy in enumerate(("build", "release")):
+            for frame_index in range(24):
+                features = np.zeros(len(FEATURE_NAMES))
+                features[0] = 0.2 + 0.6 * group_index
+                examples.append(
+                    {
+                        "split_group_id": f"song-{group_index}",
+                        "recording_offset_ms": frame_index * 100,
+                        "features": features,
+                        "energy": energy,
+                        "boundary": int(frame_index < 3),
+                    }
+                )
+        model = StreamingStructureStudent(hidden_size=8, seed=23)
+        report = model.train(examples, epochs=8, learning_rate=0.002)
+        raw_contexts = model._prepare_causal_contexts(
+            _causal_sequences(examples), None
+        )
+        contexts = model._normalize_context(raw_contexts)
+        frozen_loss = model._frozen_loss(
+            contexts,
+            _student_targets(examples),
+            _class_weights(examples),
+            _binary_class_weights(
+                [float(row["boundary"]) for row in examples]
+            ),
+        )
+        self.assertAlmostEqual(report["final_loss"], frozen_loss, places=12)
+
+    def test_approved_axes_survive_model_round_trip(self) -> None:
+        model = StreamingStructureStudent(hidden_size=8, seed=24)
+        model.approved_axes = {"energy", "boundary"}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "student.npz"
+            model.save(path)
+            restored = StreamingStructureStudent.load(path)
+        self.assertEqual(restored.approved_axes, {"energy", "boundary"})
 
     def test_training_cancel_check_runs_periodically_through_rows(self) -> None:
         row = {

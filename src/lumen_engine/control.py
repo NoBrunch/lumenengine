@@ -15,6 +15,7 @@ from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
+import hashlib
 import json
 import math
 import os
@@ -25,7 +26,7 @@ import socket
 import subprocess
 import threading
 import time
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 
@@ -33,10 +34,17 @@ from lumen_engine.audio import (
     AudioCaptureConfig,
     AudioInputMetrics,
     AlsaLineIn,
+    ContinuouslyDrainedAudio,
     RealtimeAudioAnalyzer,
 )
 from lumen_engine.config import RigConfig, load_rig, rig_from_dict
-from lumen_engine.choreography import SequencePreferenceModel
+from lumen_engine.choreography import (
+    CHOREOGRAPHY_LANES,
+    ChoreographySequence,
+    ChoreographyStep,
+    SequencePreferenceModel,
+    choreography_lanes_for_scope,
+)
 from lumen_engine.dmx import DMXFrame, DMXOutput, VirtualDMXOutput
 from lumen_engine.expression import ExpressionEngine, ExpressionPolicy
 from lumen_engine.media import (
@@ -46,7 +54,11 @@ from lumen_engine.media import (
     SpotifyWebAPI,
     media_identity_from_spotify,
 )
-from lumen_engine.memory import SongMemoryStore
+from lumen_engine.memory import (
+    EDMFORMER_PREPROCESSING_VERSION,
+    SongMemoryStore,
+    TEACHER_NORMALIZATION_VERSION,
+)
 from lumen_engine.models import (
     Feedback,
     MediaIdentity,
@@ -56,9 +68,13 @@ from lumen_engine.models import (
     clamp,
 )
 from lumen_engine.motion import (
+    DEFAULT_CENTER_MOTION_TUNINGS,
     DEFAULT_MOTION_TUNINGS,
+    CenterMotionTuning,
+    GroupMotionTunings,
     MotionTuning,
-    merged_motion_tunings,
+    canonical_motion_scope,
+    merged_group_motion_tunings,
     preview_paths,
     required_axis_speeds,
 )
@@ -80,6 +96,11 @@ from lumen_engine.research import ResearchManager
 from lumen_engine.fixture_output import PALETTE_FAMILIES
 from lumen_engine.runtime import PerformanceRuntime, RuntimeFrame
 from lumen_engine.spatial import SpatialTargetingEngine, UnreachableTargetError
+from lumen_engine.structure import (
+    CANONICAL_TECHNO_SECTIONS,
+    ContentRole,
+    TransitionEvent,
+)
 from lumen_engine.student import (
     StableStructureDecoder,
     StreamingStructureStudent,
@@ -88,6 +109,7 @@ from lumen_engine.student import (
 from lumen_engine.training import (
     TrainingCaptureConfig,
     TrainingDataRecorder,
+    export_research_session_index,
     export_training_dataset,
 )
 from lumen_engine.usb_dmx import OpenDmxUsbOutput, describe_open_dmx_environment
@@ -187,10 +209,7 @@ class RehearsalControls:
                 raise ValueError("unknown rehearsal routine")
             self.routine = routine
         if "scope" in values:
-            scope = str(values["scope"]).strip().lower()
-            if scope not in {"overall", "movers", "center"} and not scope.startswith("fixture:"):
-                raise ValueError("unknown rehearsal fixture scope")
-            self.scope = scope
+            self.scope = canonical_motion_scope(values["scope"])
         if "output" in values:
             output = str(values["output"]).strip().lower()
             if output not in {"virtual", "live"}:
@@ -213,6 +232,22 @@ class RehearsalControls:
             self.isolate = bool(values["isolate"])
         if "tour" in values:
             self.tour = bool(values["tour"])
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalyzedControlFrame:
+    """One immutable musical result handed to the fixed-rate show clock."""
+
+    observation: MusicalObservation
+    raw_observation: MusicalObservation
+    audio_metrics: AudioInputMetrics
+    audio_bytes: int
+    training_audio_frame: int | None
+    runtime_context: dict[str, Any]
+    analysis_started_perf_s: float
+    analysis_stages_ms: dict[str, float]
+    timeline_discontinuity: bool = False
+    audio_discontinuity: bool = False
 
 
 class GatedOutput:
@@ -356,22 +391,32 @@ class LumenApplication:
         self._spotify_login_thread: threading.Thread | None = None
         self._spotify_poll_thread: threading.Thread | None = None
         self._lock = threading.RLock()
+        # The browser dashboard can be expensive to serialize and several
+        # phones may poll it concurrently. Live audio publication therefore
+        # never waits for the general application/interface lock. This small
+        # lock protects only atomically replaced live diagnostics and frame
+        # references; interface rendering reads their latest published value.
+        self._live_state_lock = threading.Lock()
         # Persistence/model updates may be comparatively slow. Serialize them
         # independently so feedback from several clients cannot block the
         # audio/DMX publication lock or corrupt reversible model events.
         self._feedback_lock = threading.Lock()
         self._media_lock = threading.Lock()
+        self._configuration_lock = threading.Lock()
         # Export preparation reconstructs and validates captured audio. Keep it
         # single-flight even though the HTTP server handles requests in
         # parallel, so a double-click cannot build two manifests at once.
         self._training_export_lock = threading.Lock()
+        self._teaching_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._output: GatedOutput | None = None
         self._runtime: PerformanceRuntime | None = None
         self.controls = OperatorControls()
         self.rehearsal = RehearsalControls()
-        self.motion_tunings = self._load_motion_tunings()
+        group_motion_tunings = self._load_motion_tunings()
+        self.motion_tunings = group_motion_tunings.movers
+        self.center_motion_tunings = group_motion_tunings.center
         self.rig = load_rig(self.rig_path)
         self._rig_payload = self._read_rig_payload()
         self.memory = SongMemoryStore(self.memory_path)
@@ -388,6 +433,21 @@ class LumenApplication:
             state_root / "models" / "choreography-preferences.json"
         )
         self._choreography_model = self._load_choreography_model()
+        # Several phones may submit feedback in the same musical moment.
+        # Model state remains updated synchronously in memory, but the large
+        # reversible JSON snapshot is coalesced on a persistence worker so
+        # four acknowledgements do not perform four competing HDD writes.
+        self._model_save_condition = threading.Condition()
+        self._model_save_requested = 0
+        self._model_save_completed = 0
+        self._model_save_stop = False
+        self._model_save_error: str | None = None
+        self._model_save_thread = threading.Thread(
+            target=self._choreography_model_save_worker,
+            name="lumen-choreography-persistence",
+            daemon=True,
+        )
+        self._model_save_thread.start()
         self.research = ResearchManager(
             self.training_root / "research",
             store=self.memory,
@@ -399,9 +459,39 @@ class LumenApplication:
             / "lumen-structure-student.npz"
         )
         self._student_model: StreamingStructureStudent | None = None
+        self._student_model_signature: tuple[int, int] | None = None
         self._student_decoder = StableStructureDecoder()
         self._student_model_error: str | None = None
+        self._student_model_state = "awaiting_training"
+        self._student_model_gate_reasons: list[str] = []
         self._student_prediction: dict[str, Any] | None = None
+        self._effective_structure: dict[str, Any] = {
+            "source": "live_analyzer",
+            "section": "silence",
+            "confidence": 0.0,
+            "beat_timing_authority": "audio_sample_clock",
+        }
+        self._physical_quiet_since_s: float | None = None
+        self._physical_signal_since_s: float | None = None
+        self._physical_silence_active = False
+        self._last_raw_observation = _silence_observation()
+        self._cached_structure_prediction: dict[str, Any] | None = None
+        self._cached_structure_key: str | None = None
+        self._cached_structure_checked_at = 0.0
+        self._recalled_choreography_checked_at = 0.0
+        self._recalled_choreography_ids: tuple[str, ...] = ()
+        self._recalled_choreography_runtime: PerformanceRuntime | None = None
+        self._prepared_recalled_choreography: tuple[
+            ChoreographySequence, ...
+        ] = ()
+        self._prepared_recalled_ids: tuple[str, ...] = ()
+        self._memory_context_thread: threading.Thread | None = None
+        self._memory_context_last_poll = 0.0
+        self._memory_context_last_duration_ms: float | None = None
+        self._memory_context_error: str | None = None
+        self._runtime_choreography_snapshot: dict[str, Any] | None = None
+        self._teaching_snapshot_cache: dict[str, Any] | None = None
+        self._teaching_snapshot_checked_at = 0.0
         self._load_student_model()
         self.training_capture_enabled = bool(
             self._settings.get("training_capture_enabled", True)
@@ -416,9 +506,11 @@ class LumenApplication:
         self._training_linked_feedback = 0
         self._training_annotations = 0
         self._training_history = self.memory.training_summary()
+        self._training_disk_free_bytes = self._read_training_disk_free()
         self._last_training_export: str | None = None
         self._training_prepare_thread: threading.Thread | None = None
         self._training_prepare_pending = False
+        self._training_prepare_pending_session: str | None = None
         self._research_worker_thread: threading.Thread | None = None
         self._research_worker_last: dict[str, Any] | None = None
         self._research_worker_progress: dict[str, Any] = {
@@ -436,6 +528,7 @@ class LumenApplication:
             daemon=True,
         )
         self._trace_thread.start()
+        self._trace_queue_drops = 0
         self._session_id = "standby"
         self._last_trace_timestamp: float | None = None
         self.engine_mode = "standby"
@@ -467,7 +560,7 @@ class LumenApplication:
         self._spotify_last_command: dict[str, Any] | None = None
         self._spotify_console_cache: dict[str, Any] = {}
         self._spotify_rate_limited_until = 0.0
-        self._feedback_biases: dict[str, dict[str, float]] = {}
+        self._feedback_biases: dict[str, dict[str, Any]] = {}
         self._calibration_overrides: dict[str, dict[str, float]] = {}
         self._audio_metrics = AudioInputMetrics.silence()
         self._audio_packets = 0
@@ -476,25 +569,131 @@ class LumenApplication:
         self._audio_capture_started_at: float | None = None
         self._audio_last_packet_at: float | None = None
         self._audio_packet_times: deque[float] = deque(maxlen=96)
+        self._audio_queue_depth = 0
+        self._audio_queue_max_depth = 0
+        self._audio_queue_delay_ms = 0.0
+        self._audio_capture_diagnostics: dict[str, Any] = {}
+        self._active_audio_capture: ContinuouslyDrainedAudio | None = None
+        self._control_queue_depth = 0
+        self._control_queue_max_depth = 0
+        self._control_queue_drops = 0
+        self._control_ticks = 0
+        self._control_interpolated_ticks = 0
+        self._control_maximum_late_ms = 0.0
+        self._tempo_diagnostics: dict[str, Any] = {}
+        self._live_pipeline_timing: dict[str, Any] = {
+            "packets": 0,
+            "last_total_ms": 0.0,
+            "maximum_total_ms": 0.0,
+            "deadline_misses": 0,
+            "stages_ms": {},
+            "maximum_stages_ms": {},
+        }
         self._analysis_history: deque[dict[str, Any]] = deque(maxlen=240)
         self._last_analysis_history_at: float | None = None
         self._analysis_generation = 0
         self._add_event("system", f"Loaded {self.rig.name}")
         self._rebuild_feedback_biases()
+        self._feedback_refresh_condition = threading.Condition()
+        self._feedback_refresh_requested = 0
+        self._feedback_refresh_completed = 0
+        self._feedback_refresh_lanes: set[str] = set()
+        self._feedback_refresh_stop = False
+        self._feedback_refresh_error: str | None = None
+        self._feedback_refresh_thread = threading.Thread(
+            target=self._feedback_bias_refresh_worker,
+            name="lumen-feedback-refresh",
+            daemon=True,
+        )
+        self._feedback_refresh_thread.start()
         self.solve_target(self.selected_target)
 
     def _load_student_model(self) -> None:
         self._student_model = None
         self._student_model_error = None
-        self._student_decoder.reset()
+        self._student_model_state = "awaiting_training"
+        self._student_model_gate_reasons = []
+        self._reset_student_stream()
         if not self._student_model_path.is_file():
+            self._student_model_signature = None
             return
         try:
-            self._student_model = StreamingStructureStudent.load(
-                self._student_model_path
+            evaluation_path = self._student_model_path.with_name(
+                self._student_model_path.stem + ".evaluation.json"
             )
-        except (OSError, ValueError) as error:
+            evaluation = json.loads(
+                evaluation_path.read_text(encoding="utf-8")
+            )
+            if (
+                evaluation.get("teacher_normalization_version")
+                != TEACHER_NORMALIZATION_VERSION
+            ):
+                raise ValueError(
+                    "student model was trained from an obsolete teacher "
+                    "normalization; run Analyze and Train again"
+                )
+            if (
+                evaluation.get("edmformer_preprocessing_version")
+                != EDMFORMER_PREPROCESSING_VERSION
+            ):
+                raise ValueError(
+                    "student model was trained from short-context or "
+                    "otherwise obsolete EDMFormer inference; run Analyze "
+                    "and Train again"
+                )
+            if evaluation.get("activated") is not True:
+                axis_reasons = evaluation.get("axis_gate_reasons") or {}
+                self._student_model_gate_reasons = [
+                    str(reason)
+                    for reasons in axis_reasons.values()
+                    if isinstance(reasons, list)
+                    for reason in reasons
+                ]
+                self._student_model_state = "quarantined"
+            else:
+                self._student_model = StreamingStructureStudent.load(
+                    self._student_model_path
+                )
+                if not self._student_model.approved_axes:
+                    raise ValueError(
+                        "activated student model contains no approved axes"
+                    )
+                self._student_model_state = "active"
+        except (OSError, ValueError, json.JSONDecodeError) as error:
             self._student_model_error = str(error)
+            self._student_model_state = "error"
+        try:
+            stat = self._student_model_path.stat()
+            self._student_model_signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            self._student_model_signature = None
+
+    def _reset_student_stream(
+        self, *, reset_physical_silence: bool = True
+    ) -> None:
+        """Begin a clean causal structure stream at a listening boundary."""
+        if self._student_model is not None:
+            self._student_model.reset()
+        self._student_decoder.reset()
+        self._student_prediction = None
+        if reset_physical_silence:
+            self._physical_quiet_since_s = None
+            self._physical_signal_since_s = None
+            self._physical_silence_active = False
+        observation = getattr(self, "observation", _silence_observation())
+        self._effective_structure = {
+            "source": "live_analyzer",
+            "section": observation.section,
+            "confidence": observation.section_confidence,
+            "beat_timing_authority": "audio_sample_clock",
+        }
+
+    def _student_artifact_changed(self) -> bool:
+        try:
+            stat = self._student_model_path.stat()
+        except OSError:
+            return self._student_model_signature is not None
+        return (stat.st_mtime_ns, stat.st_size) != self._student_model_signature
 
     def _apply_student_structure(
         self,
@@ -504,6 +703,12 @@ class LumenApplication:
         model = self._student_model
         if model is None:
             self._student_prediction = None
+            self._effective_structure = {
+                "source": "live_analyzer",
+                "section": observation.section,
+                "confidence": observation.section_confidence,
+                "beat_timing_authority": "audio_sample_clock",
+            }
             return observation
         prediction = model.predict(
             semantic_frame_features(
@@ -511,8 +716,14 @@ class LumenApplication:
             ),
             timestamp_s=observation.timestamp_s,
         )
+        approved_axes = set(model.approved_axes)
+        decoder_prediction = prediction
+        if "boundary" not in approved_axes:
+            decoder_prediction = replace(
+                prediction, boundary_probability=0.0
+            )
         stable = self._student_decoder.update(
-            prediction, observation.timestamp_s
+            decoder_prediction, observation.timestamp_s
         )
         selected_section = observation.section
         selected_axis = "live_analyzer"
@@ -520,22 +731,45 @@ class LumenApplication:
         energy_confidence = float(stable["confidence"]["energy"])
         functional_confidence = float(stable["confidence"]["functional"])
         content_confidence = float(stable["confidence"]["content"])
+        physical_silence_supported = bool(
+            observation.loudness < 0.02
+            and metrics.dbfs <= -50.0
+            and metrics.rms <= 0.006
+            and metrics.peak <= 0.02
+        )
+        energy_label_valid = bool(
+            stable["energy"] not in {None, "unknown"}
+            and (
+                stable["energy"] != "silence"
+                or physical_silence_supported
+            )
+        )
         accepted_axes = {
             "energy": bool(
-                stable["energy"] not in {None, "unknown"}
+                "energy" in approved_axes
+                and energy_label_valid
                 and energy_confidence >= 0.52
             ),
             "functional": bool(
+                "functional" in approved_axes
+                and
                 stable["functional"] not in {None, "unknown"}
                 and functional_confidence >= 0.60
             ),
             "content": bool(
+                "content" in approved_axes
+                and
                 stable["content"] not in {None, "unknown"}
                 and content_confidence >= 0.55
             ),
+            "boundary": bool(
+                "boundary" in approved_axes
+                and prediction.boundary_probability >= 0.55
+            ),
         }
         if (
-            stable["energy"] not in {None, "unknown", "sustained"}
+            "energy" in approved_axes
+            and energy_label_valid
             and energy_confidence >= 0.52
         ):
             selected_section = str(stable["energy"])
@@ -554,15 +788,40 @@ class LumenApplication:
             },
             "stable": stable,
             "boundary_probability": prediction.boundary_probability,
+            "approved_axes": sorted(approved_axes),
             "accepted_axes": accepted_axes,
             "selected_axis": selected_axis,
             "selected_section": selected_section,
+            "silence_gate": {
+                "physical_silence_supported": physical_silence_supported,
+                "student_silence_rejected": bool(
+                    stable["energy"] == "silence"
+                    and not physical_silence_supported
+                ),
+                "dbfs": metrics.dbfs,
+                "rms": metrics.rms,
+                "peak": metrics.peak,
+            },
             "model_path": str(self._student_model_path),
             "training_examples": model.training_examples,
             "target_provenance": "lumen_streaming_structure_student",
         }
         if selected_axis == "live_analyzer":
+            self._effective_structure = {
+                "source": "live_analyzer",
+                "section": observation.section,
+                "confidence": observation.section_confidence,
+                "student_energy_rejected": not accepted_axes["energy"],
+                "beat_timing_authority": "audio_sample_clock",
+            }
             return observation
+        self._effective_structure = {
+            "source": "streaming_student",
+            "section": selected_section,
+            "confidence": selected_confidence,
+            "approved_axis": "energy",
+            "beat_timing_authority": "audio_sample_clock",
+        }
         return replace(
             observation,
             section=selected_section,
@@ -612,6 +871,10 @@ class LumenApplication:
             }
         )
         audio_payload = asdict(metrics)
+        # The 128-point waveform is a display aid already derived from the
+        # lossless WAV. Persisting it at ten hertz inflated every semantic and
+        # diagnostic row without adding a training feature.
+        audio_payload.pop("waveform", None)
         audio_payload["clipping"] = clamp(
             metrics.clipped_samples
             / max(1, metrics.frame_count * len(metrics.channel_peak)),
@@ -663,32 +926,646 @@ class LumenApplication:
             ),
         }
 
+    @staticmethod
+    def _structure_axis(
+        label: str,
+        confidence: float,
+        source: str,
+        reason: str,
+        *,
+        provenance: Any = None,
+        timeline_id: Any = None,
+        model_confidence: float | None = None,
+        operator_trust: float = 0.0,
+        recall_authority: str | None = None,
+        cue_key: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_confidence = clamp(float(confidence), 0.0, 1.0)
+        normalized_trust = clamp(float(operator_trust), 0.0, 1.0)
+        return {
+            "label": label,
+            "confidence": normalized_confidence,
+            "model_confidence": (
+                normalized_confidence
+                if model_confidence is None
+                else clamp(float(model_confidence), 0.0, 1.0)
+            ),
+            "operator_trust": normalized_trust,
+            "decision_confidence": max(
+                normalized_confidence, normalized_trust
+            ),
+            "recall_authority": recall_authority,
+            "source": source,
+            "accepted_reason": reason,
+            "provenance": deepcopy(provenance),
+            "timeline_id": timeline_id,
+            "cue_key": cue_key,
+        }
+
+    def _resolve_structure(
+        self,
+        raw_observation: MusicalObservation,
+        metrics: AudioInputMetrics,
+    ) -> MusicalObservation:
+        """Resolve each musical axis once, with physical audio authoritative.
+
+        Cached teachers, the streaming student, and the live analyzer used to
+        overwrite one another sequentially.  That made the final section and
+        runtime context depend on call order.  This resolver selects every
+        axis explicitly and publishes the same decision to Live, capture, and
+        the performance trace.
+        """
+
+        timestamp = raw_observation.timestamp_s
+        quiet_packet = bool(
+            raw_observation.loudness <= 0.001
+            and metrics.rms <= 0.006
+            and metrics.peak <= 0.025
+        )
+        if quiet_packet:
+            self._physical_signal_since_s = None
+            if self._physical_quiet_since_s is None:
+                self._physical_quiet_since_s = timestamp
+            quiet_for = max(0.0, timestamp - self._physical_quiet_since_s)
+            if quiet_for >= 0.55:
+                self._physical_silence_active = True
+        else:
+            if self._physical_signal_since_s is None:
+                self._physical_signal_since_s = timestamp
+            signal_for = max(0.0, timestamp - self._physical_signal_since_s)
+            if not self._physical_silence_active or signal_for >= 0.12:
+                self._physical_quiet_since_s = None
+                self._physical_silence_active = False
+            quiet_for = 0.0
+
+        cached = self._cached_structure_prediction or {}
+        cached_axes = cached.get("axes") or {}
+        student = self._student_prediction or {}
+        student_accepted = student.get("accepted_axes") or {}
+        student_confidence = student.get("confidence") or {}
+
+        def cached_axis(axis: str, threshold: float) -> dict[str, Any] | None:
+            value = cached_axes.get(axis) or {}
+            label = str(value.get("label") or "unknown")
+            confidence = float(value.get("confidence") or 0.0)
+            operator_trust = float(value.get("operator_trust") or 0.0)
+            if label == "unknown" or (
+                confidence < threshold and operator_trust <= 0.0
+            ):
+                return None
+            if (
+                axis == "energy"
+                and label == "silence"
+                and not self._physical_silence_active
+            ):
+                return None
+            provenance = value.get("provenance")
+            operator_consensus = bool(
+                value.get("recall_authority") == "operator_consensus"
+                or (
+                    isinstance(provenance, dict)
+                    and "operator" in str(
+                        provenance.get("source") or ""
+                    ).casefold()
+                )
+            )
+            return self._structure_axis(
+                label,
+                confidence,
+                (
+                    "operator_approved_timeline"
+                    if operator_trust > 0.0
+                    else "operator_consensus_timeline"
+                    if operator_consensus
+                    else "cached_offline_teacher"
+                ),
+                (
+                    "operator-approved exact-recording timeline"
+                    if operator_trust > 0.0
+                    else "participant-consensus song correction"
+                    if operator_consensus
+                    else "confident cached teacher axis"
+                ),
+                provenance=provenance,
+                timeline_id=value.get("timeline_id"),
+                model_confidence=float(
+                    value.get("model_confidence", confidence) or 0.0
+                ),
+                operator_trust=operator_trust,
+                recall_authority=value.get("recall_authority"),
+                cue_key=(
+                    f"timeline:{value.get('timeline_id')}:"
+                    f"{int(value.get('start_ms') or 0)}"
+                    if value.get("timeline_id") else None
+                ),
+            )
+
+        def student_axis(axis: str) -> dict[str, Any] | None:
+            if not student_accepted.get(axis):
+                return None
+            label = str(student.get(axis) or "unknown")
+            if label == "unknown":
+                return None
+            if (
+                axis == "energy"
+                and label == "silence"
+                and not self._physical_silence_active
+            ):
+                return None
+            return self._structure_axis(
+                label,
+                float(student_confidence.get(axis) or 0.0),
+                "streaming_student",
+                "approved confidence-gated student axis",
+                provenance=student.get("model_path"),
+            )
+
+        if self._physical_silence_active:
+            energy = self._structure_axis(
+                "silence",
+                1.0,
+                "live_audio_silence",
+                "physical line-input silence overrides learned structure",
+            )
+        else:
+            energy = (
+                cached_axis("energy", 0.62)
+                or student_axis("energy")
+                or self._structure_axis(
+                    raw_observation.section,
+                    raw_observation.section_confidence,
+                    "live_analyzer",
+                    "first-play live audio fallback",
+                )
+            )
+        functional = (
+            cached_axis("functional", 0.55)
+            or student_axis("functional")
+            or self._structure_axis(
+                "unknown", 0.0, "unresolved", "no accepted functional axis"
+            )
+        )
+        content = (
+            cached_axis("content", 0.52)
+            or student_axis("content")
+            or self._structure_axis(
+                "unknown", 0.0, "unresolved", "no accepted content axis"
+            )
+        )
+        cached_boundary = cached.get("boundary") or {}
+        cached_boundary_confidence = float(
+            cached_boundary.get("current_confidence") or 0.0
+        )
+        cached_boundary_authority = float(
+            cached_boundary.get("current_authority") or 0.0
+        )
+        cached_boundary_consensus = (
+            cached_boundary.get("recall_authority")
+            == "operator_consensus"
+        )
+        if self._physical_silence_active:
+            boundary_probability = 0.0
+            boundary_source = "live_audio_silence"
+            boundary_reason = "boundaries are suppressed during physical silence"
+        elif (
+            cached_boundary_confidence >= 0.55
+            or cached_boundary_authority > 0.0
+        ):
+            boundary_probability = cached_boundary_confidence
+            boundary_source = (
+                "operator_approved_timeline"
+                if cached_boundary_authority > 0.0
+                else "operator_consensus_timeline"
+                if cached_boundary_consensus
+                else "cached_offline_teacher"
+            )
+            boundary_reason = (
+                "operator-approved exact-recording boundary"
+                if cached_boundary_authority > 0.0
+                else "participant-consensus boundary"
+                if cached_boundary_consensus
+                else "confident cached boundary"
+            )
+        elif student_accepted.get("boundary"):
+            boundary_probability = float(
+                student.get("boundary_probability") or 0.0
+            )
+            boundary_source = "streaming_student"
+            boundary_reason = "approved student boundary"
+        else:
+            boundary_probability = 0.0
+            boundary_source = "unresolved"
+            boundary_reason = "no accepted structural boundary"
+        boundary_provenance = (
+            cached_boundary.get("provenance")
+            if boundary_source in {
+                "cached_offline_teacher", "operator_approved_timeline",
+                "operator_consensus_timeline",
+            }
+            else student.get("model_path")
+            if boundary_source == "streaming_student"
+            else None
+        )
+        boundary_timeline_id = (
+            cached_boundary.get("timeline_id")
+            if boundary_source in {
+                "cached_offline_teacher", "operator_approved_timeline",
+                "operator_consensus_timeline",
+            }
+            else None
+        )
+        boundary = self._structure_axis(
+            (
+                "boundary"
+                if max(boundary_probability, cached_boundary_authority) >= 0.5
+                else "none"
+            ),
+            boundary_probability,
+            boundary_source,
+            boundary_reason,
+            provenance=boundary_provenance,
+            timeline_id=boundary_timeline_id,
+            model_confidence=cached_boundary_confidence,
+            operator_trust=(
+                cached_boundary_authority
+                if boundary_source == "operator_approved_timeline"
+                else 0.0
+            ),
+            recall_authority=cached_boundary.get("recall_authority"),
+        )
+        self._last_raw_observation = raw_observation
+        self._effective_structure = {
+            "schema": "lumen_structure_resolution_v2",
+            "source": energy["source"],
+            "section": energy["label"],
+            "confidence": energy["decision_confidence"],
+            "axes": {
+                "functional": functional,
+                "energy": energy,
+                "content": content,
+                "boundary": boundary,
+            },
+            "audio_gate": {
+                "quiet_packet": quiet_packet,
+                "quiet_for_s": quiet_for,
+                "silence_active": self._physical_silence_active,
+                "rms": metrics.rms,
+                "dbfs": metrics.dbfs,
+                "peak": metrics.peak,
+            },
+            "beat_timing_authority": "audio_sample_clock",
+        }
+        return replace(
+            raw_observation,
+            section=str(energy["label"]),
+            section_confidence=float(energy["decision_confidence"]),
+        )
+
+    def _resolved_runtime_context(self) -> dict[str, Any]:
+        axes = self._effective_structure.get("axes") or {}
+        energy = axes.get("energy") or {}
+        boundary = axes.get("boundary") or {}
+        return {
+            "functional": str(
+                (axes.get("functional") or {}).get("label") or "unknown"
+            ),
+            "energy": str(energy.get("label") or "unknown"),
+            "content": str(
+                (axes.get("content") or {}).get("label") or "unknown"
+            ),
+            # Motion scaling belongs to the selected energy axis. A confident
+            # functional label must not inflate a weak energy decision.
+            "confidence": float(
+                energy.get("decision_confidence", energy.get("confidence"))
+                or 0.0
+            ),
+            "boundary_probability": float(
+                boundary.get(
+                    "decision_confidence", boundary.get("confidence")
+                ) or 0.0
+            ),
+            "resolution": deepcopy(self._effective_structure),
+        }
+
+    def _set_non_audio_structure(
+        self,
+        observation: MusicalObservation,
+        *,
+        source: str,
+    ) -> None:
+        energy = self._structure_axis(
+            observation.section,
+            observation.section_confidence,
+            source,
+            "generated non-audio observation",
+        )
+        unknown = self._structure_axis(
+            "unknown", 0.0, source, "not supplied by generated observation"
+        )
+        boundary = self._structure_axis(
+            "none", 0.0, source, "no generated structural boundary"
+        )
+        self._last_raw_observation = observation
+        self._effective_structure = {
+            "schema": "lumen_structure_resolution_v2",
+            "source": source,
+            "section": observation.section,
+            "confidence": observation.section_confidence,
+            "axes": {
+                "functional": unknown,
+                "energy": energy,
+                "content": unknown,
+                "boundary": boundary,
+            },
+            "beat_timing_authority": "generated_clock",
+        }
+
+    def _refresh_recalled_choreography(
+        self,
+        runtime: PerformanceRuntime,
+        observation: MusicalObservation,
+    ) -> None:
+        """Atomically adopt candidates prepared outside the audio loop."""
+
+        ids = self._prepared_recalled_ids
+        if (
+            runtime is not self._recalled_choreography_runtime
+            or ids != self._recalled_choreography_ids
+        ):
+            runtime.set_recalled_choreography(
+                self._prepared_recalled_choreography
+            )
+            self._recalled_choreography_ids = ids
+            self._recalled_choreography_runtime = runtime
+
+    def _schedule_memory_context_poll(self) -> None:
+        """Keep SQLite/JSON timeline recall off the audio/DMX thread."""
+
+        thread = self._memory_context_thread
+        if thread is not None and thread.is_alive():
+            return
+        if time.monotonic() - self._memory_context_last_poll < 2.0:
+            return
+        self._memory_context_thread = threading.Thread(
+            target=self._poll_memory_context,
+            name="lumen-memory-context",
+            daemon=True,
+        )
+        self._memory_context_thread.start()
+
+    def _poll_memory_context(self) -> None:
+        try:
+            self._poll_memory_context_once()
+        except Exception as error:
+            with self._lock:
+                self._memory_context_error = str(error)
+        finally:
+            self._memory_context_last_poll = time.monotonic()
+
+    def _poll_memory_context_once(self) -> None:
+        started = time.monotonic()
+        with self._lock:
+            song_id = self.song_id
+            media = self.media
+            observation = self.observation
+        position_ms = self._media_position_ms()
+        cached_structure = None
+        if media is not None and position_ms is not None:
+            cached_structure = self.memory.cached_structure_at(
+                provider=media.provider,
+                provider_item_id=media.provider_item_id,
+                duration_ms=media.duration_ms,
+                playback_position_ms=position_ms,
+            )
+        placements = self.memory.list_choreography_placements(
+            song_id=song_id
+        ) if song_id is not None else []
+        selected: list[dict[str, Any]] = []
+        for placement in placements:
+            section_label = str(
+                placement.get("section_label") or ""
+            ).strip()
+            start_ms = placement.get("start_ms")
+            end_ms = placement.get("end_ms")
+            time_matches = False
+            if position_ms is not None and start_ms is not None:
+                effective_end = end_ms
+                if effective_end is None:
+                    duration_beats = float(
+                        placement.get("duration_beats") or 8.0
+                    )
+                    bpm = observation.bpm or 120.0
+                    # Recall is polled asynchronously and choreography changes
+                    # are admitted only on phrase boundaries. Keep an authored
+                    # placement discoverable for one additional two-bar phrase
+                    # so a call made just after a boundary cannot expire before
+                    # the next non-interrupting handoff.
+                    effective_end = int(
+                        int(start_ms)
+                        + (duration_beats + 8.0) * 60_000.0 / bpm
+                    )
+                time_matches = int(start_ms) <= position_ms < int(
+                    effective_end
+                )
+            section_matches = bool(
+                start_ms is None
+                and section_label
+                and section_label == observation.section
+            )
+            if time_matches or section_matches:
+                selected.append(placement)
+        sequences: list[ChoreographySequence] = []
+        sequence_versions: list[str] = []
+        for placement in selected:
+            stored = self.memory.choreography_sequence(
+                str(placement["sequence_id"])
+            )
+            if stored is None:
+                continue
+            steps: list[ChoreographyStep] = []
+            for item in stored.get("steps") or []:
+                strobe = item.get("strobe")
+                if isinstance(strobe, dict):
+                    strobe_value = (
+                        float(strobe.get("rate") or 0.0)
+                        if strobe.get("enabled") is not False
+                        else 0.0
+                    )
+                else:
+                    strobe_value = float(strobe or 0.0)
+                parameters = item.get("parameters") or {}
+                steps.append(ChoreographyStep(
+                    start_beat=float(item["start_beat"]),
+                    duration_beats=float(item["duration_beats"]),
+                    fixture_scope=str(
+                        item.get("fixture_scope")
+                        or stored.get("fixture_scope")
+                        or "overall"
+                    ),
+                    routine=str(item["routine"]),
+                    intensity=clamp(
+                        float(item.get("intensity", 1.0)), 0.0, 1.0
+                    ),
+                    palette=item.get("palette"),
+                    strobe=clamp(strobe_value, 0.0, 1.0),
+                    beat_sync=clamp(
+                        float(parameters.get("beat_sync", 1.0)), 0.0, 1.0
+                    ),
+                    motion_speed=clamp(
+                        float(parameters.get("motion_speed", 0.5)), 0.0, 1.0
+                    ),
+                    travel_size=clamp(
+                        float(parameters.get("travel_size", 1.0)), 0.0, 1.0
+                    ),
+                    activity_density=clamp(
+                        float(parameters.get("activity_density", 1.0)),
+                        0.0,
+                        1.0,
+                    ),
+                    brightness=(
+                        None
+                        if parameters.get("brightness") is None
+                        else clamp(
+                            float(parameters["brightness"]), 0.0, 1.0
+                        )
+                    ),
+                    strobe_enabled=(
+                        bool(strobe.get("enabled"))
+                        if isinstance(strobe, dict)
+                        and strobe.get("enabled") is not None
+                        else None
+                    ),
+                    strobe_rate=(
+                        clamp(
+                            float(strobe.get("rate") or 0.0), 0.0, 1.0
+                        )
+                        if isinstance(strobe, dict) else None
+                    ),
+                    cue_timing=clamp(
+                        float(parameters.get("cue_timing", 1.0)), 0.0, 1.0
+                    ),
+                    entry_behavior=str(
+                        item.get("entry_behavior") or "phrase_boundary"
+                    ),
+                    exit_behavior=str(
+                        item.get("exit_behavior") or "resolve"
+                    ),
+                ))
+            if steps:
+                sequences.append(ChoreographySequence(
+                    # A reusable sequence can be placed more than once in one
+                    # song. Give each placement revision a stable live identity
+                    # so consuming one time-window call cannot suppress another.
+                    sequence_id=(
+                        f"{stored['id']}#placement:{placement.get('id', '')}:"
+                        f"p{placement.get('revision', 0)}:"
+                        f"s{stored.get('revision', 0)}"
+                    ),
+                    steps=tuple(steps),
+                    source="operator_song_timeline",
+                    base_priority=1.0,
+                ))
+                sequence_versions.append(
+                    f"{stored['id']}:{stored.get('revision', 0)}:"
+                    f"{placement.get('id', '')}:"
+                    f"{placement.get('revision', 0)}"
+                )
+        ids = tuple(sequence_versions)
+        with self._lock:
+            # Drop results if the track changed while SQLite was queried.
+            if song_id == self.song_id and media == self.media:
+                self._cached_structure_prediction = cached_structure
+                self._cached_structure_key = (
+                    None
+                    if media is None
+                    else f"{media.provider}:{media.provider_item_id}"
+                )
+                self._cached_structure_checked_at = time.monotonic()
+                self._prepared_recalled_choreography = tuple(sequences)
+                self._prepared_recalled_ids = ids
+                self._recalled_choreography_checked_at = time.monotonic()
+                self._memory_context_last_poll = time.monotonic()
+                self._memory_context_last_duration_ms = round(
+                    (time.monotonic() - started) * 1000.0, 2
+                )
+                self._memory_context_error = None
+
     def _load_choreography_model(self) -> SequencePreferenceModel:
         path = self._choreography_model_path
         if not path.is_file():
             return SequencePreferenceModel()
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
-            return SequencePreferenceModel.from_state_dict(state)
+            model = SequencePreferenceModel.from_state_dict(state)
+            if int(state.get("version", 0)) != model.STATE_VERSION:
+                temporary = path.with_suffix(path.suffix + ".partial")
+                temporary.write_text(
+                    json.dumps(model.state_dict(), indent=2, sort_keys=True)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(path)
+            return model
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             # Keep the invalid file for diagnosis; never replace it merely
             # because application startup could not parse it.
             return SequencePreferenceModel()
 
     def _save_choreography_model(self) -> None:
+        """Queue a durable snapshot while keeping feedback acknowledgement fast."""
+
+        with self._model_save_condition:
+            self._model_save_requested += 1
+            self._model_save_condition.notify_all()
+
+    def _write_choreography_model(self) -> None:
         path = self._choreography_model_path
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".partial")
         temporary.write_text(
             json.dumps(
                 self._choreography_model.state_dict(),
-                indent=2,
-                sort_keys=True,
+                separators=(",", ":"),
             )
             + "\n",
             encoding="utf-8",
         )
         temporary.replace(path)
+
+    def _choreography_model_save_worker(self) -> None:
+        while True:
+            with self._model_save_condition:
+                self._model_save_condition.wait_for(lambda: (
+                    self._model_save_requested
+                    > self._model_save_completed
+                    or self._model_save_stop
+                ))
+                if (
+                    self._model_save_stop
+                    and self._model_save_requested
+                    <= self._model_save_completed
+                ):
+                    return
+                target = self._model_save_requested
+                # A listening-room burst normally arrives within a fraction
+                # of a second. Extend the target while requests are arriving,
+                # then persist only the final equivalent model state.
+                while not self._model_save_stop:
+                    self._model_save_condition.wait(timeout=0.15)
+                    if self._model_save_requested == target:
+                        break
+                    target = self._model_save_requested
+            try:
+                self._write_choreography_model()
+            except Exception as error:
+                with self._model_save_condition:
+                    self._model_save_error = str(error)
+            finally:
+                with self._model_save_condition:
+                    self._model_save_completed = max(
+                        self._model_save_completed, target
+                    )
+                    self._model_save_condition.notify_all()
 
     def _remember_sequence_learning(
         self,
@@ -701,8 +1578,30 @@ class LumenApplication:
         target_song_id = self.song_id if song_id is None else song_id
         if target_song_id is None:
             return
-        for role in ("performed_sequence", "preferred_sequence"):
-            sequence = learning.get(role)
+        sequence_records: list[tuple[str | None, str, Any]] = []
+        lanes = learning.get("lanes")
+        if isinstance(lanes, dict):
+            for lane, lane_learning in lanes.items():
+                if not isinstance(lane_learning, dict):
+                    continue
+                # The reversible preference-model event already stores the
+                # complete performed sequence and exact feedback context.
+                # Rewriting that same performed sequence into the timeline
+                # database on every phone tap added two HDD transactions per
+                # listener without adding information. Only an explicitly
+                # preferred sequence belongs in song choreography memory.
+                sequence_records.append((
+                    str(lane),
+                    "preferred_sequence",
+                    lane_learning.get("preferred_sequence"),
+                ))
+        else:
+            sequence_records.append((
+                None,
+                "preferred_sequence",
+                learning.get("preferred_sequence"),
+            ))
+        for lane, role, sequence in sequence_records:
             if not isinstance(sequence, dict):
                 continue
             steps = sequence.get("steps")
@@ -711,7 +1610,8 @@ class LumenApplication:
             sequence_name = str(sequence.get("sequence_id") or role)
             self.memory.save_choreography_sequence(
                 sequence_id=(
-                    f"online:{target_song_id}:{role}:{sequence_name}"
+                    f"online:{target_song_id}:{lane or 'legacy'}:"
+                    f"{role}:{sequence_name}"
                 ),
                 song_id=target_song_id,
                 source=(
@@ -725,6 +1625,7 @@ class LumenApplication:
                 context={
                     "feedback_label": label,
                     "scope": scope,
+                    "lane": lane,
                     "model_revision": learning.get("model_revision"),
                     "effective_strength": learning.get(
                         "effective_strength"
@@ -738,8 +1639,17 @@ class LumenApplication:
                         "routine": step["routine"],
                         "intensity": step.get("intensity", 1.0),
                         "palette": step.get("palette"),
+                        "strobe": {
+                            "enabled": float(step.get("strobe", 0.0)) > 0,
+                            "rate": step.get("strobe", 0.0),
+                        },
+                        "entry_behavior": step.get(
+                            "entry_behavior", "phrase_boundary"
+                        ),
+                        "exit_behavior": step.get(
+                            "exit_behavior", "resolve"
+                        ),
                         "parameters": {
-                            "strobe": step.get("strobe", 0.0),
                             "beat_sync": step.get("beat_sync", 1.0),
                         },
                     }
@@ -773,58 +1683,143 @@ class LumenApplication:
         )
 
     @staticmethod
-    def _feedback_effect(label: str) -> tuple[float, float, float, float]:
+    def _feedback_effect(label: str) -> dict[str, float]:
+        """Translate one explicit label without collapsing its meaning.
+
+        These keys are the persistent/runtime contract.  In particular, speed,
+        distance travelled, and how continuously a routine moves are different
+        observations, as are permission to strobe and the strobe's rate.
+        """
+
         return {
-            "increase_movement": (0.28, 0.0, 0.0, 0.0), "decrease_movement": (-0.28, 0.0, 0.0, 0.0),
-            "too_busy": (-0.28, 0.0, 0.0, 0.0), "not_busy_enough": (0.28, 0.0, 0.0, 0.0),
-            "calm_down": (-0.35, -0.08, -0.6, 0.0), "pick_it_up": (0.35, 0.10, 0.0, 0.0),
-            "too_bright": (0.0, -0.25, 0.0, 0.0), "too_dim": (0.0, 0.25, 0.0, 0.0),
-            "great_timing": (0.16, 0.06, 0.05, 0.0), "perfect_motion": (0.14, 0.0, 0.0, 0.0),
-            "more_like_this": (0.12, 0.08, 0.0, 0.0), "great_transition": (0.10, 0.06, 0.0, 0.0),
-            "no_strobes": (0.0, 0.0, -0.8, 0.0), "less_flashing": (0.0, 0.0, -0.6, 0.0),
-            "strobe": (0.0, 0.0, 0.8, 0.0), "faster_strobe": (0.0, 0.0, 0.35, 0.0),
-            "slower_strobe": (0.0, 0.0, -0.30, 0.0),
-            "faster": (0.28, 0.0, 0.0, 0.0), "slower": (-0.28, 0.0, 0.0, 0.0),
-            "brighter": (0.0, 0.25, 0.0, 0.0), "dimmer": (0.0, -0.25, 0.0, 0.0),
-            "slower_side_arms": (-0.18, 0.0, 0.0, 0.0), "faster_side_arms": (0.18, 0.0, 0.0, 0.0),
-            "cool_blue_purple": (0.0, 0.0, 0.0, -0.7), "warmer_color": (0.0, 0.0, 0.0, 0.7),
-            "liked_this": (0.08, 0.04, 0.0, 0.0), "hold_this": (0.06, 0.02, 0.0, 0.0),
-            "bad_timing": (-0.08, 0.0, 0.0, 0.0),
-        }.get(label, (0.0, 0.0, 0.0, 0.0))
+            "increase_movement": {"travel_size": 0.28},
+            "more_movement": {"travel_size": 0.28},
+            "decrease_movement": {"travel_size": -0.28},
+            "less_movement": {"travel_size": -0.28},
+            "too_busy": {"activity_density": -0.28},
+            "not_busy_enough": {"activity_density": 0.28},
+            "calm_down": {"activity_density": -0.35},
+            "pick_it_up": {"activity_density": 0.35},
+            "faster": {"motion_speed": 0.28},
+            "slower": {"motion_speed": -0.28},
+            "faster_side_arms": {"motion_speed": 0.18},
+            "slower_side_arms": {"motion_speed": -0.18},
+            "too_bright": {"brightness": -0.25},
+            "dimmer": {"brightness": -0.25},
+            "too_dim": {"brightness": 0.25},
+            "brighter": {"brightness": 0.25},
+            "more_intensity": {"brightness": 0.25},
+            "no_strobe": {"strobe_enabled": -0.80},
+            "no_strobes": {"strobe_enabled": -0.80},
+            "less_strobe": {"strobe_enabled": -0.60},
+            "less_flashing": {"strobe_enabled": -0.60},
+            "strobe": {"strobe_enabled": 0.80},
+            "more_strobe": {"strobe_enabled": 0.80},
+            "faster_strobe": {"strobe_rate": 0.35},
+            "slower_strobe": {"strobe_rate": -0.30},
+            "better_beat_sync": {"beat_sync": 0.35},
+            "great_timing": {"cue_timing": 0.30},
+            "good_timing": {"cue_timing": 0.25},
+            "timing_on_point": {"cue_timing": 0.30},
+            "great_transition": {"cue_timing": 0.25},
+            "bad_timing": {"cue_timing": -0.30},
+            "poor_timing": {"cue_timing": -0.30},
+            "cool_blue_purple": {"palette": -0.70},
+            "warmer_color": {"palette": 0.70},
+        }.get(label, {})
 
     @staticmethod
-    def _feedback_note_effect(note: str | None) -> tuple[float, float, float, float]:
+    def _feedback_note_effect(note: str | None) -> dict[str, Any]:
+        """Parse a note into the same literal axes used by explicit buttons."""
+
         text = (note or "").casefold()
-        motion = intensity = strobe = palette = 0.0
+        effect: dict[str, Any] = {}
+
+        def adjust(axis: str, amount: float) -> None:
+            effect[axis] = float(effect.get(axis, 0.0)) + amount
+
         if any(term in text for term in ("no strobe", "stop flashing", "less flash")):
-            strobe -= 0.60
-        if any(term in text for term in ("slow", "calm", "too fast")):
-            motion -= 0.18
-        if any(term in text for term in ("faster", "pick it up", "more movement")):
-            motion += 0.18
+            adjust("strobe_enabled", -0.60)
+        if any(term in text for term in ("faster strobe", "faster flash")):
+            adjust("strobe_rate", 0.25)
+        if any(term in text for term in ("slower strobe", "slower flash")):
+            adjust("strobe_rate", -0.25)
         if any(term in text for term in ("strobe", "flash")) and not any(
             term in text for term in ("no strobe", "stop flashing", "less flash")
+        ) and not any(term in text for term in (
+            "faster strobe", "faster flash", "slower strobe", "slower flash"
+        )):
+            adjust("strobe_enabled", 0.35)
+
+        motion_text = text
+        for phrase in (
+            "faster strobe", "faster flash", "slower strobe", "slower flash",
         ):
-            strobe += 0.35
+            motion_text = motion_text.replace(phrase, "")
+        if any(term in motion_text for term in (
+            "slower", "too fast", "slow movement", "move slowly",
+        )):
+            adjust("motion_speed", -0.18)
+        if any(term in motion_text for term in ("faster", "speed up")):
+            adjust("motion_speed", 0.18)
+        if any(term in text for term in (
+            "more movement", "larger movement", "bigger movement", "more travel",
+        )):
+            adjust("travel_size", 0.18)
+        if any(term in text for term in (
+            "less movement", "smaller movement", "less travel", "too wide",
+        )):
+            adjust("travel_size", -0.18)
+        if any(term in text for term in (
+            "pick it up", "not busy enough", "more active", "busier",
+        )):
+            adjust("activity_density", 0.18)
+        if any(term in text for term in (
+            "calm", "too busy", "less active", "give it space",
+        )):
+            adjust("activity_density", -0.18)
         if any(term in text for term in ("blue", "purple", "cool")):
-            palette -= 0.70
+            adjust("palette", -0.70)
         if any(term in text for term in ("warm", "red", "amber")):
-            palette += 0.70
+            adjust("palette", 0.70)
         if any(term in text for term in ("brighter", "too dim")):
-            intensity += 0.25
+            adjust("brightness", 0.25)
         if any(term in text for term in ("dimmer", "too bright")):
-            intensity -= 0.25
-        return motion, intensity, strobe, palette
+            adjust("brightness", -0.25)
+        if any(term in text for term in (
+            "better beat sync", "on the beat", "lock to the beat",
+        )):
+            adjust("beat_sync", 0.25)
+        if any(term in text for term in ("off beat", "out of sync")):
+            adjust("beat_sync", -0.25)
+        if any(term in text for term in (
+            "timing good", "timing was good", "timing on point", "great timing",
+        )):
+            adjust("cue_timing", 0.25)
+        if any(term in text for term in (
+            "timing off", "bad timing", "poor timing", "missed the cue",
+        )):
+            adjust("cue_timing", -0.25)
+
+        routines: dict[str, float] = {}
+        for routine in REHEARSAL_ROUTINE_IDS:
+            spoken = routine.replace("_", " ")
+            if spoken not in text and routine not in text:
+                continue
+            negative = any(
+                phrase in text
+                for phrase in (
+                    f"no {spoken}", f"less {spoken}", f"stop {spoken}",
+                    f"don't use {spoken}", f"do not use {spoken}",
+                )
+            )
+            routines[routine] = -0.50 if negative else 0.50
+        if routines:
+            effect["routines"] = routines
+        return effect
 
     @staticmethod
     def _feedback_gesture_effect(label: str, gesture: str | None) -> dict[str, float]:
-        preferred = {
-            "calm_down": "breathe", "decrease_movement": "breathe",
-            "too_busy": "breathe", "pick_it_up": "release",
-            "increase_movement": "sweep", "not_busy_enough": "sweep",
-        }.get(label)
-        if preferred:
-            return {preferred: 0.42}
         if gesture and label in {"liked_this", "hold_this", "great_timing", "perfect_motion", "more_like_this", "great_transition"}:
             return {gesture: 0.42}
         if gesture and label in {"bad_timing", "too_busy", "wrong_look"}:
@@ -833,14 +1828,6 @@ class LumenApplication:
 
     @staticmethod
     def _feedback_routine_effect(label: str, routine: str | None) -> dict[str, float]:
-        preferred = {
-            "calm_down": "breathe", "decrease_movement": "breathe",
-            "too_busy": "breathe", "pick_it_up": "opposing_chase",
-            "increase_movement": "opposing_chase", "not_busy_enough": "opposing_chase",
-            "faster_side_arms": "counter_rotate", "slower_side_arms": "fan_sweep",
-        }.get(label)
-        if preferred:
-            return {preferred: 0.50}
         if routine and label in {"liked_this", "hold_this", "great_timing", "perfect_motion", "more_like_this", "great_transition"}:
             return {routine: 0.50}
         if routine and label in {"bad_timing", "too_busy", "wrong_look"}:
@@ -849,67 +1836,132 @@ class LumenApplication:
 
     def _rebuild_feedback_biases(self) -> None:
         """Reconstruct preferences with recency decay and agreement confidence."""
+        literal_axes = (
+            "motion_speed",
+            "travel_size",
+            "activity_density",
+            "brightness",
+            "palette",
+            "strobe_enabled",
+            "strobe_rate",
+            "beat_sync",
+            "cue_timing",
+        )
         rows = self.memory.all_feedback()
         now = time.time() * 1000.0
-        buckets: dict[str, dict[str, float]] = {}
+        buckets: dict[str, dict[str, Any]] = {}
         counts: dict[str, int] = {}
+        listeners: dict[str, set[str]] = {}
+        song_identity: dict[int, bool] = {}
         for row in rows:
             scope = row.get("scope", "overall")
             song_id = row.get("song_id")
-            song_key = f"song:{song_id}" if song_id is not None else None
-            song = self.memory.get_song(int(song_id)) if song_id is not None else None
+            identified_song = False
+            if song_id is not None:
+                numeric_song_id = int(song_id)
+                if numeric_song_id not in song_identity:
+                    song = self.memory.get_song(numeric_song_id) or {}
+                    provider_item_id = str(
+                        song.get("provider_item_id") or ""
+                    ).casefold()
+                    song_identity[numeric_song_id] = bool(
+                        provider_item_id
+                        and not provider_item_id.startswith("unidentified:")
+                    )
+                identified_song = song_identity[numeric_song_id]
+            song_key = (
+                f"song:{song_id}" if identified_song else None
+            )
             artists = [
                 str(artist).casefold().strip()
-                for artist in (song or {}).get("artists", ())
+                for artist in row.get("song_artists", ())
                 if str(artist).strip()
             ]
-            section = row.get("section")
-            if scope == "overall":
-                context_keys = ["overall"]
-                if song_key:
-                    context_keys.append(song_key)
-                    if section:
-                        context_keys.append(f"{song_key}:section:{section}")
-                context_keys.extend(f"artist:{artist}" for artist in artists)
+            section = str(row.get("section") or "").strip().casefold()
+            if section in {"", "unknown"}:
+                section = None
+            lane_context = row.get("lane_context")
+            lifetime = (
+                str(lane_context.get("lifetime") or "cue").casefold()
+                if isinstance(lane_context, dict)
+                else "cue"
+            )
+            if lifetime not in {"cue", "song", "artist", "global"}:
+                lifetime = "cue"
+            if scope == "group" and row.get("fixture_id") == "movers":
+                target_ids: list[str | None] = [
+                    fixture.fixture_id for fixture in self.rig.fixtures
+                ]
+            elif scope == "group" and row.get("fixture_id") == "center":
+                target_ids = [
+                    fixture.fixture_id
+                    for fixture in self.rig.auxiliary_fixtures
+                ]
+            elif scope == "overall":
+                # None means every fixture lane. It is a target scope, not a
+                # temporal lifetime.
+                target_ids = [None]
             else:
-                if scope == "group" and row.get("fixture_id") == "movers":
-                    target_ids = [fixture.fixture_id for fixture in self.rig.fixtures]
-                else:
-                    target_ids = [str(row.get("fixture_id") or "")]
-                target_ids = [target for target in target_ids if target]
-                context_keys = []
-                for target in target_ids:
-                    context_keys.append(target)
-                    if song_key:
-                        context_keys.append(f"{song_key}:fixture:{target}")
-                        if section:
-                            context_keys.append(
-                                f"{song_key}:section:{section}:fixture:{target}"
-                            )
+                target = str(row.get("fixture_id") or "")
+                target_ids = [target] if target else []
+
+            context_keys = []
+            for target in target_ids:
+                base_key = "overall" if target is None else target
+                if lifetime == "global" or not song_key:
+                    context_keys.append(base_key)
+                elif lifetime == "artist" and artists:
                     context_keys.extend(
-                        f"artist:{artist}:fixture:{target}" for artist in artists
+                        f"artist:{artist}"
+                        + ("" if target is None else f":fixture:{target}")
+                        for artist in artists
+                    )
+                elif lifetime == "song" or not section:
+                    context_keys.append(
+                        song_key
+                        + ("" if target is None else f":fixture:{target}")
+                    )
+                else:
+                    context_keys.append(
+                        f"{song_key}:section:{section}"
+                        + ("" if target is None else f":fixture:{target}")
                     )
             if not context_keys:
                 continue
             age_days = max(0.0, (now - float(row.get("created_unix_ms") or now)) / 86_400_000.0)
             decay = math.exp(-age_days / 21.0)
-            motion, intensity, strobe, palette = self._feedback_effect(str(row.get("label", "")))
+            label_effect = self._feedback_effect(str(row.get("label", "")))
             note_effect = self._feedback_note_effect(row.get("note"))
-            motion += note_effect[0]
-            intensity += note_effect[1]
-            strobe += note_effect[2]
-            palette += note_effect[3]
+            effect = {
+                axis: float(label_effect.get(axis, 0.0))
+                + float(note_effect.get(axis, 0.0))
+                for axis in literal_axes
+            }
             raw_value = row.get("value")
+            note_has_semantics = bool(
+                row.get("note")
+                and (
+                    any(abs(effect[axis]) > 0 for axis in literal_axes)
+                    or bool(note_effect.get("routines"))
+                )
+            )
             weight = decay * min(
                 1.0,
-                abs(float(1.0 if raw_value is None else raw_value)),
+                1.0
+                if note_has_semantics
+                else abs(float(1.0 if raw_value is None else raw_value)),
             )
             for key in context_keys:
-                bucket = buckets.setdefault(key, {"motion": 0.0, "intensity": 0.0, "weight": 0.0, "gestures": {}, "routines": {}})
-                bucket["motion"] += motion * weight
-                bucket["intensity"] += intensity * weight
-                bucket["strobe"] = bucket.get("strobe", 0.0) + strobe * weight
-                bucket["palette"] = bucket.get("palette", 0.0) + palette * weight
+                bucket = buckets.setdefault(key, {
+                    **{axis: 0.0 for axis in literal_axes},
+                    "weight": 0.0,
+                    "gestures": {},
+                    "routines": {},
+                })
+                for axis in literal_axes:
+                    bucket[axis] = float(bucket.get(axis, 0.0)) + (
+                        effect[axis] * weight
+                    )
                 bucket["weight"] += weight
                 gesture = str(row.get("gesture") or "")
                 gesture_deltas = self._feedback_gesture_effect(str(row.get("label", "")), gesture)
@@ -918,28 +1970,63 @@ class LumenApplication:
                     for gesture_name, gesture_delta in gesture_deltas.items():
                         gestures[gesture_name] = gestures.get(gesture_name, 0.0) + gesture_delta * weight
                 routine = str(row.get("routine") or "")
-                if not routine:
-                    routine = {
-                        "breathe": "breathe", "release": "opposing_chase",
-                        "sweep": "fan_sweep", "expand": "fan_sweep",
-                        "pulse": "beat_nod",
-                    }.get(gesture, "")
                 routine_deltas = self._feedback_routine_effect(
                     str(row.get("label", "")), routine
                 )
                 routines = bucket.setdefault("routines", {})
                 for routine_name, routine_delta in routine_deltas.items():
                     routines[routine_name] = routines.get(routine_name, 0.0) + routine_delta * weight
+                for routine_name, routine_delta in dict(
+                    note_effect.get("routines") or {}
+                ).items():
+                    routines[routine_name] = (
+                        routines.get(routine_name, 0.0)
+                        + float(routine_delta) * weight
+                    )
                 counts[key] = counts.get(key, 0) + 1
+                listeners.setdefault(key, set()).add(
+                    str(
+                        row.get("participant_id")
+                        or f"legacy:{row.get('id')}"
+                    )
+                )
         rebuilt: dict[str, dict[str, Any]] = {}
         for key, bucket in buckets.items():
-            confidence = min(1.0, math.sqrt(counts[key]) / 2.0)
+            listener_count = max(1, len(listeners.get(key, set())))
+            repeat_count = max(0, counts[key] - listener_count)
+            confidence = clamp(
+                0.45
+                + 0.14 * (listener_count - 1)
+                + 0.06 * repeat_count,
+                0.0,
+                1.0,
+            )
             normalizer = max(float(bucket.get("weight", 0.0)), 1e-9)
+            resolved_axes = {
+                axis: clamp(
+                    float(bucket.get(axis, 0.0))
+                    / normalizer
+                    * confidence,
+                    -1.0,
+                    1.0,
+                )
+                for axis in literal_axes
+            }
             rebuilt[key] = {
-                "motion": clamp(bucket["motion"] / normalizer * confidence, -1.0, 1.0),
-                "intensity": clamp(bucket["intensity"] / normalizer * confidence, -1.0, 1.0),
-                "strobe": clamp(bucket.get("strobe", 0.0) / normalizer * confidence, -1.0, 1.0),
-                "palette": clamp(bucket.get("palette", 0.0) / normalizer * confidence, -1.0, 1.0),
+                **resolved_axes,
+                # Compatibility read view for older runtime/UI clients. New
+                # consumers must use the literal keys above. Strobe rate is
+                # deliberately excluded from `strobe` so "faster strobe"
+                # cannot accidentally become "enable strobe" after restart.
+                "motion": clamp(
+                    resolved_axes["motion_speed"]
+                    + resolved_axes["travel_size"]
+                    + resolved_axes["activity_density"],
+                    -1.0,
+                    1.0,
+                ),
+                "intensity": resolved_axes["brightness"],
+                "strobe": resolved_axes["strobe_enabled"],
                 "gestures": {
                     name: clamp(value / normalizer * confidence, -1.0, 1.0)
                     for name, value in bucket.get("gestures", {}).items()
@@ -948,9 +2035,70 @@ class LumenApplication:
                     name: clamp(value / normalizer * confidence, -1.0, 1.0)
                     for name, value in bucket.get("routines", {}).items()
                 },
+                "evidence": {
+                    "listeners": listener_count,
+                    "events": counts[key],
+                    "repeat_events": repeat_count,
+                    "confidence": confidence,
+                },
             }
         with self._lock:
             self._feedback_biases = rebuilt
+
+    def _queue_feedback_bias_refresh(
+        self, lanes: Iterable[str]
+    ) -> None:
+        with self._feedback_refresh_condition:
+            self._feedback_refresh_requested += 1
+            self._feedback_refresh_lanes.update(
+                lane for lane in lanes if lane in CHOREOGRAPHY_LANES
+            )
+            self._feedback_refresh_condition.notify_all()
+
+    def _feedback_bias_refresh_worker(self) -> None:
+        while True:
+            with self._feedback_refresh_condition:
+                self._feedback_refresh_condition.wait_for(lambda: (
+                    self._feedback_refresh_requested
+                    > self._feedback_refresh_completed
+                    or self._feedback_refresh_stop
+                ))
+                if (
+                    self._feedback_refresh_stop
+                    and self._feedback_refresh_requested
+                    <= self._feedback_refresh_completed
+                ):
+                    return
+                target = self._feedback_refresh_requested
+                while not self._feedback_refresh_stop:
+                    self._feedback_refresh_condition.wait(timeout=0.12)
+                    if self._feedback_refresh_requested == target:
+                        break
+                    target = self._feedback_refresh_requested
+                lanes = set(self._feedback_refresh_lanes)
+                self._feedback_refresh_lanes.clear()
+            try:
+                self._rebuild_feedback_biases()
+                with self._lock:
+                    runtime = self._runtime
+                    biases = deepcopy(self._feedback_biases)
+                    self._status_sequence += 1
+                if runtime is not None:
+                    runtime.replace_feedback(
+                        biases,
+                        replan_lanes=lanes,
+                    )
+                with self._feedback_refresh_condition:
+                    self._feedback_refresh_error = None
+            except Exception as error:
+                with self._feedback_refresh_condition:
+                    self._feedback_refresh_error = str(error)
+            finally:
+                with self._feedback_refresh_condition:
+                    self._feedback_refresh_completed = max(
+                        self._feedback_refresh_completed, target
+                    )
+                    self._feedback_refresh_condition.notify_all()
 
     def _read_settings(self) -> dict[str, Any]:
         if not self.settings_path.exists():
@@ -960,37 +2108,39 @@ class LumenApplication:
             raise ValueError("operator settings must be a JSON object")
         return payload
 
-    def _save_settings(self) -> None:
+    def _save_settings(self, settings: dict[str, Any] | None = None) -> None:
+        payload = dict(self._settings if settings is None else settings)
         self.settings_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.settings_path.with_suffix(self.settings_path.suffix + ".tmp")
         temporary.write_text(
-            json.dumps(self._settings, indent=2, sort_keys=True) + "\n",
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         os.chmod(temporary, 0o600)
         temporary.replace(self.settings_path)
 
-    def _load_motion_tunings(self) -> dict[str, MotionTuning]:
+    def _load_motion_tunings(self) -> GroupMotionTunings:
         try:
             payload = json.loads(self.motion_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             payload = {}
         except (OSError, ValueError, TypeError):
             payload = {}
-        return merged_motion_tunings(payload if isinstance(payload, dict) else {})
+        return merged_group_motion_tunings(
+            payload if isinstance(payload, dict) else {}
+        )
 
-    def _save_motion_tunings(self) -> None:
+    def _save_motion_tunings(
+        self, payload: dict[str, Any] | None = None
+    ) -> None:
+        serialized = payload or GroupMotionTunings(
+            movers=self.motion_tunings,
+            center=self.center_motion_tunings,
+        ).as_dict()
         self.motion_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.motion_path.with_suffix(".json.tmp")
         temporary.write_text(
-            json.dumps(
-                {
-                    routine: tuning.as_dict()
-                    for routine, tuning in self.motion_tunings.items()
-                },
-                indent=2,
-                sort_keys=True,
-            ) + "\n",
+            json.dumps(serialized, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         os.chmod(temporary, 0o600)
@@ -1000,19 +2150,44 @@ class LumenApplication:
         routine = str(payload.get("routine", "")).strip().lower()
         if routine not in DEFAULT_MOTION_TUNINGS:
             raise ValueError("unknown motion routine")
-        with self._lock:
-            if str(payload.get("action", "")).lower() == "reset":
-                self.motion_tunings[routine] = DEFAULT_MOTION_TUNINGS[routine]
-            else:
-                values = payload.get("values", payload)
-                if not isinstance(values, dict):
-                    raise ValueError("motion values must be an object")
-                self.motion_tunings[routine] = self.motion_tunings[routine].patch(values)
-            self._save_motion_tunings()
-            if self._runtime is not None:
-                self._runtime.set_motion_tunings(self.motion_tunings)
-            self._add_event("rehearsal", f"Tuned {routine.replace('_', ' ')} motion")
-            self._status_sequence += 1
+        scope = canonical_motion_scope(
+            payload.get("scope", self.rehearsal.scope)
+        )
+        if scope == "overall":
+            raise ValueError(
+                "choose Movers or Center before editing a routine"
+            )
+        with self._configuration_lock:
+            with self._lock:
+                target: dict[str, MotionTuning] | dict[str, CenterMotionTuning]
+                defaults: dict[str, MotionTuning] | dict[str, CenterMotionTuning]
+                if scope == "center":
+                    target = self.center_motion_tunings
+                    defaults = DEFAULT_CENTER_MOTION_TUNINGS
+                else:
+                    target = self.motion_tunings
+                    defaults = DEFAULT_MOTION_TUNINGS
+                if str(payload.get("action", "")).lower() == "reset":
+                    target[routine] = defaults[routine]  # type: ignore[assignment]
+                else:
+                    values = payload.get("values", payload)
+                    if not isinstance(values, dict):
+                        raise ValueError("motion values must be an object")
+                    target[routine] = target[routine].patch(values)  # type: ignore[assignment,union-attr]
+                motion_payload = GroupMotionTunings(
+                    movers=self.motion_tunings,
+                    center=self.center_motion_tunings,
+                ).as_dict()
+                if self._runtime is not None:
+                    self._runtime.set_motion_tunings(
+                        self.motion_tunings, self.center_motion_tunings
+                    )
+                self._add_event(
+                    "rehearsal",
+                    f"Tuned {scope} {routine.replace('_', ' ')} motion",
+                )
+                self._status_sequence += 1
+            self._save_motion_tunings(motion_payload)
         return self.snapshot()
 
     def _motion_editor_snapshot(self) -> dict[str, Any]:
@@ -1046,7 +2221,7 @@ class LumenApplication:
                 "maximum_tilt_deg_s": calibration.max_tilt_speed_deg_s,
                 "within_velocity": within,
             })
-        return {
+        movers = {
             "values": tuning.as_dict(),
             "defaults": DEFAULT_MOTION_TUNINGS[routine].as_dict(),
             "modified": tuning != DEFAULT_MOTION_TUNINGS[routine],
@@ -1054,6 +2229,23 @@ class LumenApplication:
             "path": str(self.motion_path),
             "velocity_feasible": feasible,
             "velocity": diagnostics,
+        }
+        center_tuning = self.center_motion_tunings[routine]
+        center = {
+            "values": center_tuning.as_dict(),
+            "defaults": DEFAULT_CENTER_MOTION_TUNINGS[routine].as_dict(),
+            "modified": (
+                center_tuning != DEFAULT_CENTER_MOTION_TUNINGS[routine]
+            ),
+            "path": str(self.motion_path),
+        }
+        selected = (
+            "center" if self.rehearsal.scope == "center" else "movers"
+        )
+        return {
+            **(center if selected == "center" else movers),
+            "scope": selected,
+            "groups": {"movers": movers, "center": center},
         }
 
     def _read_rig_payload(self) -> dict[str, Any]:
@@ -1075,6 +2267,14 @@ class LumenApplication:
         normalized = mode.strip().lower()
         if normalized not in {"monitor", "live", "demo", "rehearsal"}:
             raise ValueError("mode must be monitor, live, demo, or rehearsal")
+        # A CLI research worker is not represented by this application's
+        # thread object. Recover dead leases, then honor any live database
+        # lease so a second heavy model cannot compete with Live/DMX timing.
+        self._recover_abandoned_research_jobs()
+        external_research_running = any(
+            job["status"] == "running"
+            for job in self.memory.list_analysis_jobs(limit=100_000)
+        )
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 if self.engine_mode == normalized:
@@ -1091,6 +2291,11 @@ class LumenApplication:
                 )
                 raise RuntimeError(
                     f"offline analysis is still running; {action}"
+                )
+            if external_research_running:
+                raise RuntimeError(
+                    "offline analysis is running in another Lumen process; "
+                    "wait for it to finish before starting the engine"
                 )
             preparation = self._training_prepare_thread
             if preparation is not None and preparation.is_alive():
@@ -1125,6 +2330,7 @@ class LumenApplication:
         return self.snapshot()
 
     def close(self) -> None:
+        errors: list[str] = []
         self._stop.set()
         self._research_cancel.set()
         thread = self._thread
@@ -1133,42 +2339,184 @@ class LumenApplication:
             # recorder before closing the DMX object it is still using.
             thread.join(timeout=15.0)
         output = self._output
-        if output is not None:
+        if thread is not None and thread.is_alive():
+            errors.append("engine owner thread did not stop")
+        elif output is not None:
             try:
                 output.close()
-            except Exception:
-                pass
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=2.0)
+            except Exception as error:
+                errors.append(f"output close failed: {error}")
         recorder = self._training_recorder
-        if recorder is not None:
-            recorder.stop()
+        if recorder is not None and not (thread and thread.is_alive()):
+            try:
+                recorder.stop()
+            except Exception as error:
+                errors.append(str(error))
         self._trace_stop.set()
         self._trace_thread.join(timeout=10.0)
+        if self._trace_thread.is_alive():
+            errors.append("performance trace writer did not stop")
         preparation = self._training_prepare_thread
         if preparation is not None and preparation.is_alive():
-            preparation.join(timeout=15.0)
+            preparation.join(timeout=30.0)
+            if preparation.is_alive():
+                errors.append("training preparation worker did not stop")
         research_worker = self._research_worker_thread
         if research_worker is not None and research_worker.is_alive():
             research_worker.join(timeout=15.0)
+            if research_worker.is_alive():
+                errors.append("offline research worker did not stop")
+        for name, background in (
+            ("memory context", self._memory_context_thread),
+            ("Spotify poll", self._spotify_poll_thread),
+        ):
+            if background is not None and background.is_alive():
+                background.join(timeout=5.0)
+                if background.is_alive():
+                    errors.append(f"{name} worker did not stop")
+        with self._feedback_refresh_condition:
+            self._feedback_refresh_stop = True
+            self._feedback_refresh_condition.notify_all()
+        self._feedback_refresh_thread.join(timeout=10.0)
+        if self._feedback_refresh_thread.is_alive():
+            errors.append("feedback refresh worker did not stop")
+        elif self._feedback_refresh_error is not None:
+            errors.append(
+                "feedback refresh failed: "
+                f"{self._feedback_refresh_error}"
+            )
+        with self._model_save_condition:
+            self._model_save_stop = True
+            self._model_save_condition.notify_all()
+        self._model_save_thread.join(timeout=10.0)
+        if self._model_save_thread.is_alive():
+            errors.append("choreography persistence worker did not stop")
+        elif self._model_save_error is not None:
+            errors.append(
+                "choreography persistence failed: "
+                f"{self._model_save_error}"
+            )
+        if not self._trace_thread.is_alive() and not (
+            preparation is not None and preparation.is_alive()
+        ):
+            try:
+                self.memory.checkpoint("TRUNCATE")
+            except Exception as error:
+                with self._lock:
+                    self._add_event(
+                        "memory", f"Deferred database checkpoint failed: {error}"
+                    )
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
     def _trace_worker(self) -> None:
         while not self._trace_stop.is_set() or not self._trace_queue.empty():
+            batch: list[dict[str, Any]] = []
             try:
-                item = self._trace_queue.get(timeout=0.20)
+                queued = self._trace_queue.get(timeout=0.20)
             except queue.Empty:
                 continue
             try:
-                kind = item.pop("_kind", "performance")
-                if kind == "decision":
-                    self.memory.log_decision(**item)
-                else:
-                    self.memory.log_performance_sample(**item)
+                batch.append(self._materialize_trace_item(queued))
+            except Exception as error:
+                self._trace_queue.task_done()
+                with self._lock:
+                    self._add_event(
+                        "memory",
+                        f"Performance trace snapshot failed: {error}",
+                    )
+                continue
+            deadline = time.monotonic() + 2.0
+            while len(batch) < 128:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                try:
+                    queued = self._trace_queue.get(
+                        timeout=min(0.20, remaining)
+                    )
+                    batch.append(self._materialize_trace_item(queued))
+                except queue.Empty:
+                    if self._trace_stop.is_set():
+                        break
+                except Exception as error:
+                    self._trace_queue.task_done()
+                    with self._lock:
+                        self._add_event(
+                            "memory",
+                            f"Performance trace snapshot failed: {error}",
+                        )
+            try:
+                self.memory.log_trace_batch(batch)
             except Exception as error:
                 with self._lock:
                     self._add_event("memory", f"Performance trace write failed: {error}")
             finally:
-                self._trace_queue.task_done()
+                for _item in batch:
+                    self._trace_queue.task_done()
+
+    def _materialize_trace_item(
+        self, item: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Serialize a trace seed entirely outside the live control path."""
+
+        if item.get("_kind") != "performance_seed":
+            return item
+        frame: RuntimeFrame = item["frame"]
+        observation: MusicalObservation = item["observation"]
+        raw_observation: MusicalObservation = item["raw_observation"]
+        audio_metrics: AudioInputMetrics | None = item["audio_metrics"]
+        # The control thread captured this beside the exact RuntimeFrame.
+        # Reading mutable runtime state here could pair frame N's DMX with a
+        # later phrase/step after the asynchronous trace writer caught up.
+        choreography_snapshot = item.get("choreography_snapshot")
+        decision = asdict(frame.decision)
+        decision["gesture"] = frame.decision.gesture.value
+        return {
+            "_kind": "performance",
+            "session_id": item["session_id"],
+            "song_id": item["song_id"],
+            "position_ms": item["position_ms"],
+            "payload": {
+                "schema": "lumen_performance_trace_v2",
+                "raw_observation": asdict(raw_observation),
+                "resolved_observation": asdict(observation),
+                "observation": asdict(observation),
+                "audio_metrics": (
+                    {
+                        key: value
+                        for key, value in asdict(audio_metrics).items()
+                        if key != "waveform"
+                    }
+                    if audio_metrics is not None
+                    else {}
+                ),
+                "decision": decision,
+                "controls": asdict(item["controls"]),
+                "solutions": [
+                    {
+                        "fixture_id": solution.fixture_id,
+                        "pan_deg": solution.pan_deg,
+                        "tilt_deg": solution.tilt_deg,
+                        "branch": solution.branch,
+                    }
+                    for solution in frame.solutions
+                ],
+                # These are the final fixture-local bytes from the same frame
+                # that was handed to the DMX output.  Keeping them beside the
+                # semantic decision closes the audit path from heard music to
+                # effective fixture state without reopening the USB adapter.
+                "fixture_dmx": self._fixture_dmx_snapshot(frame),
+                "effective_outputs": [
+                    output.as_dict() for output in frame.effective_outputs
+                ],
+                "choreography_runtime": choreography_snapshot,
+                "structure_model": deepcopy(item["structure_model"]),
+                "structure_resolution": deepcopy(
+                    item["structure_resolution"]
+                ),
+            },
+        }
 
     def _run(self, mode: str) -> None:
         raw_output: VirtualDMXOutput | OpenDmxUsbOutput
@@ -1237,14 +2585,17 @@ class LumenApplication:
                 self._status_sequence += 1
 
     def _run_audio(self, runtime: PerformanceRuntime) -> None:
+        # Monitor/Live can be stopped and restarted without recreating the
+        # application. Never carry 30/60-second memories or decoder hysteresis
+        # from the previous listening session into the new audio stream.
+        self._reset_student_stream()
         self._prepare_dedicated_line_input()
         capture_config = AudioCaptureConfig(device=self.audio_device)
         analyzer = RealtimeAudioAnalyzer(
             capture_config.sample_rate, capture_config.channels
         )
         analysis_generation = self._analysis_generation
-        sample_clock_origin = time.monotonic()
-        captured_frames = 0
+        expected_source_frame: int | None = None
         recorder: TrainingDataRecorder | None = None
         if self.training_capture_enabled:
             recorder = TrainingDataRecorder(
@@ -1287,61 +2638,185 @@ class LumenApplication:
                         "memory",
                         state["error"] or "Training capture did not start",
                     )
+        control_queue: queue.Queue[_AnalyzedControlFrame] = queue.Queue(
+            maxsize=16
+        )
+        analysis_finished = threading.Event()
+        control_errors: list[BaseException] = []
+        control_thread: threading.Thread | None = None
         try:
-            with AlsaLineIn(capture_config) as capture:
-                for pcm in capture.chunks():
+            capture = AlsaLineIn(capture_config)
+            with ContinuouslyDrainedAudio(capture) as buffered_capture:
+                with self._live_state_lock:
+                    self._active_audio_capture = buffered_capture
+                control_thread = threading.Thread(
+                    target=self._run_live_control_clock,
+                    args=(
+                        runtime,
+                        control_queue,
+                        analysis_finished,
+                        control_errors,
+                        capture_config,
+                    ),
+                    name="lumen-live-control",
+                    daemon=True,
+                )
+                control_thread.start()
+                for captured in buffered_capture.chunks(
+                    stop_event=self._stop
+                ):
                     if self._stop.is_set():
                         break
+                    if control_errors:
+                        raise RuntimeError(
+                            f"live control clock failed: {control_errors[0]}"
+                        ) from control_errors[0]
+                    pcm = captured.pcm
+                    analysis_started = time.perf_counter()
+                    stage_started = analysis_started
+                    stage_ms: dict[str, float] = {}
+                    with self._live_state_lock:
+                        diagnostics = buffered_capture.diagnostics
+                        self._audio_queue_depth = buffered_capture.queue_depth
+                        self._audio_queue_max_depth = max(
+                            self._audio_queue_max_depth,
+                            buffered_capture.maximum_queue_depth,
+                        )
+                        self._audio_queue_delay_ms = max(
+                            0.0,
+                            (
+                                time.monotonic()
+                                - captured.captured_monotonic_s
+                            ) * 1000.0,
+                        )
+                        self._audio_capture_diagnostics = diagnostics
+                    timeline_discontinuity = False
                     if analysis_generation != self._analysis_generation:
                         analyzer.reset()
-                        if self._student_model is not None:
-                            self._student_model.reset()
-                            self._student_decoder.reset()
+                        self._reset_student_stream(
+                            reset_physical_silence=False
+                        )
+                        timeline_discontinuity = True
                         analysis_generation = self._analysis_generation
-                    packet_frames = len(pcm) // (
-                        2 * capture_config.channels
+                    packet_frames = captured.frame_count
+                    audio_discontinuity = bool(
+                        expected_source_frame is not None
+                        and captured.source_start_frame
+                        != expected_source_frame
                     )
-                    timestamp = (
-                        sample_clock_origin
-                        + (captured_frames + packet_frames / 2.0)
-                        / capture_config.sample_rate
+                    if audio_discontinuity:
+                        # Temporal analysis cannot bridge missing physical PCM.
+                        # The control clock receives the matching reset command
+                        # in-order with the first observation after the gap.
+                        analyzer.reset()
+                        self._reset_student_stream(
+                            reset_physical_silence=False
+                        )
+                    expected_source_frame = (
+                        captured.source_start_frame + packet_frames
                     )
-                    observation = analyzer.analyze_pcm16(
+                    timestamp = captured.timestamp_s
+                    raw_observation = analyzer.analyze_pcm16(
                         pcm, timestamp_s=timestamp
                     )
+                    stage_ms["analyze"] = (
+                        time.perf_counter() - stage_started
+                    ) * 1000.0
+                    stage_started = time.perf_counter()
                     audio_metrics = analyzer.last_metrics
-                    observation = self._apply_student_structure(
-                        observation, audio_metrics
-                    )
-                    if self._student_prediction is not None:
-                        runtime.set_structure_context(
-                            **self._student_runtime_context()
+                    with self._live_state_lock:
+                        self._tempo_diagnostics = dict(
+                            analyzer.tempo_diagnostics
                         )
-                    captured_frames += packet_frames
-                    frame = runtime.step(observation)
+                    self._apply_student_structure(
+                        raw_observation, audio_metrics
+                    )
+                    observation = self._resolve_structure(
+                        raw_observation, audio_metrics
+                    )
+                    runtime_context = self._resolved_runtime_context()
+                    stage_ms["structure"] = (
+                        time.perf_counter() - stage_started
+                    ) * 1000.0
+                    stage_started = time.perf_counter()
+                    with self._live_state_lock:
+                        active_output_frame = self.frame
+                        training_choreography = (
+                            self._runtime_choreography_snapshot
+                        )
+                    training_context = {
+                        # These objects are either frozen dataclasses or
+                        # copy-on-write dictionaries. Their references remain
+                        # the exact generation paired with this PCM packet
+                        # until the recorder worker serializes them.
+                        "controls": replace(self.controls),
+                        "media": self.media,
+                        "structure_model": self._student_prediction,
+                        "structure_resolution": self._effective_structure,
+                        "choreography_runtime": training_choreography,
+                    }
                     audio_frame: int | None = None
                     if recorder is not None:
+                        sample_unix_ms = round(
+                            time.time() * 1000
+                            - max(0.0, time.monotonic() - timestamp) * 1000
+                        )
                         audio_frame = recorder.submit(
                             pcm,
                             song_id=self.song_id,
-                            position_ms=self._media_position_ms(),
-                            payload=lambda: self._training_frame_payload(
-                                observation, frame, audio_metrics
+                            position_ms=self._media_position_ms(
+                                at_monotonic_s=timestamp
+                            ),
+                            source_start_frame=captured.source_start_frame,
+                            captured_unix_ms=sample_unix_ms,
+                            payload=lambda frame=active_output_frame,
+                            resolved=observation,
+                            metrics=audio_metrics,
+                            raw=raw_observation,
+                            context=training_context: (
+                                self._training_frame_payload(
+                                    resolved,
+                                    frame,
+                                    metrics,
+                                    raw_observation=raw,
+                                    captured_context=context,
+                                )
                             ),
                         )
-                    self._accept_runtime_frame(
-                        observation,
-                        frame,
-                        audio_metrics=audio_metrics,
-                        audio_bytes=len(pcm),
-                        training_audio_frame=audio_frame,
+                    stage_ms["recorder_submit"] = (
+                        time.perf_counter() - stage_started
+                    ) * 1000.0
+                    self._offer_control_frame(
+                        control_queue,
+                        _AnalyzedControlFrame(
+                            observation=observation,
+                            raw_observation=raw_observation,
+                            audio_metrics=audio_metrics,
+                            audio_bytes=len(pcm),
+                            training_audio_frame=audio_frame,
+                            runtime_context=runtime_context,
+                            analysis_started_perf_s=analysis_started,
+                            analysis_stages_ms=stage_ms,
+                            timeline_discontinuity=timeline_discontinuity,
+                            audio_discontinuity=audio_discontinuity,
+                        ),
                     )
         finally:
+            analysis_finished.set()
+            if control_thread is not None:
+                control_thread.join(timeout=3.0)
+                if control_thread.is_alive():
+                    control_errors.append(
+                        RuntimeError("live control clock did not stop")
+                    )
+            with self._live_state_lock:
+                self._active_audio_capture = None
             if recorder is not None:
                 recorder.stop()
+                final_status = recorder.status()
+                training_history = self.memory.training_summary()
                 with self._lock:
-                    final_status = recorder.status()
-                    self._training_history = self.memory.training_summary()
+                    self._training_history = training_history
                     self._training_recorder = None
                     self._training_audio_frame = None
                     self._training_linked_feedback = 0
@@ -1359,14 +2834,221 @@ class LumenApplication:
                     final_status["state"] in {"complete", "quota"}
                     and int(final_status.get("frames_written", 0)) > 0
                 ):
-                    self._start_training_preparation()
+                    self._start_training_preparation(self._session_id)
+        if control_errors:
+            raise RuntimeError(
+                f"live control clock failed: {control_errors[0]}"
+            ) from control_errors[0]
 
-    def _start_training_preparation(self) -> None:
+    def _offer_control_frame(
+        self,
+        control_queue: queue.Queue[_AnalyzedControlFrame],
+        item: _AnalyzedControlFrame,
+    ) -> None:
+        """Publish analysis without ever waiting for the show clock."""
+
+        while True:
+            try:
+                control_queue.put_nowait(item)
+            except queue.Full:
+                try:
+                    control_queue.get_nowait()
+                except queue.Empty:
+                    continue
+                with self._live_state_lock:
+                    self._control_queue_drops += 1
+                continue
+            with self._live_state_lock:
+                depth = control_queue.qsize()
+                self._control_queue_depth = depth
+                self._control_queue_max_depth = max(
+                    self._control_queue_max_depth, depth
+                )
+            return
+
+    def _run_live_control_clock(
+        self,
+        runtime: PerformanceRuntime,
+        control_queue: queue.Queue[_AnalyzedControlFrame],
+        analysis_finished: threading.Event,
+        errors: list[BaseException],
+        capture_config: AudioCaptureConfig,
+    ) -> None:
+        """React immediately to analysis and bridge genuine gaps at 30 Hz."""
+
+        fallback_period_s = 1.0 / 30.0
+        packet_period_s = (
+            capture_config.chunk_frames / capture_config.sample_rate
+        )
+        stale_threshold_s = max(
+            fallback_period_s, packet_period_s * 1.25
+        )
+        fallback_at = time.monotonic() + stale_threshold_s
+        active: _AnalyzedControlFrame | None = None
+        try:
+            while not self._stop.is_set():
+                if analysis_finished.is_set() and control_queue.empty():
+                    return
+                newest: _AnalyzedControlFrame | None = None
+                # The 30 Hz clock is faster than the 23.4 Hz PCM source. Keep
+                # ordinary arecord/CPU bursts in FIFO order so no beat or
+                # structural evidence is discarded. Collapse only a genuinely
+                # stale backlog that already exceeds a quarter second.
+                if control_queue.qsize() > 8:
+                    while control_queue.qsize() > 2:
+                        try:
+                            newest = control_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        with self._live_state_lock:
+                            self._control_queue_drops += 1
+                timeout = max(0.0, fallback_at - time.monotonic())
+                try:
+                    newest = control_queue.get(timeout=timeout)
+                except queue.Empty:
+                    newest = None
+                with self._live_state_lock:
+                    self._control_queue_depth = control_queue.qsize()
+                fresh_analysis = newest is not None
+                if newest is not None:
+                    active = newest
+                    late_ms = 0.0
+                    fallback_at = time.monotonic() + stale_threshold_s
+                else:
+                    now = time.monotonic()
+                    late_ms = max(0.0, (now - fallback_at) * 1000.0)
+                    fallback_at = now + fallback_period_s
+                if active is None:
+                    continue
+
+                if fresh_analysis and active.timeline_discontinuity:
+                    runtime.notify_timeline_discontinuity()
+                if fresh_analysis and active.audio_discontinuity:
+                    runtime.notify_audio_discontinuity()
+                # Even a fresh FIFO result may have waited through a short
+                # burst. Resolve its phase on the authoritative source clock
+                # so output does not deliberately reproduce queue latency.
+                observation = self._extrapolate_control_observation(
+                    active.observation, capture_config
+                )
+                raw_observation = replace(
+                    active.raw_observation,
+                    timestamp_s=observation.timestamp_s,
+                    beat_phase=observation.beat_phase,
+                    bar_phase=observation.bar_phase,
+                    beat_pulse=observation.beat_pulse,
+                    onset_strength=observation.onset_strength,
+                    novelty=observation.novelty,
+                )
+                stage_ms = dict(active.analysis_stages_ms)
+                stage_started = time.perf_counter()
+                runtime.set_structure_context(**active.runtime_context)
+                self._refresh_recalled_choreography(runtime, observation)
+                frame = runtime.step(observation)
+                stage_ms["runtime"] = (
+                    time.perf_counter() - stage_started
+                ) * 1000.0
+                stage_started = time.perf_counter()
+                self._accept_runtime_frame(
+                    observation,
+                    frame,
+                    audio_metrics=(
+                        active.audio_metrics if fresh_analysis else None
+                    ),
+                    audio_bytes=(active.audio_bytes if fresh_analysis else 0),
+                    training_audio_frame=(
+                        active.training_audio_frame
+                        if fresh_analysis
+                        else None
+                    ),
+                    raw_observation=raw_observation,
+                )
+                stage_ms["publish"] = (
+                    time.perf_counter() - stage_started
+                ) * 1000.0
+                if fresh_analysis:
+                    self._record_live_pipeline_timing(
+                        stage_ms,
+                        total_ms=(
+                            time.perf_counter()
+                            - active.analysis_started_perf_s
+                        ) * 1000.0,
+                        budget_ms=(
+                            active.audio_metrics.frame_count
+                            * 1000.0
+                            / capture_config.sample_rate
+                        ),
+                    )
+                with self._live_state_lock:
+                    self._control_ticks += 1
+                    if not fresh_analysis:
+                        self._control_interpolated_ticks += 1
+                    self._control_maximum_late_ms = max(
+                        self._control_maximum_late_ms, late_ms
+                    )
+        except BaseException as error:
+            errors.append(error)
+            self._stop.set()
+
+    def _extrapolate_control_observation(
+        self,
+        observation: MusicalObservation,
+        capture_config: AudioCaptureConfig,
+    ) -> MusicalObservation:
+        """Advance a short lighting tick on the physical sample clock."""
+
+        target_timestamp = observation.timestamp_s
+        capture = self._active_audio_capture
+        diagnostics = capture.diagnostics if capture is not None else {}
+        origin = diagnostics.get("sample_clock_origin_s")
+        source_frames = diagnostics.get("source_frames")
+        source_age_ms = diagnostics.get("last_packet_age_ms")
+        if (
+            origin is not None
+            and source_frames is not None
+            and source_age_ms is not None
+            and float(source_age_ms) <= 750.0
+        ):
+            target_timestamp = max(
+                target_timestamp,
+                float(origin)
+                + float(source_frames) / capture_config.sample_rate,
+            )
+        elapsed = max(0.0, target_timestamp - observation.timestamp_s)
+        if elapsed <= 0.0:
+            return observation
+        bpm = observation.bpm
+        beat_phase = observation.beat_phase
+        bar_phase = observation.bar_phase
+        beat_pulse = observation.beat_pulse * math.exp(-elapsed / 0.14)
+        if bpm is not None and observation.beat_confidence >= 0.10:
+            advanced_beats = elapsed * bpm / 60.0
+            beat_phase = (beat_phase + advanced_beats) % 1.0
+            bar_phase = (bar_phase + advanced_beats / 4.0) % 1.0
+            seconds_from_beat = beat_phase * 60.0 / bpm
+            beat_pulse = max(
+                beat_pulse,
+                math.exp(-seconds_from_beat / 0.14),
+            )
+        return replace(
+            observation,
+            timestamp_s=target_timestamp,
+            beat_phase=beat_phase,
+            bar_phase=bar_phase,
+            beat_pulse=clamp(beat_pulse, 0.0, 1.0),
+            onset_strength=observation.onset_strength
+            * math.exp(-elapsed / 0.12),
+            novelty=observation.novelty * math.exp(-elapsed / 0.30),
+        )
+
+    def _start_training_preparation(self, session_id: str | None = None) -> None:
         """Build verified recording identities and queue teachers off-thread."""
+        requested_session = str(session_id or self._session_id)
         with self._lock:
             running = self._training_prepare_thread
             if running is not None and running.is_alive():
                 self._training_prepare_pending = True
+                self._training_prepare_pending_session = requested_session
                 self._add_event(
                     "memory",
                     "Offline preparation is already processing a prior capture",
@@ -1374,30 +3056,41 @@ class LumenApplication:
                 return
             thread = threading.Thread(
                 target=self._prepare_training_capture,
+                args=(requested_session,),
                 name="lumen-offline-preparation",
                 daemon=True,
             )
             self._training_prepare_thread = thread
             thread.start()
 
-    def _prepare_training_capture(self) -> None:
+    def _prepare_training_capture(self, session_id: str) -> None:
         try:
-            result = export_training_dataset(
-                self.memory, self.training_root
+            # The live writers no longer trigger SQLite auto-checkpoints. Fold
+            # committed pages from this run before scanning its compact track
+            # identities, entirely on the preparation worker.
+            self.memory.checkpoint("PASSIVE")
+            result = export_research_session_index(
+                self.memory, self.training_root, session_id
             )
             research = ResearchJobCoordinator(
                 self.memory,
                 training_root=self.training_root,
                 research_root=self.training_root / "research",
-            ).prepare_export(result["path"], queue_songformer=True)
+            ).prepare_export(result["path"], queue_songformer=False)
+            consensus = self.memory.refresh_operator_structure_consensus()
+            self.memory.mark_research_session_prepared(
+                session_id, result["path"]
+            )
+            training_history = self.memory.training_summary()
             with self._lock:
                 self._last_training_export = result["path"]
-                self._training_history = self.memory.training_summary()
+                self._training_history = training_history
                 self._add_event(
                     "memory",
                     (
                         "Prepared captured songs and queued "
-                        f"{research['jobs_queued']} offline teacher job(s)"
+                        f"{research['jobs_queued']} offline teacher job(s); "
+                        f"rebuilt {consensus['songs']} corrected song timeline(s)"
                     ),
                 )
                 self._status_sequence += 1
@@ -1411,44 +3104,63 @@ class LumenApplication:
         finally:
             with self._lock:
                 rerun = self._training_prepare_pending
+                pending_session = self._training_prepare_pending_session
                 self._training_prepare_pending = False
+                self._training_prepare_pending_session = None
                 self._training_prepare_thread = None
             if rerun and not self._stop.is_set():
-                self._start_training_preparation()
+                self._start_training_preparation(pending_session)
 
     def _training_frame_payload(
         self,
         observation: MusicalObservation,
-        frame: RuntimeFrame,
+        frame: RuntimeFrame | None,
         audio_metrics: AudioInputMetrics | None = None,
+        *,
+        raw_observation: MusicalObservation | None = None,
+        captured_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        decision = asdict(frame.decision)
-        decision["gesture"] = frame.decision.gesture.value
+        decision: dict[str, Any] | None = None
+        if frame is not None:
+            decision = asdict(frame.decision)
+            decision["gesture"] = frame.decision.gesture.value
+        context = captured_context or {}
+        captured_media = context.get("media", self.media)
         media: dict[str, Any] | None = None
-        if self.media is not None:
+        if captured_media is not None:
             media = {
-                "provider": self.media.provider,
-                "provider_item_id": self.media.provider_item_id,
-                "title": self.media.title,
-                "artists": list(self.media.artists),
-                "album": self.media.album,
-                "duration_ms": self.media.duration_ms,
-                "is_playing": self.media.is_playing,
-                "device_name": self.media.device_name,
+                "provider": captured_media.provider,
+                "provider_item_id": captured_media.provider_item_id,
+                "title": captured_media.title,
+                "artists": list(captured_media.artists),
+                "album": captured_media.album,
+                "duration_ms": captured_media.duration_ms,
+                "is_playing": captured_media.is_playing,
+                "device_name": captured_media.device_name,
             }
+        source_observation = raw_observation or observation
         semantic_payload = (
-            self._semantic_audio_payload(observation, audio_metrics)
+            self._semantic_audio_payload(source_observation, audio_metrics)
             if audio_metrics is not None
             else {"observation": asdict(observation)}
         )
         return {
             "schema": "lumen_semantic_frame_v1",
+            "raw_observation": asdict(source_observation),
+            "resolved_observation": asdict(observation),
             "observation": semantic_payload["observation"],
             "audio_metrics": semantic_payload.get("audio_metrics", {}),
             "decision": decision,
-            "controls": asdict(self.controls),
+            "controls": asdict(context.get("controls", self.controls)),
             "media": media,
-            "structure_model": self._student_prediction,
+            "structure_model": deepcopy(
+                context.get("structure_model", self._student_prediction)
+            ),
+            "structure_resolution": deepcopy(
+                context.get(
+                    "structure_resolution", self._effective_structure
+                )
+            ),
             "solutions": [
                 {
                     "fixture_id": solution.fixture_id,
@@ -1456,13 +3168,24 @@ class LumenApplication:
                     "tilt_deg": solution.tilt_deg,
                     "branch": solution.branch,
                 }
-                for solution in frame.solutions
+                for solution in (() if frame is None else frame.solutions)
             ],
-            "fixture_dmx": self._fixture_dmx_snapshot(frame),
-            "choreography_runtime": (
-                self._runtime.choreography_snapshot()
-                if self._runtime is not None
-                else None
+            "fixture_dmx": (
+                [] if frame is None else self._fixture_dmx_snapshot(frame)
+            ),
+            "effective_outputs": (
+                []
+                if frame is None
+                else [output.as_dict() for output in frame.effective_outputs]
+            ),
+            "choreography_runtime": deepcopy(
+                context.get("choreography_runtime")
+                if captured_context is not None
+                else (
+                    self._runtime.choreography_snapshot()
+                    if self._runtime is not None
+                    else None
+                )
             ),
             "target_provenance": (
                 "heuristic_runtime_baseline_not_ground_truth"
@@ -1527,6 +3250,12 @@ class LumenApplication:
         index = 0
         while not self._stop.wait(0.12):
             observation = _demo_observation(index)
+            self._set_non_audio_structure(
+                observation, source="simulated_demo"
+            )
+            runtime.set_structure_context(
+                **self._resolved_runtime_context()
+            )
             self._accept_runtime_frame(observation, runtime.step(observation))
             index += 1
 
@@ -1553,6 +3282,12 @@ class LumenApplication:
                     )
                 self._apply_rehearsal_to_runtime(runtime)
             observation = _rehearsal_observation(elapsed, bpm, intensity)
+            self._set_non_audio_structure(
+                observation, source="generated_rehearsal"
+            )
+            runtime.set_structure_context(
+                **self._resolved_runtime_context()
+            )
             self._accept_runtime_frame(observation, runtime.step(observation))
 
     def _accept_runtime_frame(
@@ -1563,8 +3298,28 @@ class LumenApplication:
         audio_metrics: AudioInputMetrics | None = None,
         audio_bytes: int = 0,
         training_audio_frame: int | None = None,
+        raw_observation: MusicalObservation | None = None,
     ) -> None:
-        with self._lock:
+        # This is a small semantic snapshot (two planner lanes and the three
+        # effective fixture outputs), not persistence work. Capture it before
+        # publishing the RuntimeFrame so dashboard/feedback readers can never
+        # observe a new decision beside missing or previous choreography.
+        active_runtime = self._runtime
+        current_choreography_snapshot = (
+            active_runtime.choreography_snapshot()
+            if active_runtime is not None
+            else None
+        )
+        emit_trace = False
+        emit_decision = False
+        trace_session_id = ""
+        trace_song_id: int | None = None
+        trace_controls = replace(self.controls)
+        trace_structure_model: dict[str, Any] | None = None
+        trace_structure_resolution: dict[str, Any] = {}
+        runtime: PerformanceRuntime | None = None
+        trace_choreography_snapshot: dict[str, Any] | None = None
+        with self._live_state_lock:
             if audio_metrics is not None:
                 packet_time = time.monotonic()
                 if self._audio_capture_started_at is None:
@@ -1575,9 +3330,13 @@ class LumenApplication:
                 self._audio_frames += audio_metrics.frame_count
                 self._audio_bytes += audio_bytes
                 self._audio_metrics = audio_metrics
-            self._training_audio_frame = training_audio_frame
+            if audio_metrics is not None or training_audio_frame is not None:
+                self._training_audio_frame = training_audio_frame
             self.observation = observation
             self.frame = frame
+            self._runtime_choreography_snapshot = (
+                current_choreography_snapshot
+            )
             if (
                 self._last_analysis_history_at is None
                 or observation.timestamp_s - self._last_analysis_history_at >= 0.095
@@ -1608,38 +3367,16 @@ class LumenApplication:
                 or observation.timestamp_s - self._last_trace_timestamp >= 0.48
             ):
                 self._last_trace_timestamp = observation.timestamp_s
-                trace_decision = asdict(frame.decision)
-                trace_decision["gesture"] = frame.decision.gesture.value
-                try:
-                    self._trace_queue.put_nowait(
-                        {
-                            "_kind": "performance",
-                            "session_id": self._session_id,
-                            "song_id": self.song_id,
-                            "position_ms": self._media_position_ms(),
-                            "payload": {
-                                "observation": asdict(observation),
-                                "decision": trace_decision,
-                                "controls": asdict(self.controls),
-                                "solutions": [
-                                    {
-                                        "fixture_id": solution.fixture_id,
-                                        "pan_deg": solution.pan_deg,
-                                        "tilt_deg": solution.tilt_deg,
-                                        "branch": solution.branch,
-                                    }
-                                    for solution in frame.solutions
-                                ],
-                                "choreography_runtime": (
-                                    self._runtime.choreography_snapshot()
-                                    if self._runtime is not None
-                                    else None
-                                ),
-                            },
-                        }
-                    )
-                except queue.Full:
-                    pass
+                emit_trace = True
+                trace_session_id = self._session_id
+                trace_song_id = self.song_id
+                trace_controls = replace(self.controls)
+                # Both dictionaries are replaced, not mutated, by the
+                # analysis path. Capturing their current references is enough;
+                # the trace worker performs the expensive deep copy.
+                trace_structure_model = self._student_prediction
+                trace_structure_resolution = self._effective_structure
+                runtime = active_runtime
             gesture = frame.decision.gesture.value
             if gesture != self._last_gesture:
                 self._last_gesture = gesture
@@ -1648,20 +3385,100 @@ class LumenApplication:
                     f"{gesture.title()}: {frame.decision.reason.split('.')[0]}.",
                 )
                 if self.song_id is not None:
-                    try:
-                        self._trace_queue.put_nowait(
-                            {
-                                "_kind": "decision",
-                                "decision": frame.decision,
-                                "song_id": self.song_id,
-                                "position_ms": self._media_position_ms(),
-                                "observation": observation,
-                            }
-                        )
-                    except queue.Full:
-                        pass
+                    emit_decision = True
+                    trace_song_id = self.song_id
             self._status_sequence += 1
+        trace_position = self._media_position_ms(
+            at_monotonic_s=(
+                observation.timestamp_s
+                if audio_metrics is not None
+                else None
+            )
+        )
+        if emit_trace:
+            # Reuse the exact snapshot published with this RuntimeFrame. JSON
+            # and deep-copy work remains deferred to the trace writer.
+            trace_choreography_snapshot = current_choreography_snapshot
+            try:
+                self._trace_queue.put_nowait(
+                    {
+                        "_kind": "performance_seed",
+                        "session_id": trace_session_id,
+                        "song_id": trace_song_id,
+                        "position_ms": trace_position,
+                        "frame": frame,
+                        "observation": observation,
+                        "raw_observation": raw_observation or observation,
+                        "audio_metrics": audio_metrics,
+                        "controls": trace_controls,
+                        "structure_model": trace_structure_model,
+                        "structure_resolution": trace_structure_resolution,
+                        "choreography_snapshot": (
+                            trace_choreography_snapshot
+                        ),
+                    }
+                )
+            except queue.Full:
+                with self._live_state_lock:
+                    self._trace_queue_drops += 1
+        if emit_decision and trace_song_id is not None:
+            try:
+                self._trace_queue.put_nowait(
+                    {
+                        "_kind": "decision",
+                        "decision": frame.decision,
+                        "song_id": trace_song_id,
+                        "position_ms": trace_position,
+                        "observation": observation,
+                    }
+                )
+            except queue.Full:
+                with self._live_state_lock:
+                    self._trace_queue_drops += 1
         self._schedule_spotify_poll()
+        self._schedule_memory_context_poll()
+
+    def _record_live_pipeline_timing(
+        self,
+        stages_ms: dict[str, float],
+        *,
+        total_ms: float,
+        budget_ms: float,
+    ) -> None:
+        """Publish inexpensive evidence of audio-to-DMX deadline health."""
+
+        rounded_stages = {
+            name: round(value, 3) for name, value in stages_ms.items()
+        }
+        with self._live_state_lock:
+            # Copy-on-write lets the dashboard serialize the previously
+            # published timing record without contending with the live path.
+            timing = {
+                **self._live_pipeline_timing,
+                "maximum_stages_ms": dict(
+                    self._live_pipeline_timing.get(
+                        "maximum_stages_ms", {}
+                    )
+                ),
+            }
+            timing["packets"] = int(timing.get("packets", 0)) + 1
+            timing["last_total_ms"] = round(total_ms, 3)
+            timing["maximum_total_ms"] = round(
+                max(float(timing.get("maximum_total_ms", 0.0)), total_ms),
+                3,
+            )
+            timing["budget_ms"] = round(budget_ms, 3)
+            if total_ms > budget_ms:
+                timing["deadline_misses"] = int(
+                    timing.get("deadline_misses", 0)
+                ) + 1
+            timing["stages_ms"] = rounded_stages
+            maximums = timing.setdefault("maximum_stages_ms", {})
+            for name, value in stages_ms.items():
+                maximums[name] = round(
+                    max(float(maximums.get(name, 0.0)), value), 3
+                )
+            self._live_pipeline_timing = timing
 
     def _schedule_spotify_poll(self) -> None:
         """Keep network metadata work off the real-time audio/DMX loop."""
@@ -1685,16 +3502,43 @@ class LumenApplication:
         self._audio_capture_started_at = None
         self._audio_last_packet_at = None
         self._audio_packet_times.clear()
+        self._audio_queue_depth = 0
+        self._audio_queue_max_depth = 0
+        self._audio_queue_delay_ms = 0.0
+        self._audio_capture_diagnostics = {}
+        self._active_audio_capture = None
+        self._control_queue_depth = 0
+        self._control_queue_max_depth = 0
+        self._control_queue_drops = 0
+        self._control_ticks = 0
+        self._control_interpolated_ticks = 0
+        self._control_maximum_late_ms = 0.0
+        self._tempo_diagnostics = {}
+        self._live_pipeline_timing = {
+            "packets": 0,
+            "last_total_ms": 0.0,
+            "maximum_total_ms": 0.0,
+            "deadline_misses": 0,
+            "stages_ms": {},
+            "maximum_stages_ms": {},
+        }
         self._analysis_history.clear()
         self._last_analysis_history_at = None
 
     def _audio_snapshot_unlocked(self, running: bool) -> dict[str, Any]:
         now = time.monotonic()
-        last_age_ms = (
+        processed_age_ms = (
             None
             if self._audio_last_packet_at is None
             else max(0.0, (now - self._audio_last_packet_at) * 1000.0)
         )
+        active_capture = self._active_audio_capture
+        capture_diagnostics = (
+            active_capture.diagnostics
+            if active_capture is not None
+            else deepcopy(self._audio_capture_diagnostics)
+        )
+        source_age_ms = capture_diagnostics.get("last_packet_age_ms")
         packet_rate_hz = 0.0
         if len(self._audio_packet_times) >= 2:
             elapsed = self._audio_packet_times[-1] - self._audio_packet_times[0]
@@ -1718,14 +3562,35 @@ class LumenApplication:
             state = "inactive"
             label = "INPUT TEST NOT RUNNING"
             detail = "Start Monitor to test the physical line input without DMX output."
-        elif self._audio_packets == 0:
+        elif self._audio_packets == 0 and not capture_diagnostics.get(
+            "packets_read"
+        ):
             state = "waiting"
             label = "WAITING FOR PCM"
             detail = f"ALSA is opening {self.audio_device}; no packet has arrived yet."
-        elif last_age_ms is not None and last_age_ms > 750:
+        elif (
+            source_age_ms is not None
+            and float(source_age_ms) > 750.0
+        ):
             state = "stale"
-            label = "PCM STREAM STALLED"
-            detail = f"The last audio packet arrived {last_age_ms / 1000.0:.1f}s ago."
+            label = "PCM SOURCE STALLED"
+            detail = (
+                "The capture reader has not received physical PCM for "
+                f"{float(source_age_ms) / 1000.0:.1f}s."
+            )
+        elif (
+            processed_age_ms is not None
+            and processed_age_ms > 750.0
+        ) or (
+            self._audio_packets == 0
+            and int(capture_diagnostics.get("packets_read") or 0) > 0
+        ):
+            state = "pipeline_stale"
+            label = "ANALYSIS PIPELINE STALLED"
+            detail = (
+                "Fresh physical PCM is still being captured, but the live "
+                "analysis/control pipeline has not completed its next frame."
+            )
         elif self._audio_metrics.clipped_samples:
             state = "clipping"
             label = "SIGNAL CLIPPING"
@@ -1765,7 +3630,29 @@ class LumenApplication:
             "bytes_received": self._audio_bytes,
             "packet_rate_hz": packet_rate_hz,
             "expected_packet_rate_hz": 48_000 / 2_048,
-            "last_packet_age_ms": last_age_ms,
+            "capture_queue_depth": self._audio_queue_depth,
+            "capture_queue_max_depth": self._audio_queue_max_depth,
+            "capture_queue_delay_ms": self._audio_queue_delay_ms,
+            "capture_queue": capture_diagnostics,
+            "control_clock": {
+                "mode": "analysis_event_driven_with_sample_clock_bridge",
+                "rate_hz": 30.0,
+                "fallback_rate_hz": 30.0,
+                "queue_depth": self._control_queue_depth,
+                "maximum_queue_depth": self._control_queue_max_depth,
+                "coalesced_frames": self._control_queue_drops,
+                "ticks": self._control_ticks,
+                "interpolated_ticks": self._control_interpolated_ticks,
+                "maximum_late_ms": round(
+                    self._control_maximum_late_ms, 3
+                ),
+                "timing_authority": "audio_sample_clock",
+            },
+            "tempo_clock": deepcopy(self._tempo_diagnostics),
+            "live_pipeline": deepcopy(self._live_pipeline_timing),
+            "last_packet_age_ms": processed_age_ms,
+            "last_processed_frame_age_ms": processed_age_ms,
+            "last_source_packet_age_ms": source_age_ms,
             "capture_uptime_s": (
                 None
                 if self._audio_capture_started_at is None
@@ -1800,6 +3687,7 @@ class LumenApplication:
             ),
             choreography_model=self._choreography_model,
             motion_tunings=self.motion_tunings,
+            center_motion_tunings=self.center_motion_tunings,
         )
         runtime.replace_feedback(self._feedback_biases)
         runtime.set_media_context(
@@ -1852,13 +3740,6 @@ class LumenApplication:
         with self._lock:
             candidate = replace(self.rehearsal)
             candidate.patch(values)
-            if candidate.scope.startswith("fixture:"):
-                fixture_id = candidate.scope[8:]
-                if not any(
-                    fixture.fixture_id == fixture_id
-                    for fixture in (*self.rig.fixtures, *self.rig.auxiliary_fixtures)
-                ):
-                    raise ValueError("rehearsal fixture is not in the active rig")
             running_rehearsal = (
                 self._thread is not None
                 and self._thread.is_alive()
@@ -1946,59 +3827,61 @@ class LumenApplication:
         return self.snapshot()
 
     def patch_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            if "audio_device" in payload:
-                if self._thread is not None and self._thread.is_alive():
-                    raise RuntimeError(
-                        "stop the engine before changing the audio input"
-                    )
-                audio_device = str(payload["audio_device"]).strip()
-                if not audio_device:
-                    raise ValueError("audio_device must not be empty")
-                self.audio_device = audio_device[:160]
-                self._settings["audio_device"] = self.audio_device
-                self._add_event(
-                    "system", f"Audio input changed to {self.audio_device}"
-                )
-            if "spotify_client_id" in payload:
-                client_id = str(payload["spotify_client_id"]).strip()
-                if not client_id:
-                    raise ValueError("spotify_client_id must not be empty")
-                self.spotify_client_id = client_id[:256]
-                self._settings["spotify_client_id"] = self.spotify_client_id
-            if (
-                "training_capture_enabled" in payload
-                or "training_max_gb" in payload
-            ):
-                if self._thread is not None and self._thread.is_alive():
-                    raise RuntimeError(
-                        "stop the engine before changing training capture settings"
-                    )
-                if "training_capture_enabled" in payload:
-                    self.training_capture_enabled = bool(
-                        payload["training_capture_enabled"]
-                    )
-                    self._settings["training_capture_enabled"] = (
-                        self.training_capture_enabled
-                    )
-                if "training_max_gb" in payload:
-                    training_max_gb = float(payload["training_max_gb"])
-                    if not 1.0 <= training_max_gb <= 800.0:
-                        raise ValueError(
-                            "training storage limit must be between 1 and 800 GB"
+        with self._configuration_lock:
+            with self._lock:
+                if "audio_device" in payload:
+                    if self._thread is not None and self._thread.is_alive():
+                        raise RuntimeError(
+                            "stop the engine before changing the audio input"
                         )
-                    self.training_max_gb = training_max_gb
-                    self._settings["training_max_gb"] = training_max_gb
-                self._add_event(
-                    "memory",
-                    (
-                        "Training audio capture enabled"
-                        if self.training_capture_enabled
-                        else "Training audio capture disabled"
-                    ),
-                )
-            self._save_settings()
-            self._status_sequence += 1
+                    audio_device = str(payload["audio_device"]).strip()
+                    if not audio_device:
+                        raise ValueError("audio_device must not be empty")
+                    self.audio_device = audio_device[:160]
+                    self._settings["audio_device"] = self.audio_device
+                    self._add_event(
+                        "system", f"Audio input changed to {self.audio_device}"
+                    )
+                if "spotify_client_id" in payload:
+                    client_id = str(payload["spotify_client_id"]).strip()
+                    if not client_id:
+                        raise ValueError("spotify_client_id must not be empty")
+                    self.spotify_client_id = client_id[:256]
+                    self._settings["spotify_client_id"] = self.spotify_client_id
+                if (
+                    "training_capture_enabled" in payload
+                    or "training_max_gb" in payload
+                ):
+                    if self._thread is not None and self._thread.is_alive():
+                        raise RuntimeError(
+                            "stop the engine before changing training capture settings"
+                        )
+                    if "training_capture_enabled" in payload:
+                        self.training_capture_enabled = bool(
+                            payload["training_capture_enabled"]
+                        )
+                        self._settings["training_capture_enabled"] = (
+                            self.training_capture_enabled
+                        )
+                    if "training_max_gb" in payload:
+                        training_max_gb = float(payload["training_max_gb"])
+                        if not 1.0 <= training_max_gb <= 800.0:
+                            raise ValueError(
+                                "training storage limit must be between 1 and 800 GB"
+                            )
+                        self.training_max_gb = training_max_gb
+                        self._settings["training_max_gb"] = training_max_gb
+                    self._add_event(
+                        "memory",
+                        (
+                            "Training audio capture enabled"
+                            if self.training_capture_enabled
+                            else "Training audio capture disabled"
+                        ),
+                    )
+                settings = dict(self._settings)
+                self._status_sequence += 1
+            self._save_settings(settings)
         return {
             "settings": self.operator_settings(),
             "status": self.snapshot(),
@@ -2042,11 +3925,12 @@ class LumenApplication:
                 self.memory,
                 training_root=self.training_root,
                 research_root=self.training_root / "research",
-            ).prepare_export(result["path"], queue_songformer=True)
+            ).prepare_export(result["path"], queue_songformer=False)
             result["research"] = research
+            training_history = self.memory.training_summary()
             with self._lock:
                 self._last_training_export = result["path"]
-                self._training_history = self.memory.training_summary()
+                self._training_history = training_history
                 self._add_event(
                     "memory", "Built neural-training dataset manifest"
                 )
@@ -2056,23 +3940,43 @@ class LumenApplication:
             self._training_export_lock.release()
 
     def research_status(self) -> dict[str, Any]:
+        # Status polling is also the recovery path for a console that remains
+        # open when an external CLI worker dies. Healthy leases are retained;
+        # dead or stale leases are atomically requeued and immediately stop
+        # holding the Analyze/Train/Live controls disabled.
+        self._recover_abandoned_research_jobs()
         result = self.research.status()
-        training = training_readiness(
-            self.memory,
-            research_root=self.training_root / "research",
+        # ResearchManager already computed readiness. Repeating it doubled a
+        # multi-second SQLite/filesystem scan on every bootstrap request.
+        training_payload = result.get("training")
+        training = (
+            deepcopy(training_payload)
+            if isinstance(training_payload, dict)
+            else training_readiness(
+                self.memory,
+                research_root=self.training_root / "research",
+            )
         )
+        # SQLite can wait on an offline writer. Never perform that wait while
+        # holding the lock used to publish audio/DMX state.
+        running_jobs = [
+            job
+            for job in self.memory.list_analysis_jobs(limit=100_000)
+            if job["status"] == "running"
+        ]
         with self._lock:
             worker = self._research_worker_thread
-            worker_running = bool(worker is not None and worker.is_alive())
+            local_worker_running = bool(
+                worker is not None and worker.is_alive()
+            )
             preparation = self._training_prepare_thread
             preparation_running = bool(
                 preparation is not None and preparation.is_alive()
             )
-            running_jobs = [
-                job
-                for job in self.memory.list_analysis_jobs(limit=100_000)
-                if job["status"] == "running"
-            ]
+            external_worker_running = bool(
+                running_jobs and not local_worker_running
+            )
+            worker_running = local_worker_running or external_worker_running
             current_job = running_jobs[0] if running_jobs else None
             progress = dict(self._research_worker_progress)
             progress["current_job_type"] = (
@@ -2089,10 +3993,12 @@ class LumenApplication:
                 else {}
             )
             cancel_requested = bool(
-                worker_running and self._research_cancel.is_set()
+                local_worker_running and self._research_cancel.is_set()
             )
             result["worker"] = {
                 "running": worker_running,
+                "externally_managed": external_worker_running,
+                "cancel_supported": local_worker_running,
                 "phase": (
                     "pausing"
                     if cancel_requested
@@ -2109,18 +4015,28 @@ class LumenApplication:
                 "running": preparation_running,
                 "pending": bool(self._training_prepare_pending),
             }
+            may_reload_model = bool(
+                not worker_running
+                and self.engine_phase in {"ready", "fault"}
+            )
+        # Model file loading may decompress/allocate arrays and is not part of
+        # the audio-state critical section.
+        if may_reload_model and self._student_artifact_changed():
+            self._load_student_model()
+        with self._lock:
             runtime_state = (
-                "active"
-                if self._student_model is not None
-                else "error"
+                "error"
                 if self._student_model_error
-                else "awaiting_training"
+                else self._student_model_state
             )
             model = training.setdefault("model", {})
             model["artifact_present"] = bool(model.get("active"))
             model["active"] = self._student_model is not None
             model["runtime_state"] = runtime_state
             model["runtime_error"] = self._student_model_error
+            model["runtime_gate_reasons"] = list(
+                self._student_model_gate_reasons
+            )
         result["training"] = training
         return result
 
@@ -2144,7 +4060,12 @@ class LumenApplication:
         return recovered
 
     def analyze_training_data(self) -> dict[str, Any]:
-        """Prepare all captures, queue both teachers, and resume the batch."""
+        """Prepare captures, queue active EDMFormer work, and resume it."""
+        self._recover_abandoned_research_jobs()
+        external_research_running = any(
+            job["status"] == "running"
+            for job in self.memory.list_analysis_jobs(limit=100_000)
+        )
         # Reject a duplicate/unsafe request before reconstructing WAV files or
         # rebuilding the export.  The browser normally disables this button,
         # but the HTTP server is threaded and a second client (or double tap)
@@ -2161,6 +4082,11 @@ class LumenApplication:
             worker = self._research_worker_thread
             if worker is not None and worker.is_alive():
                 raise RuntimeError("an offline research job is already running")
+            if external_research_running:
+                raise RuntimeError(
+                    "offline research is already running in another "
+                    "Lumen process"
+                )
             preparation = self._training_prepare_thread
             if preparation is not None and preparation.is_alive():
                 raise RuntimeError(
@@ -2170,25 +4096,36 @@ class LumenApplication:
         # Recovery must precede export preparation and the queued-job count;
         # otherwise a crash-stranded `running` row can make Analyze appear to
         # have no resumable work.
-        self._recover_abandoned_research_jobs()
-        export = self.export_training_data()
+        export = self._prepare_unindexed_research_captures()
         queued = sum(
             job["status"] == "queued"
-            and job["job_type"] in {EDMFORMER_JOB, SONGFORMER_JOB}
+            and job["job_type"] == EDMFORMER_JOB
             for job in self.memory.list_analysis_jobs(limit=100_000)
         )
         if not queued:
+            ineligible = int(export.get("recordings_ineligible") or 0)
+            partial = int(export.get("recordings_partial") or 0)
+            unknown = int(export.get("recordings_unknown") or 0)
+            if ineligible:
+                message = (
+                    f"Found {ineligible} captured recording(s), but none were "
+                    "complete enough for whole-song structure analysis"
+                    f" ({partial} partial, {unknown} unidentified). The audio "
+                    "is retained; record complete songs and analyze again."
+                )
+            else:
+                message = (
+                    "No new or retryable full-song recordings are queued for "
+                    "structure analysis."
+                )
             return {
                 "export": export,
                 "research": self.research_status(),
                 "started": False,
-                "message": (
-                    "No new or retryable full-song recordings are queued for "
-                    "structure analysis."
-                ),
+                "message": message,
             }
         research = self.start_research_worker(
-            {"job_types": [EDMFORMER_JOB, SONGFORMER_JOB]}
+            {"job_types": [EDMFORMER_JOB]}
         )
         return {
             "export": export,
@@ -2196,14 +4133,79 @@ class LumenApplication:
             "started": True,
         }
 
+    def _prepare_unindexed_research_captures(self) -> dict[str, Any]:
+        """Incrementally index captures that have never reached research."""
+
+        if not self._training_export_lock.acquire(blocking=False):
+            raise RuntimeError("a training dataset build is already in progress")
+        try:
+            prepared_ids = self.memory.research_prepared_session_ids()
+            sessions = [
+                session
+                for session in self.memory.training_sessions()
+                if str(session.get("status")) in {"complete", "quota"}
+                and int(session.get("frames_written") or 0) > 0
+                and str(session["id"]) not in prepared_ids
+            ]
+            coordinator = ResearchJobCoordinator(
+                self.memory,
+                training_root=self.training_root,
+                research_root=self.training_root / "research",
+            )
+            exports: list[str] = []
+            recordings = jobs_queued = skipped = 0
+            ineligible = partial = unknown = 0
+            for session in sessions:
+                session_id = str(session["id"])
+                result = export_research_session_index(
+                    self.memory, self.training_root, session_id
+                )
+                research = coordinator.prepare_export(
+                    result["path"], queue_songformer=False
+                )
+                self.memory.refresh_operator_structure_consensus()
+                self.memory.mark_research_session_prepared(
+                    session_id, result["path"]
+                )
+                exports.append(str(result["path"]))
+                recordings += int(research["recordings"])
+                jobs_queued += int(research["jobs_queued"])
+                skipped += len(research["teachers_skipped"])
+                ineligible += int(research.get("recordings_ineligible") or 0)
+                partial += int(research.get("recordings_partial") or 0)
+                unknown += int(research.get("recordings_unknown") or 0)
+            replacements = coordinator.requeue_obsolete_edmformer_jobs()
+            jobs_queued += int(replacements["jobs_queued"])
+            with self._lock:
+                if exports:
+                    self._last_training_export = exports[-1]
+                self._training_history = self.memory.training_summary()
+                self._status_sequence += 1
+            return {
+                "mode": "incremental_research_preparation",
+                "sessions_prepared": len(sessions),
+                "recordings": recordings,
+                "jobs_queued": jobs_queued,
+                "teachers_skipped": skipped,
+                "obsolete_teacher_jobs_requeued": int(
+                    replacements["jobs_queued"]
+                ),
+                "obsolete_teacher_audio_unavailable": list(
+                    replacements["unavailable"]
+                ),
+                "recordings_ineligible": ineligible,
+                "recordings_partial": partial,
+                "recordings_unknown": unknown,
+                "paths": exports,
+            }
+        finally:
+            self._training_export_lock.release()
+
     def start_research_worker(
         self, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         payload = payload or {}
-        requested_types = payload.get("job_types") or [
-            EDMFORMER_JOB,
-            SONGFORMER_JOB,
-        ]
+        requested_types = payload.get("job_types") or [EDMFORMER_JOB]
         allowed_types = {EDMFORMER_JOB, SONGFORMER_JOB, STUDENT_TRAIN_JOB}
         job_types = tuple(str(item) for item in requested_types)
         if not job_types or any(item not in allowed_types for item in job_types):
@@ -2213,6 +4215,15 @@ class LumenApplication:
             maximum_jobs = int(maximum_jobs)
             if not 1 <= maximum_jobs <= 10_000:
                 raise ValueError("maximum_jobs must be between 1 and 10000")
+        self._recover_abandoned_research_jobs()
+        analysis_jobs = self.memory.list_analysis_jobs(limit=100_000)
+        external_research_running = any(
+            job["status"] == "running" for job in analysis_jobs
+        )
+        available = sum(
+            job["status"] == "queued" and job["job_type"] in job_types
+            for job in analysis_jobs
+        )
         with self._lock:
             engine = self._thread
             if (
@@ -2225,17 +4236,17 @@ class LumenApplication:
             worker = self._research_worker_thread
             if worker is not None and worker.is_alive():
                 raise RuntimeError("an offline research job is already running")
+            if external_research_running:
+                raise RuntimeError(
+                    "offline research is already running in another "
+                    "Lumen process"
+                )
             preparation = self._training_prepare_thread
             if preparation is not None and preparation.is_alive():
                 raise RuntimeError(
                     "the last audio capture is still being prepared; wait for "
                     "Audio Laboratory to report that preparation is complete"
                 )
-            self._recover_abandoned_research_jobs()
-            available = sum(
-                job["status"] == "queued" and job["job_type"] in job_types
-                for job in self.memory.list_analysis_jobs(limit=100_000)
-            )
             if not available:
                 raise RuntimeError("there are no queued matching research jobs")
             self._research_worker_last = None
@@ -2278,6 +4289,11 @@ class LumenApplication:
         epochs = int(payload.get("epochs", 30))
         if not 1 <= epochs <= 500:
             raise ValueError("epochs must be between 1 and 500")
+        self._recover_abandoned_research_jobs()
+        external_research_running = any(
+            job["status"] == "running"
+            for job in self.memory.list_analysis_jobs(limit=100_000)
+        )
         with self._lock:
             if self.engine_phase not in {"ready", "fault"}:
                 raise RuntimeError(
@@ -2286,6 +4302,11 @@ class LumenApplication:
             worker = self._research_worker_thread
             if worker is not None and worker.is_alive():
                 raise RuntimeError("an offline research job is already running")
+            if external_research_running:
+                raise RuntimeError(
+                    "offline research is already running in another "
+                    "Lumen process"
+                )
         queued = enqueue_student_training(
             self.memory,
             research_root=self.training_root / "research",
@@ -2430,11 +4451,6 @@ class LumenApplication:
     def _training_snapshot_unlocked(self) -> dict[str, Any]:
         recorder = self._training_recorder
         current = recorder.status() if recorder is not None else None
-        try:
-            disk = shutil.disk_usage(self.training_root.parent)
-            disk_free_bytes = disk.free
-        except OSError:
-            disk_free_bytes = None
         history = dict(self._training_history)
         historical_bytes = int(history.get("bytes", 0))
         current_bytes = int(current.get("bytes_written", 0)) if current else 0
@@ -2442,7 +4458,7 @@ class LumenApplication:
             "enabled": self.training_capture_enabled,
             "path": str(self.training_root),
             "max_bytes": round(self.training_max_gb * 1024**3),
-            "disk_free_bytes": disk_free_bytes,
+            "disk_free_bytes": self._training_disk_free_bytes,
             "current": current,
             "current_linked_feedback": self._training_linked_feedback,
             "current_annotations": self._training_annotations,
@@ -2455,33 +4471,45 @@ class LumenApplication:
             ),
         }
 
+    def _read_training_disk_free(self) -> int | None:
+        try:
+            return int(shutil.disk_usage(self.training_root.parent).free)
+        except OSError:
+            return None
+
     def connect_spotify(self, payload: dict[str, Any]) -> dict[str, Any]:
         client_id = str(
             payload.get("client_id") or self.spotify_client_id
         ).strip()
         if not client_id:
             raise ValueError("paste the Spotify developer client ID first")
-        with self._lock:
-            if (
-                self._spotify_login_thread is not None
-                and self._spotify_login_thread.is_alive()
-            ):
-                raise RuntimeError("Spotify connection is already in progress")
-            self.spotify_client_id = client_id[:256]
-            self._settings["spotify_client_id"] = self.spotify_client_id
-            self._save_settings()
-            self._spotify_login_phase = "connecting"
-            self._spotify_error = None
-            self._spotify_login_thread = threading.Thread(
-                target=self._complete_spotify_login,
-                name="lumen-spotify-login",
-                daemon=True,
-            )
-            self._spotify_login_thread.start()
-            self._add_event(
-                "media", "Opening Spotify authorization in the desktop browser"
-            )
-            self._status_sequence += 1
+        with self._configuration_lock:
+            with self._lock:
+                if (
+                    self._spotify_login_thread is not None
+                    and self._spotify_login_thread.is_alive()
+                ):
+                    raise RuntimeError(
+                        "Spotify connection is already in progress"
+                    )
+                self.spotify_client_id = client_id[:256]
+                self._settings["spotify_client_id"] = self.spotify_client_id
+                settings = dict(self._settings)
+                self._spotify_login_phase = "connecting"
+                self._spotify_error = None
+            self._save_settings(settings)
+            with self._lock:
+                self._spotify_login_thread = threading.Thread(
+                    target=self._complete_spotify_login,
+                    name="lumen-spotify-login",
+                    daemon=True,
+                )
+                self._spotify_login_thread.start()
+                self._add_event(
+                    "media",
+                    "Opening Spotify authorization in the desktop browser",
+                )
+                self._status_sequence += 1
         return {
             "phase": self._spotify_login_phase,
             "message": "Spotify authorization is opening in the desktop browser.",
@@ -2642,7 +4670,27 @@ class LumenApplication:
                 return
             key = f"{media.provider}:{media.provider_item_id}"
             with self._lock:
+                previous_media = self.media
+                expected_position_ms = self._media_position_ms()
                 count_play = key != self._last_media_key
+                same_recording = bool(
+                    previous_media is not None
+                    and media.provider_item_id is not None
+                    and previous_media.provider_item_id
+                    == media.provider_item_id
+                    and previous_media.provider == media.provider
+                )
+                position_delta_ms = (
+                    media.observed_position_ms - expected_position_ms
+                    if same_recording
+                    and media.observed_position_ms is not None
+                    and expected_position_ms is not None
+                    else 0
+                )
+                playback_seek = bool(
+                    same_recording
+                    and abs(position_delta_ms) >= 2_500
+                )
             song_id = self.memory.remember_media(
                 media, count_play=count_play
             )
@@ -2651,13 +4699,34 @@ class LumenApplication:
                 self.song_id = song_id
                 runtime = self._runtime
                 section = self.observation.section
-                if count_play:
+                if count_play or playback_seek:
                     self._analysis_generation += 1
+                    self._cached_structure_prediction = None
+                    self._cached_structure_key = None
+                    self._cached_structure_checked_at = 0.0
+                    self._recalled_choreography_checked_at = 0.0
+                    self._recalled_choreography_ids = ()
+                    self._prepared_recalled_choreography = ()
+                    self._prepared_recalled_ids = ()
+                    self._memory_context_last_poll = 0.0
+                    self._teaching_snapshot_cache = None
+                    self._teaching_snapshot_checked_at = 0.0
+                if count_play:
                     self._last_media_key = key
                     self._add_event(
                         "media", f"Now playing {media.display_name}"
                     )
+                elif playback_seek:
+                    self._add_event(
+                        "media",
+                        (
+                            "Playback position changed; reset causal audio "
+                            "and choreography context"
+                        ),
+                    )
             if runtime is not None:
+                if count_play or playback_seek:
+                    runtime.set_recalled_choreography(())
                 runtime.set_media_context(
                     song_id,
                     section,
@@ -2775,12 +4844,30 @@ class LumenApplication:
         scope = str(payload.get("scope", "overall")).strip().lower()
         if scope not in {"overall", "fixture", "group"}:
             raise ValueError("feedback scope must be overall, group, or fixture")
+        lifetime = str(payload.get("lifetime", "cue")).strip().casefold()
+        if lifetime not in {"cue", "song", "artist", "global"}:
+            raise ValueError(
+                "feedback lifetime must be cue, song, artist, or global"
+            )
         raw_fixture_id = payload.get("fixture_id")
         fixture_id = str(raw_fixture_id).strip() if raw_fixture_id is not None else None
         group_id = str(payload.get("group_id", "")).strip() or None
+        participant_id = str(payload.get("participant_id", "")).strip() or None
+        participant_name = (
+            str(payload.get("participant_name", "")).strip() or None
+        )
+        client_event_id = (
+            str(payload.get("client_event_id", "")).strip() or None
+        )
+        if participant_id is not None and len(participant_id) > 96:
+            raise ValueError("participant_id is too long")
+        if participant_name is not None and len(participant_name) > 32:
+            raise ValueError("participant_name is too long")
+        if client_event_id is not None and len(client_event_id) > 128:
+            raise ValueError("client_event_id is too long")
         if scope == "fixture" and not fixture_id:
             raise ValueError("fixture feedback requires a fixture_id")
-        if scope == "group" and group_id != "movers":
+        if scope == "group" and group_id not in {"movers", "center"}:
             raise ValueError("unknown feedback group")
         if fixture_id and not any(
             fixture.fixture_id == fixture_id
@@ -2816,7 +4903,88 @@ class LumenApplication:
                 )
                 position_ms = self._media_position_ms()
                 runtime = self._runtime
-            feedback_id = self.memory.add_feedback(
+                listening_session_id = self._session_id
+            feedback_fixture = group_id if scope == "group" else fixture_id
+            target_lanes = self._feedback_target_lanes(
+                scope, feedback_fixture
+            )
+            choreography_snapshot = (
+                runtime.choreography_snapshot()
+                if runtime is not None
+                else {}
+            )
+            snapshot_lanes = choreography_snapshot.get("lanes", {})
+            lane_context = {
+                "version": 1,
+                "lifetime": lifetime,
+                "lanes": {
+                    lane: {
+                        "section": str(
+                            context_observation.section or "unknown"
+                        ),
+                        "active_sequence_id": str(
+                            (snapshot_lanes.get(lane) or {}).get(
+                                "active_sequence_id"
+                            )
+                            or "unknown"
+                        ),
+                        "boundary_id": str(
+                            (snapshot_lanes.get(lane) or {}).get(
+                                "active_boundary_id"
+                            )
+                            or "unknown"
+                        ),
+                        "routine": str(
+                            (
+                                (snapshot_lanes.get(lane) or {}).get(
+                                    "active_step"
+                                )
+                                or {}
+                            ).get("routine")
+                            or "unknown"
+                        ),
+                    }
+                    for lane in target_lanes
+                },
+            }
+            # A listener burst is a sliding five-second consensus window, not
+            # a wall-clock bucket. Otherwise eight phones tapping together at
+            # xx:x4.999 could be split merely because midnight's modulo clock
+            # advanced while the serialized database writes were completing.
+            consensus_now_ms = round(time.time() * 1000)
+            consensus_start_ms = consensus_now_ms
+            prior_feedback = self.memory.list_feedback(song_id)
+            prior_starts = [
+                self._feedback_consensus_start_ms(row)
+                for row in prior_feedback
+                if row.get("label") == label
+                and row.get("scope") == scope
+                and row.get("fixture_id") == feedback_fixture
+                and str(row.get("listening_session_id") or "")
+                == str(listening_session_id)
+                and isinstance(row.get("lane_context"), dict)
+                and str(
+                    row["lane_context"].get("lifetime") or "cue"
+                ) == lifetime
+                and row["lane_context"].get("lanes")
+                == lane_context["lanes"]
+                and self._feedback_consensus_start_ms(row)
+                <= consensus_now_ms
+                < self._feedback_consensus_start_ms(row) + 5_000
+            ]
+            if prior_starts:
+                consensus_start_ms = max(prior_starts)
+            lane_context["consensus_started_unix_ms"] = consensus_start_ms
+            performed_routines = {
+                item["routine"]
+                for item in lane_context["lanes"].values()
+            }
+            persisted_routine = (
+                next(iter(performed_routines))
+                if len(performed_routines) == 1
+                else "parallel"
+            )
+            feedback_event = self.memory.add_feedback_event(
                 Feedback(
                     song_id=song_id,
                     position_ms=position_ms,
@@ -2832,44 +5000,148 @@ class LumenApplication:
                     tension=(context_frame.decision.expression.tension if context_frame else None),
                     confidence=(context_frame.decision.confidence if context_frame else None),
                     bpm=context_observation.bpm,
-                    routine=(context_frame.decision.routine if context_frame else None),
+                    routine=persisted_routine,
                     capture_session_id=capture_session_id,
                     audio_frame_index=capture_audio_frame,
-                )
+                ),
+                participant_id=participant_id,
+                participant_name=participant_name,
+                client_event_id=client_event_id,
+                listening_session_id=listening_session_id,
+                lane_context=lane_context,
             )
+            feedback_id = int(feedback_event["id"])
+            feedback_created = bool(feedback_event["created"])
             # Keep a compact semantic routine alongside the raw feedback. It
             # is deliberately made from moments and decisions, not DMX bytes,
             # so it can be resolved against a changed rig later.
             song_feedback = self.memory.list_feedback(song_id)
-            recent_cutoff = int(time.time() * 1000) - 5_000
-            feedback_fixture = group_id if scope == "group" else fixture_id
-            occurrences = sum(
-                1
-                for row in song_feedback
-                if row.get("label") == label
-                and row.get("scope") == scope
-                and row.get("fixture_id") == feedback_fixture
-                and int(row.get("created_unix_ms") or 0) >= recent_cutoff
+            current_feedback = next(
+                (
+                    row for row in song_feedback
+                    if int(row.get("id") or 0) == feedback_id
+                ),
+                None,
             )
+            created_ms = int(
+                (current_feedback or {}).get("created_unix_ms")
+                or time.time() * 1000
+            )
+            persisted_feedback = current_feedback or {}
+            batch_label = str(persisted_feedback.get("label") or label)
+            batch_scope = str(persisted_feedback.get("scope") or scope)
+            batch_fixture = persisted_feedback.get(
+                "fixture_id", feedback_fixture
+            )
+            batch_session = str(
+                persisted_feedback.get("listening_session_id")
+                or listening_session_id
+            )
+            target_lanes = self._feedback_target_lanes(
+                batch_scope, batch_fixture
+            )
+            batch_start_ms = self._feedback_consensus_start_ms(
+                persisted_feedback
+            )
+            model_event_id = self._feedback_batch_group_event_id(
+                song_id=song_id,
+                listening_session_id=batch_session,
+                created_unix_ms=batch_start_ms,
+                label=batch_label,
+                scope=batch_scope,
+                fixture_id=batch_fixture,
+                lifetime=lifetime,
+            )
+            model_event_ids: dict[str, str] = {}
+            occurrences_by_lane: dict[str, int] = {}
+            urgency_by_lane: dict[str, float] = {}
+            participants_by_lane: dict[str, int] = {}
+            for lane in target_lanes:
+                performed_context = self._feedback_lane_context(
+                    persisted_feedback, lane
+                )
+                if performed_context is None:
+                    continue
+                matching_recent = [
+                    row for row in song_feedback
+                    if row.get("label") == batch_label
+                    and row.get("scope") == batch_scope
+                    and row.get("fixture_id") == batch_fixture
+                    and str(row.get("listening_session_id") or "")
+                    == batch_session
+                    and str(
+                        (row.get("lane_context") or {}).get("lifetime")
+                        or "cue"
+                    ) == lifetime
+                    and self._feedback_lane_context(row, lane)
+                    == performed_context
+                    and self._feedback_consensus_start_ms(row)
+                    == batch_start_ms
+                ]
+                occurrences_by_lane[lane] = max(1, len(matching_recent))
+                participants = {
+                    str(
+                        row.get("participant_id")
+                        or f"legacy:{row.get('id')}"
+                    )
+                    for row in matching_recent
+                }
+                distinct = max(1, len(participants))
+                participants_by_lane[lane] = distinct
+                repeated_taps = max(
+                    0, occurrences_by_lane[lane] - distinct
+                )
+                urgency_by_lane[lane] = clamp(
+                    0.45
+                    + 0.14 * (distinct - 1)
+                    + 0.06 * repeated_taps,
+                    0.0,
+                    1.0,
+                )
+                model_event_ids[lane] = self._feedback_batch_event_id(
+                    song_id=song_id,
+                    listening_session_id=batch_session,
+                    created_unix_ms=batch_start_ms,
+                    label=batch_label,
+                    scope=batch_scope,
+                    fixture_id=batch_fixture,
+                    lane=lane,
+                    section=performed_context["section"],
+                    routine=performed_context["routine"],
+                    active_sequence_id=performed_context[
+                        "active_sequence_id"
+                    ],
+                    boundary_id=performed_context["boundary_id"],
+                    lifetime=lifetime,
+                )
+            occurrences = max(occurrences_by_lane.values(), default=1)
+            distinct_participants = max(
+                participants_by_lane.values(), default=1
+            )
+            urgency = max(urgency_by_lane.values(), default=0.45)
             learned_sequence: dict[str, Any] | None = None
-            if runtime is not None and abs(value) > 0.0:
-                preferred = self._feedback_routine_effect(label, None)
+            if (
+                runtime is not None
+                and abs(value) > 0.0
+                and label != "operator_note"
+                and feedback_created
+            ):
                 learned_sequence = runtime.learn_choreography_feedback(
                     label=label,
                     value=clamp(value, -1.0, 1.0),
-                    urgency=clamp(0.45 + 0.12 * (occurrences - 1), 0.0, 1.0),
-                    # Each database event contributes once. Repeated presses
-                    # raise urgency without quadratically counting 1+2+3...
-                    occurrences=1,
+                    urgency=urgency,
+                    # One replaceable event represents the whole five-second
+                    # consensus window. Repeated presses raise urgency and
+                    # mass without creating 1+2+3 duplicate examples.
+                    occurrences=max(1, occurrences),
                     scope=scope,
                     fixture_id=feedback_fixture,
-                    preferred_routine=(
-                        max(preferred, key=preferred.get)
-                        if preferred
-                        else None
-                    ),
-                    created_unix_ms=int(time.time() * 1000),
-                    event_id=f"feedback:{feedback_id}",
+                    preferred_routine=None,
+                    created_unix_ms=created_ms,
+                    event_ids_by_lane=model_event_ids,
+                    occurrences_by_lane=occurrences_by_lane,
+                    urgency_by_lane=urgency_by_lane,
+                    lifetime=lifetime,
                 )
                 if learned_sequence is not None:
                     self._save_choreography_model()
@@ -2880,23 +5152,40 @@ class LumenApplication:
                         song_id=song_id,
                     )
             self._save_feedback_routine(song_id, song_feedback)
-            self._rebuild_feedback_biases()
+            refresh_lanes = self._feedback_target_lanes(
+                scope, feedback_fixture
+            )
+            refresh_live = self.engine_mode == "live"
+            if refresh_live:
+                self._queue_feedback_bias_refresh(refresh_lanes)
+            else:
+                self._rebuild_feedback_biases()
             with self._lock:
                 current_runtime = self._runtime
                 biases = deepcopy(self._feedback_biases)
-                if capture_audio_frame is not None:
+                if capture_audio_frame is not None and feedback_created:
                     self._training_linked_feedback += 1
-                self._add_event(
-                    "feedback",
-                    f"Recorded feedback: {label.replace('_', ' ')}",
-                )
+                if feedback_created:
+                    self._add_event(
+                        "feedback",
+                        f"Recorded feedback: {label.replace('_', ' ')}",
+                    )
                 self._status_sequence += 1
-            if current_runtime is not None:
-                current_runtime.replace_feedback(biases)
+            if current_runtime is not None and not refresh_live:
+                current_runtime.replace_feedback(
+                    biases,
+                    replan_lanes=refresh_lanes,
+                )
         return {
             "feedback_id": feedback_id,
+            "created": feedback_created,
             "song_id": song_id,
             "feedback_occurrences": max(1, occurrences),
+            "participant_agreement": distinct_participants,
+            "urgency": urgency,
+            "participant_name": participant_name,
+            "model_event_id": model_event_id,
+            "model_event_ids": model_event_ids,
             "sequence_learning": learned_sequence,
         }
 
@@ -2906,15 +5195,15 @@ class LumenApplication:
         kind = str(payload.get("kind", "")).strip().lower()
         allowed = {
             "musical_context": {
-                "intro", "verse", "pre_chorus", "chorus", "build",
-                "release", "breakdown", "bridge", "solo", "outro",
-                "vocal_focus", "instrumental", "transition",
+                *CANONICAL_TECHNO_SECTIONS,
+                *(role.value for role in ContentRole if role.value not in {
+                    "unknown", "silence",
+                }),
+                *(event.value for event in TransitionEvent),
             },
             "preferred_action": {
                 "keep_current", "breathe", "fan_sweep", "figure_eight",
                 "opposing_chase", "beat_nod", "counter_rotate",
-                "hold_position", "blackout_accent", "palette_change",
-                "more_contrast", "less_contrast",
             },
         }
         label = str(payload.get("label", "")).strip().lower()
@@ -2925,7 +5214,22 @@ class LumenApplication:
             raise ValueError("annotation scope must be overall, group, or fixture")
         fixture_id = str(payload.get("fixture_id", "")).strip() or None
         group_id = str(payload.get("group_id", "")).strip() or None
-        if scope == "group" and group_id != "movers":
+        # Musical structure describes the song, never a fixture. Older mobile
+        # clients reused the lighting target selector and accidentally stored
+        # group-scoped structure calls. Normalize at the authority boundary so
+        # those taps still teach the intended song-wide axis.
+        if kind == "musical_context":
+            scope = "overall"
+            fixture_id = None
+            group_id = None
+        participant_id = str(payload.get("participant_id", "")).strip() or None
+        participant_name = (
+            str(payload.get("participant_name", "")).strip() or None
+        )
+        client_event_id = (
+            str(payload.get("client_event_id", "")).strip() or None
+        )
+        if scope == "group" and group_id not in {"movers", "center"}:
             raise ValueError("unknown annotation group")
         if scope == "fixture" and (
             fixture_id is None
@@ -2974,7 +5278,7 @@ class LumenApplication:
             if frame_snapshot is not None:
                 decision = asdict(frame_snapshot.decision)
                 decision["gesture"] = frame_snapshot.decision.gesture.value
-            annotation_id = self.memory.add_training_annotation(
+            annotation_event = self.memory.add_training_annotation_event(
                 song_id=song_id,
                 position_ms=position_ms,
                 kind=kind,
@@ -2985,14 +5289,30 @@ class LumenApplication:
                 note=note,
                 capture_session_id=capture_session_id,
                 audio_frame_index=capture_audio_frame,
+                participant_id=participant_id,
+                participant_name=participant_name,
+                client_event_id=client_event_id,
+                listening_session_id=self._session_id,
                 context={
                     "observation": asdict(observation_snapshot),
                     "decision": decision,
                     "controls": controls_snapshot,
+                    "participant": {
+                        "id": participant_id,
+                        "name": participant_name,
+                        "client_event_id": client_event_id,
+                        "listening_session_id": self._session_id,
+                    },
                 },
             )
+            annotation_id = int(annotation_event["id"])
+            annotation_created = bool(annotation_event["created"])
             sequence_learning: dict[str, Any] | None = None
-            if kind == "preferred_action" and runtime is not None:
+            if (
+                kind == "preferred_action"
+                and runtime is not None
+                and annotation_created
+            ):
                 sequence_learning = (
                     runtime.learn_choreography_feedback(
                         label="more_like_this",
@@ -3008,6 +5328,7 @@ class LumenApplication:
                         ),
                         created_unix_ms=int(time.time() * 1000),
                         event_id=f"annotation:{annotation_id}",
+                        lifetime="cue",
                     )
                 )
                 if sequence_learning is not None:
@@ -3019,26 +5340,308 @@ class LumenApplication:
                         song_id=song_id,
                     )
             with self._lock:
-                if capture_audio_frame is not None:
+                if capture_audio_frame is not None and annotation_created:
                     self._training_annotations += 1
-                self._add_event(
-                    "feedback",
-                    f"Training label: {label.replace('_', ' ')}",
-                )
+                if annotation_created:
+                    self._add_event(
+                        "feedback",
+                        f"Training label: {label.replace('_', ' ')}",
+                    )
                 self._status_sequence += 1
         return {
             "annotation_id": annotation_id,
+            "created": annotation_created,
             "song_id": song_id,
             "kind": kind,
             "label": label,
             "linked_to_audio": capture_audio_frame is not None,
             "sequence_learning": sequence_learning,
+            "structure_consensus": (
+                "pending_offline_rebuild"
+                if kind == "musical_context" and annotation_created
+                else None
+            ),
         }
+
+    def save_choreography_proposal(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Save an editable semantic routine and place it on this song."""
+
+        scope = canonical_motion_scope(payload.get("scope", "movers"))
+        name = str(payload.get("name", "")).strip()[:80] or (
+            f"{scope.title()} taught routine"
+        )
+        raw_steps = payload.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise ValueError("at least one choreography step is required")
+        steps: list[dict[str, Any]] = []
+        next_start = 0.0
+        for raw in raw_steps[:24]:
+            if not isinstance(raw, dict):
+                raise ValueError("each choreography step must be an object")
+            routine = str(raw.get("routine", "")).strip().lower()
+            if routine not in REHEARSAL_ROUTINE_IDS:
+                raise ValueError("unknown choreography routine")
+            start_beat = float(raw.get("start_beat", next_start))
+            duration_beats = clamp(
+                float(raw.get("duration_beats", 8.0)), 0.25, 128.0
+            )
+            if start_beat < 0:
+                raise ValueError("step start beat must be non-negative")
+            step_scope = canonical_motion_scope(
+                raw.get("fixture_scope", scope)
+            )
+            if scope != "overall" and step_scope != scope:
+                raise ValueError("a group sequence cannot control another group")
+            palette = str(raw.get("palette", "")).strip() or None
+            if palette is not None and palette not in PALETTE_FAMILIES:
+                raise ValueError("unknown choreography palette")
+            strobe_rate = clamp(
+                float(raw.get("strobe_rate", raw.get("strobe", 0.0))),
+                0.0,
+                1.0,
+            )
+            strobe_enabled = bool(
+                raw.get("strobe_enabled", strobe_rate > 0.0)
+            )
+            entry = str(raw.get("entry_behavior", "phrase_boundary")).strip()
+            exit_behavior = str(raw.get("exit_behavior", "resolve")).strip()
+            if entry not in {"phrase_boundary", "soft", "accent"}:
+                raise ValueError("unknown entry behavior")
+            if exit_behavior not in {"resolve", "hold", "blackout", "crossfade"}:
+                raise ValueError("unknown exit behavior")
+            steps.append({
+                "start_beat": start_beat,
+                "duration_beats": duration_beats,
+                "fixture_scope": step_scope,
+                "routine": routine,
+                "intensity": clamp(
+                    float(raw.get("intensity", 1.0)), 0.0, 1.0
+                ),
+                "palette": palette,
+                "strobe": {
+                    "enabled": strobe_enabled,
+                    "rate": strobe_rate,
+                },
+                "entry_behavior": entry,
+                "exit_behavior": exit_behavior,
+                "parameters": {
+                    "beat_sync": clamp(
+                        float(raw.get("beat_sync", 1.0)), 0.0, 1.0
+                    ),
+                    "motion_speed": clamp(
+                        float(raw.get("motion_speed", 0.5)), 0.0, 1.0
+                    ),
+                    "travel_size": clamp(
+                        float(raw.get("travel_size", 1.0)), 0.0, 1.0
+                    ),
+                    "activity_density": clamp(
+                        float(raw.get("activity_density", 1.0)), 0.0, 1.0
+                    ),
+                    "brightness": (
+                        None
+                        if raw.get("brightness") is None
+                        else clamp(float(raw["brightness"]), 0.0, 1.0)
+                    ),
+                    "cue_timing": clamp(
+                        float(raw.get("cue_timing", 1.0)), 0.0, 1.0
+                    ),
+                },
+            })
+            next_start = start_beat + duration_beats
+        steps.sort(key=lambda item: float(item["start_beat"]))
+        participant_id = str(payload.get("participant_id", "")).strip() or None
+        participant_name = str(payload.get("participant_name", "")).strip() or None
+        client_event_id = str(payload.get("client_event_id", "")).strip() or None
+        if participant_id is not None and len(participant_id) > 96:
+            raise ValueError("participant_id is too long")
+        if participant_name is not None and len(participant_name) > 32:
+            raise ValueError("participant_name is too long")
+        if client_event_id is not None and len(client_event_id) > 128:
+            raise ValueError("client_event_id is too long")
+        requested_sequence_id = (
+            str(payload.get("sequence_id", "")).strip() or None
+        )
+        if requested_sequence_id is not None:
+            existing_sequence = self.memory.choreography_sequence(
+                requested_sequence_id
+            )
+            if (
+                existing_sequence is not None
+                and existing_sequence.get("participant_id")
+                and existing_sequence.get("participant_id") != participant_id
+            ):
+                raise ValueError("sequence belongs to another listener")
+        with self._lock:
+            song_id = self.song_id
+            media = self.media
+            section = self.observation.section
+            position_ms = self._media_position_ms()
+            cached = deepcopy(self._cached_structure_prediction)
+        if song_id is None or media is None:
+            raise ValueError(
+                "identify a Spotify track before placing a song sequence"
+            )
+        if position_ms is None:
+            raise ValueError(
+                "the current track position is unavailable; refresh Spotify and try again"
+            )
+        requested_section = (
+            str(payload.get("section_label", "")).strip() or None
+        )
+        if (
+            requested_section is not None
+            and requested_section not in CANONICAL_TECHNO_SECTIONS
+        ):
+            raise ValueError(
+                "song sequence section must use a canonical techno state"
+            )
+        recording = (
+            self.memory.resolve_recording_version(
+                provider=media.provider,
+                provider_item_id=media.provider_item_id,
+                duration_ms=media.duration_ms,
+            )
+            if media is not None else None
+        )
+        axes = (cached or {}).get("axes") or {}
+        timeline_id = next(
+            (
+                value.get("timeline_id")
+                for value in axes.values()
+                if isinstance(value, dict) and value.get("timeline_id")
+            ),
+            None,
+        )
+        sequence_id = self.memory.save_choreography_sequence(
+            sequence_id=requested_sequence_id,
+            song_id=song_id,
+            recording_id=(recording or {}).get("id"),
+            timeline_id=timeline_id,
+            name=name,
+            fixture_scope=scope,
+            participant_id=participant_id,
+            participant_name=participant_name,
+            client_event_id=client_event_id,
+            source="operator_sequence_editor",
+            confidence=1.0,
+            context={
+                "section": section,
+                "position_ms": position_ms,
+                "cached_structure": cached,
+            },
+            steps=steps,
+        )
+        placement_id = None
+        if payload.get("place", True):
+            placement_event_id = (
+                None if client_event_id is None
+                else f"{client_event_id}:placement"
+            )
+            requested_placement_id = (
+                str(payload.get("placement_id", "")).strip() or None
+            )
+            if requested_placement_id is not None:
+                existing_placement = self.memory.choreography_placement(
+                    requested_placement_id
+                )
+                if (
+                    existing_placement is not None
+                    and existing_placement.get("participant_id")
+                    and existing_placement.get("participant_id")
+                    != participant_id
+                ):
+                    raise ValueError("placement belongs to another listener")
+            placement_id = self.memory.save_choreography_placement(
+                placement_id=requested_placement_id,
+                sequence_id=sequence_id,
+                song_id=song_id,
+                recording_id=(recording or {}).get("id"),
+                timeline_id=timeline_id,
+                fixture_scope=scope,
+                start_ms=position_ms,
+                duration_beats=max(
+                    float(step["start_beat"])
+                    + float(step["duration_beats"])
+                    for step in steps
+                ),
+                section_label=(
+                    requested_section or section
+                ),
+                participant_id=participant_id,
+                participant_name=participant_name,
+                client_event_id=placement_event_id,
+                source="operator_sequence_editor",
+                context={"name": name, "steps": len(steps)},
+            )
+        self._recalled_choreography_checked_at = 0.0
+        self._teaching_snapshot_checked_at = 0.0
+        with self._lock:
+            self._add_event(
+                "memory", f"Taught {scope} sequence: {name}"
+            )
+            self._status_sequence += 1
+        return {
+            "sequence_id": sequence_id,
+            "placement_id": placement_id,
+            "song_id": song_id,
+            "recording_id": (recording or {}).get("id"),
+            "steps": len(steps),
+            "scope": scope,
+        }
+
+    def edit_choreography_history(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        kind = str(payload.get("kind", "")).strip().lower()
+        action = str(payload.get("action", "")).strip().lower()
+        item_id = str(payload.get("id", "")).strip()
+        if not item_id:
+            raise ValueError("choreography id is required")
+        participant_id = str(payload.get("participant_id", "")).strip() or None
+        existing = (
+            self.memory.choreography_sequence(item_id, include_deleted=True)
+            if kind == "sequence"
+            else self.memory.choreography_placement(
+                item_id, include_deleted=True
+            )
+            if kind == "placement"
+            else None
+        )
+        if (
+            participant_id is not None
+            and existing is not None
+            and existing.get("participant_id")
+            and existing.get("participant_id") != participant_id
+        ):
+            raise ValueError("choreography item belongs to another listener")
+        operations = {
+            ("sequence", "delete"): self.memory.delete_choreography_sequence,
+            ("sequence", "undo"): self.memory.undo_choreography_sequence,
+            ("placement", "delete"): self.memory.delete_choreography_placement,
+            ("placement", "undo"): self.memory.undo_choreography_placement,
+        }
+        operation = operations.get((kind, action))
+        if operation is None:
+            raise ValueError("unknown choreography history operation")
+        changed = operation(item_id)
+        if not changed:
+            raise ValueError("choreography item or revision was not found")
+        self._recalled_choreography_checked_at = 0.0
+        self._teaching_snapshot_checked_at = 0.0
+        with self._lock:
+            self._status_sequence += 1
+            self._add_event(
+                "memory", f"{action.title()} {kind} {item_id[-8:]}"
+            )
+        return {"changed": True, "kind": kind, "action": action, "id": item_id}
 
     def delete_feedback(self, payload: dict[str, Any]) -> dict[str, Any]:
         feedback_id = int(payload.get("feedback_id", 0))
         if feedback_id < 1:
             raise ValueError("feedback_id is required")
+        participant_id = str(payload.get("participant_id", "")).strip() or None
         with self._feedback_lock:
             existing = next(
                 (
@@ -3048,11 +5651,134 @@ class LumenApplication:
                 ),
                 None,
             )
+            if (
+                participant_id is not None
+                and existing is not None
+                and existing.get("participant_id") != participant_id
+            ):
+                raise ValueError("feedback entry belongs to another listener")
             deleted = self.memory.delete_feedback(feedback_id)
             if not deleted:
                 raise ValueError("feedback entry was not found")
-            sequence_update_removed = self._choreography_model.forget(
-                f"feedback:{feedback_id}"
+            remaining_feedback = self.memory.all_feedback()
+            sequence_update_removed = False
+            if existing is not None:
+                batch_start = self._feedback_consensus_start_ms(existing)
+                target_lanes = self._feedback_target_lanes(
+                    str(existing.get("scope") or "overall"),
+                    existing.get("fixture_id"),
+                )
+                has_lane_context = isinstance(
+                    existing.get("lane_context"), dict
+                )
+                if has_lane_context:
+                    lifetime = str(
+                        (existing.get("lane_context") or {}).get(
+                            "lifetime"
+                        )
+                        or "cue"
+                    )
+                    for lane in target_lanes:
+                        performed_context = self._feedback_lane_context(
+                            existing, lane
+                        )
+                        if performed_context is None:
+                            continue
+                        model_event_id = self._feedback_batch_event_id(
+                            song_id=int(existing.get("song_id") or 0),
+                            listening_session_id=str(
+                                existing.get("listening_session_id") or ""
+                            ),
+                            created_unix_ms=batch_start,
+                            label=str(existing.get("label") or ""),
+                            scope=str(
+                                existing.get("scope") or "overall"
+                            ),
+                            fixture_id=existing.get("fixture_id"),
+                            lane=lane,
+                            section=performed_context["section"],
+                            routine=performed_context["routine"],
+                            active_sequence_id=performed_context[
+                                "active_sequence_id"
+                            ],
+                            boundary_id=performed_context["boundary_id"],
+                            lifetime=lifetime,
+                        )
+                        batch_rows = [
+                            row for row in remaining_feedback
+                            if int(row.get("song_id") or 0)
+                            == int(existing.get("song_id") or 0)
+                            and row.get("listening_session_id")
+                            == existing.get("listening_session_id")
+                            and row.get("label") == existing.get("label")
+                            and row.get("scope") == existing.get("scope")
+                            and row.get("fixture_id")
+                            == existing.get("fixture_id")
+                            and str(
+                                (row.get("lane_context") or {}).get(
+                                    "lifetime"
+                                )
+                                or "cue"
+                            ) == lifetime
+                            and self._feedback_lane_context(row, lane)
+                            == performed_context
+                            and self._feedback_consensus_start_ms(row)
+                            == batch_start
+                        ]
+                        sequence_update_removed = (
+                            self._revise_or_forget_feedback_batch(
+                                model_event_id, batch_rows
+                            )
+                            or sequence_update_removed
+                        )
+                else:
+                    # Version-1 consensus rows were keyed only by the public
+                    # compatibility routine. Continue to undo those rows.
+                    model_event_id = self._feedback_batch_event_id(
+                        song_id=int(existing.get("song_id") or 0),
+                        listening_session_id=str(
+                            existing.get("listening_session_id") or ""
+                        ),
+                        created_unix_ms=batch_start,
+                        label=str(existing.get("label") or ""),
+                        scope=str(existing.get("scope") or "overall"),
+                        fixture_id=existing.get("fixture_id"),
+                        section=str(
+                            existing.get("section") or "unknown"
+                        ),
+                        routine=str(
+                            existing.get("routine") or "unknown"
+                        ),
+                    )
+                    batch_rows = [
+                        row for row in remaining_feedback
+                        if int(row.get("song_id") or 0)
+                        == int(existing.get("song_id") or 0)
+                        and row.get("listening_session_id")
+                        == existing.get("listening_session_id")
+                        and row.get("label") == existing.get("label")
+                        and row.get("scope") == existing.get("scope")
+                        and row.get("fixture_id")
+                        == existing.get("fixture_id")
+                        and row.get("section") == existing.get("section")
+                        and row.get("routine") == existing.get("routine")
+                        and not isinstance(row.get("lane_context"), dict)
+                        and self._feedback_consensus_start_ms(row)
+                        == batch_start
+                    ]
+                    sequence_update_removed = (
+                        self._revise_or_forget_feedback_batch(
+                            model_event_id, batch_rows
+                        )
+                        or sequence_update_removed
+                    )
+            # The original released model used one event per database row.
+            # Always try this exact fallback; it is a no-op for current rows.
+            sequence_update_removed = (
+                self._choreography_model.forget(
+                    f"feedback:{feedback_id}"
+                )
+                or sequence_update_removed
             )
             if sequence_update_removed:
                 self._save_choreography_model()
@@ -3061,7 +5787,15 @@ class LumenApplication:
                 self._save_feedback_routine(
                     song_id, self.memory.list_feedback(song_id)
                 )
-            self._rebuild_feedback_biases()
+            refresh_lanes = self._feedback_target_lanes(
+                str((existing or {}).get("scope") or "overall"),
+                (existing or {}).get("fixture_id"),
+            )
+            refresh_live = self.engine_mode == "live"
+            if refresh_live:
+                self._queue_feedback_bias_refresh(refresh_lanes)
+            else:
+                self._rebuild_feedback_biases()
             with self._lock:
                 runtime = self._runtime
                 biases = deepcopy(self._feedback_biases)
@@ -3069,26 +5803,217 @@ class LumenApplication:
                     "feedback", f"Removed feedback #{feedback_id}"
                 )
                 self._status_sequence += 1
-            if runtime is not None:
-                runtime.replace_feedback(biases)
+            if runtime is not None and not refresh_live:
+                runtime.replace_feedback(
+                    biases,
+                    replan_lanes=refresh_lanes,
+                )
         return {
             "deleted": True,
             "feedback_id": feedback_id,
             "sequence_update_removed": sequence_update_removed,
         }
 
-    def _media_position_ms(self) -> int | None:
+    def _revise_or_forget_feedback_batch(
+        self,
+        model_event_id: str,
+        batch_rows: list[dict[str, Any]],
+    ) -> bool:
+        if not batch_rows:
+            return self._choreography_model.forget(model_event_id)
+        participants = {
+            str(row.get("participant_id") or f"legacy:{row.get('id')}")
+            for row in batch_rows
+        }
+        repeat_taps = max(0, len(batch_rows) - len(participants))
+        urgency = clamp(
+            0.45
+            + 0.14 * (max(1, len(participants)) - 1)
+            + 0.06 * repeat_taps,
+            0.0,
+            1.0,
+        )
+        return self._choreography_model.revise_feedback_event(
+            model_event_id,
+            occurrences=len(batch_rows),
+            urgency=urgency,
+        )
+
+    @staticmethod
+    def _feedback_consensus_start_ms(
+        feedback_row: dict[str, Any],
+    ) -> int:
+        lane_context = feedback_row.get("lane_context")
+        if isinstance(lane_context, dict):
+            value = lane_context.get("consensus_started_unix_ms")
+            if value is not None:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    pass
+        # Preserve the identifier and undo behavior of feedback written before
+        # sliding consensus anchors were stored.
+        created_ms = int(feedback_row.get("created_unix_ms") or 0)
+        return created_ms // 5_000 * 5_000
+
+    @staticmethod
+    def _feedback_batch_event_id(
+        *,
+        song_id: int,
+        listening_session_id: str,
+        created_unix_ms: int,
+        label: str,
+        scope: str,
+        fixture_id: Any,
+        section: str,
+        routine: str,
+        lane: str | None = None,
+        active_sequence_id: str | None = None,
+        boundary_id: str | None = None,
+        lifetime: str | None = None,
+    ) -> str:
+        # Calls without a lane preserve the version-1 identifier used by
+        # older tests and tools. New persisted feedback always supplies a
+        # lane and therefore includes the planner lease in its identity.
+        batch_start_ms = int(created_unix_ms) // 5_000 * 5_000
+        material = "\x1f".join(
+            (
+                str(song_id),
+                str(listening_session_id),
+                str(batch_start_ms),
+                str(label),
+                str(scope),
+                str(fixture_id or ""),
+                str(section),
+                str(routine),
+                *( () if lifetime is None else (str(lifetime),) ),
+            )
+        )
+        legacy = "feedback-batch:" + hashlib.sha256(
+            material.encode("utf-8")
+        ).hexdigest()[:24]
+        if lane is None:
+            return legacy
+        group = LumenApplication._feedback_batch_group_event_id(
+            song_id=song_id,
+            listening_session_id=listening_session_id,
+            created_unix_ms=created_unix_ms,
+            label=label,
+            scope=scope,
+            fixture_id=fixture_id,
+            lifetime=lifetime,
+        )
+        context_material = "\x1f".join((
+            str(lane),
+            str(section),
+            str(routine),
+            str(active_sequence_id or "unknown"),
+            str(boundary_id or "unknown"),
+        ))
+        context_hash = hashlib.sha256(
+            context_material.encode("utf-8")
+        ).hexdigest()[:16]
+        return f"{group}:{context_hash}:{lane}"
+
+    @staticmethod
+    def _feedback_batch_group_event_id(
+        *,
+        song_id: int,
+        listening_session_id: str,
+        created_unix_ms: int,
+        label: str,
+        scope: str,
+        fixture_id: Any,
+        lifetime: str | None = None,
+    ) -> str:
+        batch_start_ms = int(created_unix_ms) // 5_000 * 5_000
+        material = "\x1f".join((
+            str(song_id),
+            str(listening_session_id),
+            str(batch_start_ms),
+            str(label),
+            str(scope),
+            str(fixture_id or ""),
+            *( () if lifetime is None else (str(lifetime),) ),
+        ))
+        return "feedback-batch:" + hashlib.sha256(
+            material.encode("utf-8")
+        ).hexdigest()[:24]
+
+    @staticmethod
+    def _feedback_lane_context(
+        feedback_row: dict[str, Any], lane: str
+    ) -> dict[str, str] | None:
+        encoded = feedback_row.get("lane_context")
+        if not isinstance(encoded, dict):
+            return None
+        lanes = encoded.get("lanes")
+        if not isinstance(lanes, dict):
+            return None
+        context = lanes.get(lane)
+        if not isinstance(context, dict):
+            return None
+        return {
+            "section": str(context.get("section") or "unknown"),
+            "routine": str(context.get("routine") or "unknown"),
+            "active_sequence_id": str(
+                context.get("active_sequence_id") or "unknown"
+            ),
+            "boundary_id": str(
+                context.get("boundary_id") or "unknown"
+            ),
+        }
+
+    def _feedback_target_lanes(
+        self, scope: str, fixture_or_group_id: Any
+    ) -> tuple[str, ...]:
+        """Map persisted feedback targets to independent live lanes."""
+
+        if str(scope).casefold().strip() == "overall":
+            return CHOREOGRAPHY_LANES
+        target = str(fixture_or_group_id or "").casefold().strip()
+        semantic = choreography_lanes_for_scope(target)
+        if semantic:
+            return semantic
+        if any(
+            fixture.fixture_id.casefold() == target
+            for fixture in self.rig.fixtures
+        ):
+            return ("movers",)
+        if any(
+            fixture.fixture_id.casefold() == target
+            for fixture in self.rig.auxiliary_fixtures
+        ):
+            return ("center",)
+        return CHOREOGRAPHY_LANES
+
+    def _media_position_ms(
+        self, *, at_monotonic_s: float | None = None
+    ) -> int | None:
         media = self.media
+        sample_age_ms = (
+            0
+            if at_monotonic_s is None
+            else max(
+                0,
+                round((time.monotonic() - at_monotonic_s) * 1000),
+            )
+        )
         if media is None:
             if self.started_at is None:
                 return None
-            return round((time.monotonic() - self.started_at) * 1000)
+            position = round((time.monotonic() - self.started_at) * 1000)
+            return max(0, position - sample_age_ms)
         if media.observed_position_ms is None:
             return None
         if not media.is_playing or media.observed_at_unix_ms is None:
             return media.observed_position_ms
-        elapsed = max(0, int(time.time() * 1000) - media.observed_at_unix_ms)
-        position = media.observed_position_ms + elapsed
+        elapsed = (
+            int(time.time() * 1000)
+            - sample_age_ms
+            - media.observed_at_unix_ms
+        )
+        position = max(0, media.observed_position_ms + elapsed)
         if media.duration_ms is not None:
             position = min(position, media.duration_ms)
         return position
@@ -3155,28 +6080,425 @@ class LumenApplication:
         }
 
     def bootstrap(self) -> dict[str, Any]:
+        # Bootstrap is an interface composition operation. System probes and
+        # SQLite summaries can take seconds, so capture only the small mutable
+        # pieces under the live-state lock and perform every slow operation
+        # after releasing it.
+        disk_free_bytes = self._read_training_disk_free()
         with self._lock:
-            return {
-                "project": {
-                    "name": "Lumen Engine",
-                    "version": "0.6.0",
-                    "role": "Spatial music-lighting control",
-                },
-                "rig": self._rig_payload,
-                "profiles": [
-                    profile_summary(profile)
-                    for profile in PARTY_PARROT_PROFILES.values()
-                ],
-                "status": self._snapshot_unlocked(),
-                "memory": self.memory.summary(limit=30),
-                "research": self.research_status(),
-                "system": self.scan_system(),
-                "settings": self.operator_settings(),
-            }
+            self._training_disk_free_bytes = disk_free_bytes
+            rig = deepcopy(self._rig_payload)
+            status = self._snapshot_unlocked()
+            settings = deepcopy(self.operator_settings())
+        return {
+            "project": {
+                "name": "Lumen Engine",
+                "version": "0.7.0",
+                "role": "Spatial music-lighting control",
+            },
+            "rig": rig,
+            "profiles": [
+                profile_summary(profile)
+                for profile in PARTY_PARROT_PROFILES.values()
+            ],
+            "status": status,
+            "memory": self.memory.summary(limit=30),
+            "research": self.research_status(),
+            "system": self.scan_system(),
+            "settings": settings,
+        }
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return self._snapshot_unlocked()
+
+    def song_teaching_snapshot(self, *, force: bool = False) -> dict[str, Any]:
+        """Read the teaching timeline without holding the audio-state lock."""
+
+        with self._lock:
+            song_id = self.song_id
+            media = self.media
+            cached_structure = deepcopy(self._cached_structure_prediction)
+            active_ids = list(self._recalled_choreography_ids)
+        position_ms = self._media_position_ms()
+        recording = (
+            self.memory.resolve_recording_version(
+                provider=media.provider,
+                provider_item_id=media.provider_item_id,
+                duration_ms=media.duration_ms,
+            )
+            if media is not None else None
+        )
+        recording_id = (recording or {}).get("id")
+        if song_id is None or recording_id is None:
+            return {
+                "available": False,
+                "recording": recording,
+                "cached_structure": cached_structure,
+                "structure_timelines": [],
+                "sequences": [],
+                "placements": [],
+            }
+        with self._teaching_lock:
+            now = time.monotonic()
+            if (
+                not force
+                and self._teaching_snapshot_cache is not None
+                and self._teaching_snapshot_cache.get("song_id") == song_id
+                and self._teaching_snapshot_cache.get("recording_id")
+                == recording_id
+                and now - self._teaching_snapshot_checked_at < 2.0
+            ):
+                result = deepcopy(self._teaching_snapshot_cache)
+            else:
+                sequences = self.memory.list_choreography_sequences(
+                    song_id=song_id
+                )
+                placements = self.memory.list_choreography_placements(
+                    song_id=song_id
+                )
+                timelines = self.memory.structure_timelines_for_recording(
+                    str(recording_id)
+                )
+                result = {
+                    "available": True,
+                    "song_id": song_id,
+                    "recording_id": recording_id,
+                    "recording": recording,
+                    "structure_timelines": timelines,
+                    "sequences": sequences[-40:],
+                    "placements": placements[-80:],
+                }
+                self._teaching_snapshot_cache = deepcopy(result)
+                self._teaching_snapshot_checked_at = now
+        result["position_ms"] = position_ms
+        result["cached_structure"] = cached_structure
+        result["active_sequence_ids"] = active_ids
+        return result
+
+    def structure_training_library(
+        self, recording_id: str | None = None
+    ) -> dict[str, Any]:
+        """Return the operator's complete offline timeline review library."""
+
+        catalog = self.memory.structure_timeline_catalog()
+        active_run_ids: set[str] = set()
+        evaluation_path = self._student_model_path.with_name(
+            self._student_model_path.stem + ".evaluation.json"
+        )
+        if evaluation_path.is_file():
+            try:
+                evaluation = json.loads(
+                    evaluation_path.read_text(encoding="utf-8")
+                )
+                active_run_ids = {
+                    str(run_id)
+                    for run_id in evaluation.get("teacher_run_ids", [])
+                }
+            except (OSError, json.JSONDecodeError):
+                active_run_ids = set()
+        for item in catalog:
+            included = bool(
+                active_run_ids.intersection(item.get("teacher_run_ids", []))
+            )
+            item["included_in_active_student"] = included
+            if included:
+                item["training_status"] = "active_student_source"
+            elif item.get("training_eligible"):
+                item["training_status"] = "ready_for_next_training"
+            elif item.get("capture_status") == "partial":
+                item["training_status"] = "excluded_partial_capture"
+            else:
+                item["training_status"] = "diagnostic_only"
+        selected = None
+        requested = str(recording_id or "").strip()
+        if requested:
+            selected = next(
+                (
+                    item for item in catalog
+                    if item["recording_id"] == requested
+                ),
+                None,
+            )
+            if selected is None:
+                raise ValueError("the selected timeline recording was not found")
+        elif catalog:
+            selected = next(
+                (
+                    item for item in catalog
+                    if item["review_status"] == "needs_review"
+                ),
+                catalog[0],
+            )
+        selected_id = (
+            str(selected["recording_id"]) if selected is not None else None
+        )
+        return {
+            "catalog": catalog,
+            "recordings": len(catalog),
+            "needs_review": sum(
+                item["review_status"] == "needs_review" for item in catalog
+            ),
+            "reviewed": sum(bool(item["reviewed"]) for item in catalog),
+            "selected_recording_id": selected_id,
+            "selected_recording": selected,
+            "structure_timelines": (
+                self.memory.structure_timelines_for_recording(selected_id)
+                if selected_id is not None else []
+            ),
+        }
+
+    def correct_structure_timeline(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Attach an operator correction to the exact playing recording."""
+
+        base_timeline_id = str(
+            payload.get("base_timeline_id", "")
+        ).strip()
+        if not base_timeline_id:
+            raise ValueError("base_timeline_id is required")
+        segments = payload.get("segments")
+        if not isinstance(segments, list):
+            raise ValueError("segments must be a list")
+        if len(segments) > 2_000:
+            raise ValueError("correction contains too many segments")
+        participant_id = (
+            str(payload.get("participant_id", "")).strip() or None
+        )
+        participant_name = (
+            str(payload.get("participant_name", "")).strip() or None
+        )
+        note = str(payload.get("note", "")).strip() or None
+        if participant_id is not None and len(participant_id) > 96:
+            raise ValueError("participant_id is too long")
+        if participant_name is not None and len(participant_name) > 32:
+            raise ValueError("participant_name is too long")
+        if note is not None and len(note) > 1_000:
+            raise ValueError("correction note is too long")
+
+        base = self.memory.structure_timeline(base_timeline_id)
+        if base is None:
+            raise ValueError("the selected recording timeline is unavailable")
+        requested_recording_id = str(
+            payload.get("recording_id", "")
+        ).strip()
+        with self._lock:
+            media = self.media
+            song_id = self.song_id
+        playing_recording = (
+            self.memory.resolve_recording_version(
+                provider=media.provider,
+                provider_item_id=media.provider_item_id,
+                duration_ms=media.duration_ms,
+            )
+            if media is not None else None
+        )
+        recording_id = requested_recording_id or str(
+            (playing_recording or {}).get("id") or ""
+        )
+        if not recording_id:
+            raise ValueError("select a song from the timeline library")
+        if str(base.get("recording_id")) != recording_id:
+            raise ValueError(
+                "the selected timeline does not belong to the selected recording"
+            )
+
+        timeline_id = self.memory.save_structure_correction(
+            base_timeline_id=base_timeline_id,
+            segments=segments,
+            participant_id=participant_id,
+            participant_name=participant_name,
+            note=note,
+        )
+        position_ms = self._media_position_ms()
+        is_playing_recording = str(
+            (playing_recording or {}).get("id") or ""
+        ) == recording_id
+        cached = (
+            self.memory.cached_structure_at(
+                recording_id=recording_id,
+                playback_position_ms=position_ms,
+            )
+            if is_playing_recording and position_ms is not None else None
+        )
+        with self._lock:
+            if (
+                is_playing_recording
+                and media == self.media
+                and song_id == self.song_id
+            ):
+                self._cached_structure_prediction = cached
+                self._cached_structure_checked_at = time.monotonic()
+            self._memory_context_last_poll = 0.0
+            self._teaching_snapshot_checked_at = 0.0
+            self._teaching_snapshot_cache = None
+            self._add_event(
+                "memory",
+                f"Saved structure correction for {base_timeline_id}",
+            )
+            self._status_sequence += 1
+        return {
+            "timeline_id": timeline_id,
+            "base_timeline_id": base_timeline_id,
+            "recording_id": recording_id,
+            "cached_structure": cached,
+        }
+
+    def review_structure_timeline(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Approve or reject an unmodified teacher timeline for recall."""
+
+        timeline_id = str(payload.get("timeline_id", "")).strip()
+        status = str(payload.get("status", "")).strip().casefold()
+        if not timeline_id:
+            raise ValueError("timeline_id is required")
+        participant_id = str(
+            payload.get("participant_id", "")
+        ).strip() or None
+        participant_name = str(
+            payload.get("participant_name", "")
+        ).strip() or None
+        note = str(payload.get("note", "")).strip() or None
+        if participant_id is not None and len(participant_id) > 96:
+            raise ValueError("participant_id is too long")
+        if participant_name is not None and len(participant_name) > 32:
+            raise ValueError("participant_name is too long")
+        if note is not None and len(note) > 1_000:
+            raise ValueError("review note is too long")
+        timeline = self.memory.structure_timeline(timeline_id)
+        if timeline is None:
+            raise ValueError("the selected recording timeline is unavailable")
+        requested_recording_id = str(
+            payload.get("recording_id", "")
+        ).strip()
+        with self._lock:
+            media = self.media
+            song_id = self.song_id
+        playing_recording = (
+            self.memory.resolve_recording_version(
+                provider=media.provider,
+                provider_item_id=media.provider_item_id,
+                duration_ms=media.duration_ms,
+            )
+            if media is not None else None
+        )
+        recording_id = requested_recording_id or str(
+            (playing_recording or {}).get("id") or ""
+        )
+        if not recording_id:
+            raise ValueError("select a song from the timeline library")
+        if str(timeline.get("recording_id")) != recording_id:
+            raise ValueError(
+                "the selected timeline does not belong to the selected recording"
+            )
+        review_candidate = next(
+            (
+                item
+                for item in self.memory.structure_timelines_for_recording(
+                    recording_id
+                )
+                if str(item.get("id")) == timeline_id
+            ),
+            None,
+        )
+        if (
+            status == "approved"
+            and (
+                review_candidate is None
+                or not review_candidate.get("review_eligible", False)
+            )
+        ):
+            raise ValueError(
+                "this diagnostic timeline cannot be approved for Live recall; "
+                "save a canonical operator correction instead"
+            )
+        review = self.memory.review_structure_timeline(
+            timeline_id=timeline_id,
+            status=status,
+            participant_id=participant_id,
+            participant_name=participant_name,
+            note=note,
+        )
+        position_ms = self._media_position_ms()
+        is_playing_recording = str(
+            (playing_recording or {}).get("id") or ""
+        ) == recording_id
+        cached = (
+            self.memory.cached_structure_at(
+                recording_id=recording_id,
+                playback_position_ms=position_ms,
+            )
+            if is_playing_recording and position_ms is not None else None
+        )
+        with self._lock:
+            if (
+                is_playing_recording
+                and media == self.media
+                and song_id == self.song_id
+            ):
+                self._cached_structure_prediction = cached
+                self._cached_structure_checked_at = time.monotonic()
+            self._memory_context_last_poll = 0.0
+            self._teaching_snapshot_checked_at = 0.0
+            self._teaching_snapshot_cache = None
+            self._add_event(
+                "memory", f"Structure timeline {timeline_id} {status}"
+            )
+            self._status_sequence += 1
+        return {
+            "timeline_id": timeline_id,
+            "recording_id": recording_id,
+            "review": review,
+            "cached_structure": cached,
+        }
+
+    def _cached_song_teaching_snapshot_unlocked(self) -> dict[str, Any]:
+        cached = self._teaching_snapshot_cache
+        if cached is None or cached.get("song_id") != self.song_id:
+            return {
+                "available": self.song_id is not None,
+                "song_id": self.song_id,
+                "position_ms": self._media_position_ms(),
+                "cached_structure": self._cached_structure_prediction,
+                "structure_timelines": [],
+                "sequences": [],
+                "placements": [],
+                "loading": self.song_id is not None,
+            }
+        result = deepcopy(cached)
+        result["position_ms"] = self._media_position_ms()
+        result["cached_structure"] = self._cached_structure_prediction
+        result["active_sequence_ids"] = list(self._recalled_choreography_ids)
+        return result
+
+    def _feedback_evidence_snapshot_unlocked(self) -> dict[str, Any]:
+        """Return the totals displayed by Live without its large context map."""
+
+        evidence = [
+            value["evidence"]
+            for value in self._feedback_biases.values()
+            if value.get("evidence")
+        ]
+        if not evidence:
+            return {}
+        # The interface has always displayed the greatest listener count and
+        # the sum of contextual event counts.  Preserve those values exactly,
+        # but send one compact record instead of the complete learning model
+        # ten times per second.
+        return {
+            "summary": {
+                "listeners": max(int(item.get("listeners", 0)) for item in evidence),
+                "events": sum(int(item.get("events", 0)) for item in evidence),
+                "repeat_events": sum(
+                    int(item.get("repeat_events", 0)) for item in evidence
+                ),
+                "confidence": max(
+                    float(item.get("confidence", 0.0)) for item in evidence
+                ),
+            }
+        }
 
     def _snapshot_unlocked(self) -> dict[str, Any]:
         observation = asdict(self.observation)
@@ -3260,15 +6582,46 @@ class LumenApplication:
             "analysis_history": list(self._analysis_history),
             "structure_model": {
                 "state": (
-                    "active"
-                    if self._student_model is not None
-                    else "error"
+                    "error"
                     if self._student_model_error
-                    else "awaiting_training"
+                    else self._student_model_state
                 ),
                 "model_path": str(self._student_model_path),
                 "error": self._student_model_error,
+                "gate_reasons": list(self._student_model_gate_reasons),
                 "prediction": self._student_prediction,
+                "cached_timeline": self._cached_structure_prediction,
+                "effective_source": (
+                    self._effective_structure.get(
+                        "source", "live_analyzer"
+                    )
+                ),
+                "effective_resolution": deepcopy(
+                    self._effective_structure
+                ),
+                "memory_context": {
+                    "lookup_duration_ms": self._memory_context_last_duration_ms,
+                    "error": self._memory_context_error,
+                    "runs_on_audio_thread": False,
+                    "timing_role": "structural_context_only",
+                    "beat_sync_authority": "audio_sample_clock",
+                },
+            },
+            "song_teaching": self._cached_song_teaching_snapshot_unlocked(),
+            "choreography": deepcopy(self._runtime_choreography_snapshot),
+            "learning": {
+                "model_revision": self._choreography_model.revision,
+                "learned_sequence_candidates": len(
+                    self._choreography_model.learned_candidates()
+                ),
+                "applied_feedback_evidence": (
+                    self._feedback_evidence_snapshot_unlocked()
+                ),
+                "application_rule": (
+                    "Feedback accumulates immediately, but scalar and "
+                    "sequence changes wait for the next phrase boundary."
+                ),
+                "trace_queue_drops": self._trace_queue_drops,
             },
             "training": self._training_snapshot_unlocked(),
             "decision": decision,
@@ -3293,7 +6646,7 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, self.server.application.bootstrap())
             return
         if path == "/api/status":
-            self._json(HTTPStatus.OK, self.server.application.snapshot())
+            self._json_body(HTTPStatus.OK, self.server.status_body())
             return
         if path == "/api/system":
             self._json(HTTPStatus.OK, self.server.application.scan_system())
@@ -3303,6 +6656,29 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 self.server.application.memory.summary(limit=100),
             )
+            return
+        if path == "/api/choreography":
+            force = str(
+                parse_qs(parsed.query).get("force", [""])[0]
+            ).lower() in {"1", "true", "yes"}
+            self._json(
+                HTTPStatus.OK,
+                self.server.application.song_teaching_snapshot(force=force),
+            )
+            return
+        if path == "/api/structure/library":
+            recording_id = parse_qs(parsed.query).get(
+                "recording_id", [None]
+            )[0]
+            try:
+                self._json(
+                    HTTPStatus.OK,
+                    self.server.application.structure_training_library(
+                        recording_id
+                    ),
+                )
+            except ValueError as error:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
         if path == "/api/research":
             self._json(
@@ -3365,6 +6741,14 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.delete_feedback(payload)
             elif path == "/api/training/annotation":
                 result = app.add_training_annotation(payload)
+            elif path == "/api/choreography/save":
+                result = app.save_choreography_proposal(payload)
+            elif path == "/api/choreography/history":
+                result = app.edit_choreography_history(payload)
+            elif path == "/api/structure/correct":
+                result = app.correct_structure_timeline(payload)
+            elif path == "/api/structure/review":
+                result = app.review_structure_timeline(payload)
             elif path == "/api/calibration":
                 result = app.calibration_control(payload)
             elif path == "/api/gesture/fresh":
@@ -3452,16 +6836,25 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _json(self, status: HTTPStatus, payload: Any) -> None:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self._json_body(status, body)
+
+    def _json_body(self, status: HTTPStatus, body: bytes) -> None:
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -3473,6 +6866,11 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
 
 class LumenHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+    # The stdlib default is five pending sockets. A listening session can
+    # legitimately wake several phones and the desktop dashboard at once, so
+    # absorb that connection burst instead of resetting valid feedback before
+    # a request thread is assigned.
+    request_queue_size = 128
 
     def __init__(
         self,
@@ -3480,7 +6878,31 @@ class LumenHTTPServer(ThreadingHTTPServer):
         application: LumenApplication,
     ) -> None:
         self.application = application
+        # Rendering a status document walks the 3D solution, DMX heatmap,
+        # analysis history, training state, and choreography state. Multiple
+        # browsers need the same display generation; recomputing it once per
+        # socket can starve audio analysis on this six-core machine. This
+        # cache is deliberately owned by the HTTP layer, never the live clock,
+        # and remains fresh enough for a smooth 30 Hz operator display.
+        self._status_body_lock = threading.Lock()
+        self._status_body_cached_at = 0.0
+        self._status_body_cache = b""
         super().__init__(address, LumenRequestHandler)
+
+    def status_body(self) -> bytes:
+        now = time.monotonic()
+        with self._status_body_lock:
+            if (
+                self._status_body_cache
+                and now - self._status_body_cached_at < 1.0 / 30.0
+            ):
+                return self._status_body_cache
+            body = json.dumps(
+                self.application.snapshot(), separators=(",", ":")
+            ).encode("utf-8")
+            self._status_body_cache = body
+            self._status_body_cached_at = time.monotonic()
+            return body
 
     def server_close(self) -> None:
         self.application.close()

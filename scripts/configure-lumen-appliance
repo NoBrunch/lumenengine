@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Convert this Ubuntu installation into a lean, reversible Lumen workstation.
+# Apply and rollback require sudo. Status is read-only.
+
+readonly STATE_DIR="/var/lib/lumen-appliance"
+readonly AUTOSTART_STATE_DIR="${STATE_DIR}/autostart"
+readonly OOM_SERVICE_DIR="/etc/systemd/system/user@1000.service.d"
+readonly OOM_SERVICE_FILE="${OOM_SERVICE_DIR}/90-lumen-appliance.conf"
+readonly OOM_GLOBAL_DIR="/etc/systemd/oomd.conf.d"
+readonly OOM_GLOBAL_FILE="${OOM_GLOBAL_DIR}/90-lumen-appliance.conf"
+readonly CONFIG_DIR="/etc/lumen-appliance"
+readonly MEMORY_FILE="${CONFIG_DIR}/offline-memory-gib"
+readonly SWAP_FILE="/swap-lumen.img"
+readonly FSTAB_MARKER="# lumen-appliance-offline-swap"
+
+readonly -a SYSTEM_DISABLE_UNITS=(
+  anydesk.service
+  gnome-remote-desktop.service
+  cups-browsed.service
+  cups.service
+  cups.socket
+  cups.path
+  ModemManager.service
+)
+
+readonly -a USER_MASK_UNITS=(
+  evolution-addressbook-factory.service
+  evolution-calendar-factory.service
+  evolution-source-registry.service
+  evolution-user-prompter.service
+  localsearch-3.service
+  localsearch-control-3.service
+  localsearch-writeback-3.service
+)
+
+readonly -a AUTOSTART_DISABLE_FILES=(
+  anydesk_global_tray.desktop
+  localsearch-3.desktop
+  org.gnome.DejaDup.Monitor.desktop
+  org.gnome.Evolution-alarm-notify.desktop
+  spice-vdagent.desktop
+  ubuntu-advantage-notification.desktop
+  ubuntu-report-on-upgrade.desktop
+  update-notifier.desktop
+)
+
+usage() {
+  printf 'Usage: %s status|apply|rollback\n' "$0"
+}
+
+operator_identity() {
+  local user_name="${SUDO_USER:-${USER:-}}"
+  if [[ -z "${user_name}" || "${user_name}" == "root" ]]; then
+    user_name="the-system"
+  fi
+  if ! getent passwd "${user_name}" >/dev/null; then
+    printf 'Cannot resolve operator account: %s\n' "${user_name}" >&2
+    return 1
+  fi
+  OPERATOR_USER="${user_name}"
+  OPERATOR_UID="$(id -u "${user_name}")"
+  OPERATOR_HOME="$(getent passwd "${user_name}" | cut -d: -f6)"
+  OPERATOR_GROUP="$(id -gn "${user_name}")"
+  export OPERATOR_USER OPERATOR_UID OPERATOR_HOME OPERATOR_GROUP
+}
+
+require_root() {
+  if (( EUID != 0 )); then
+    printf 'This operation changes system services and must run with sudo.\n' >&2
+    printf 'Run: sudo %s %s\n' "$0" "${1}" >&2
+    exit 1
+  fi
+}
+
+user_systemctl() {
+  if [[ ! -S "/run/user/${OPERATOR_UID}/bus" ]]; then
+    printf 'User session bus is unavailable; user units will apply next login.\n' >&2
+    return 0
+  fi
+  /usr/sbin/runuser -u "${OPERATOR_USER}" -- env \
+    XDG_RUNTIME_DIR="/run/user/${OPERATOR_UID}" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${OPERATOR_UID}/bus" \
+    systemctl --user "$@"
+}
+
+write_autostart_override() {
+  local name="$1"
+  local directory="${OPERATOR_HOME}/.config/autostart"
+  local target="${directory}/${name}"
+  /usr/bin/install -d -m 0755 -o "${OPERATOR_USER}" -g "${OPERATOR_GROUP}" \
+    "${directory}"
+  /usr/bin/install -d -m 0700 "${AUTOSTART_STATE_DIR}"
+  if [[ ! -e "${AUTOSTART_STATE_DIR}/${name}.saved" && \
+        ! -e "${AUTOSTART_STATE_DIR}/${name}.absent" ]]; then
+    if [[ -f "${target}" ]]; then
+      cp --preserve=mode,ownership,timestamps "${target}" \
+        "${AUTOSTART_STATE_DIR}/${name}.saved"
+    else
+      : >"${AUTOSTART_STATE_DIR}/${name}.absent"
+    fi
+  fi
+  /usr/bin/tee "${target}" >/dev/null <<EOF
+[Desktop Entry]
+Type=Application
+Name=Lumen appliance disabled ${name}
+Hidden=true
+X-GNOME-Autostart-enabled=false
+EOF
+  chown "${OPERATOR_USER}:${OPERATOR_GROUP}" "${target}"
+  chmod 0644 "${target}"
+}
+
+restore_autostart_override() {
+  local name="$1"
+  local target="${OPERATOR_HOME}/.config/autostart/${name}"
+  if [[ -f "${AUTOSTART_STATE_DIR}/${name}.saved" ]]; then
+    cp --preserve=mode,ownership,timestamps \
+      "${AUTOSTART_STATE_DIR}/${name}.saved" "${target}"
+  elif [[ -f "${AUTOSTART_STATE_DIR}/${name}.absent" ]]; then
+    rm -f -- "${target}"
+  fi
+}
+
+status() {
+  operator_identity
+  printf 'Lumen appliance status\n'
+  printf '  operator: %s (uid %s)\n' "${OPERATOR_USER}" "${OPERATOR_UID}"
+  printf '  OOM service override: %s\n' "$([[ -f "${OOM_SERVICE_FILE}" ]] && printf installed || printf absent)"
+  printf '  OOM global override:  %s\n' "$([[ -f "${OOM_GLOBAL_FILE}" ]] && printf installed || printf absent)"
+  printf '  Lumen memory config:  '
+  if [[ -f "${MEMORY_FILE}" ]]; then
+    tr -d '\n' <"${MEMORY_FILE}"
+    printf ' GiB\n'
+  else
+    printf 'project default\n'
+  fi
+  printf '  additional swap:      '
+  if /usr/sbin/swapon --noheadings --show=NAME | grep -Fxq "${SWAP_FILE}"; then
+    printf 'active\n'
+  else
+    printf 'inactive\n'
+  fi
+  printf '\nMemory\n'
+  free -h
+  printf '\nReviewed system units\n'
+  for unit in "${SYSTEM_DISABLE_UNITS[@]}"; do
+    printf '  %-36s enabled=%-9s active=%s\n' \
+      "${unit}" \
+      "$(systemctl is-enabled "${unit}" 2>/dev/null || true)" \
+      "$(systemctl is-active "${unit}" 2>/dev/null || true)"
+  done
+  printf '\nCurrent user-session OOM policy\n'
+  systemctl show "user@${OPERATOR_UID}.service" \
+    -p ManagedOOMMemoryPressure \
+    -p ManagedOOMMemoryPressureLimit \
+    -p MemoryCurrent -p MemoryPeak
+}
+
+apply_configuration() {
+  require_root apply
+  operator_identity
+  umask 022
+  /usr/bin/install -d -m 0755 "${STATE_DIR}" "${CONFIG_DIR}"
+
+  if [[ ! -f "${STATE_DIR}/fstab.before" ]]; then
+    cp --preserve=mode,ownership,timestamps /etc/fstab \
+      "${STATE_DIR}/fstab.before"
+  fi
+  if [[ -f "${OOM_SERVICE_FILE}" && ! -f "${STATE_DIR}/oom-service.before" ]]; then
+    cp --preserve=mode,ownership,timestamps "${OOM_SERVICE_FILE}" \
+      "${STATE_DIR}/oom-service.before"
+  fi
+  if [[ -f "${OOM_GLOBAL_FILE}" && ! -f "${STATE_DIR}/oom-global.before" ]]; then
+    cp --preserve=mode,ownership,timestamps "${OOM_GLOBAL_FILE}" \
+      "${STATE_DIR}/oom-global.before"
+  fi
+
+  /usr/bin/install -d -m 0755 "${OOM_SERVICE_DIR}" "${OOM_GLOBAL_DIR}"
+  /usr/bin/tee "${OOM_SERVICE_FILE}" >/dev/null <<'EOF'
+[Service]
+# Lumen is the only workload on this machine. Permit prolonged offline model
+# pressure without selecting GNOME at the desktop-oriented 50% threshold.
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=90%
+EOF
+  /usr/bin/tee "${OOM_GLOBAL_FILE}" >/dev/null <<'EOF'
+[OOM]
+# Allow a long neural layer to finish a transient allocation/reclaim phase.
+DefaultMemoryPressureDurationSec=45s
+SwapUsedLimit=98%
+EOF
+  printf '11.0\n' >"${MEMORY_FILE}"
+  chmod 0644 "${MEMORY_FILE}" "${OOM_SERVICE_FILE}" "${OOM_GLOBAL_FILE}"
+
+  systemctl daemon-reload
+  for unit in "${SYSTEM_DISABLE_UNITS[@]}"; do
+    systemctl disable --now "${unit}" >/dev/null 2>&1 || true
+  done
+
+  for unit in "${USER_MASK_UNITS[@]}"; do
+    user_systemctl mask --now "${unit}" >/dev/null 2>&1 || true
+  done
+  for name in "${AUTOSTART_DISABLE_FILES[@]}"; do
+    write_autostart_override "${name}"
+  done
+  pkill -u "${OPERATOR_UID}" -x anydesk >/dev/null 2>&1 || true
+
+  if [[ ! -e "${SWAP_FILE}" ]]; then
+    /usr/bin/fallocate -l 8G "${SWAP_FILE}"
+    chmod 0600 "${SWAP_FILE}"
+    /usr/sbin/mkswap "${SWAP_FILE}" >/dev/null
+  fi
+  if ! grep -Fq "${FSTAB_MARKER}" /etc/fstab; then
+    printf '%s none swap sw,pri=10 0 0 %s\n' \
+      "${SWAP_FILE}" "${FSTAB_MARKER}" >>/etc/fstab
+  fi
+  if ! /usr/sbin/swapon --noheadings --show=NAME | grep -Fxq "${SWAP_FILE}"; then
+    /usr/sbin/swapon --priority 10 "${SWAP_FILE}"
+  fi
+
+  printf '\nLumen appliance configuration applied.\n'
+  printf 'The OOM policy takes effect after a reboot or complete logout/login.\n'
+  printf 'No reboot was performed automatically.\n\n'
+  status
+}
+
+rollback_configuration() {
+  require_root rollback
+  operator_identity
+
+  if /usr/sbin/swapon --noheadings --show=NAME | grep -Fxq "${SWAP_FILE}"; then
+    /usr/sbin/swapoff "${SWAP_FILE}"
+  fi
+  /usr/bin/sed -i "\\|${FSTAB_MARKER}|d" /etc/fstab
+  rm -f -- "${SWAP_FILE}"
+
+  rm -f -- "${MEMORY_FILE}"
+  if [[ -f "${STATE_DIR}/oom-service.before" ]]; then
+    cp --preserve=mode,ownership,timestamps "${STATE_DIR}/oom-service.before" \
+      "${OOM_SERVICE_FILE}"
+  else
+    rm -f -- "${OOM_SERVICE_FILE}"
+  fi
+  if [[ -f "${STATE_DIR}/oom-global.before" ]]; then
+    cp --preserve=mode,ownership,timestamps "${STATE_DIR}/oom-global.before" \
+      "${OOM_GLOBAL_FILE}"
+  else
+    rm -f -- "${OOM_GLOBAL_FILE}"
+  fi
+
+  for name in "${AUTOSTART_DISABLE_FILES[@]}"; do
+    restore_autostart_override "${name}"
+  done
+  for unit in "${USER_MASK_UNITS[@]}"; do
+    user_systemctl unmask "${unit}" >/dev/null 2>&1 || true
+  done
+  for unit in "${SYSTEM_DISABLE_UNITS[@]}"; do
+    systemctl unmask "${unit}" >/dev/null 2>&1 || true
+    systemctl enable "${unit}" >/dev/null 2>&1 || true
+  done
+
+  systemctl daemon-reload
+  printf 'Lumen appliance configuration rolled back. Reboot to finish.\n'
+}
+
+case "${1:-}" in
+  status)
+    status
+    ;;
+  apply)
+    apply_configuration
+    ;;
+  rollback)
+    rollback_configuration
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

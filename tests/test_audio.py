@@ -31,25 +31,55 @@ class AudioAnalyzerTests(unittest.TestCase):
             sections.append(section)
         self.assertEqual(set(sections), {"groove"})
 
-    def test_section_tracker_holds_build_and_release(self) -> None:
+    def test_section_tracker_uses_arrangement_build_and_sustained_drop(self) -> None:
         analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=1)
         timestamp = 0.0
         for _ in range(96):
-            analyzer._classify_section(timestamp, 0.35, 0.18, 0.35, 0.18)
+            analyzer._classify_section(
+                timestamp,
+                0.35,
+                0.18,
+                0.35,
+                0.18,
+                rhythm_density=0.30,
+                spectral_brightness=0.30,
+            )
             timestamp += 1 / 24.0
         seen_build = False
+        seen_drop_onset = False
         for index in range(72):
             level = 0.35 + index / 72.0 * 0.45
             section, _ = analyzer._classify_section(
-                timestamp, level, 0.55, 0.45, 0.50
+                timestamp,
+                level,
+                0.55,
+                0.45,
+                0.50,
+                rhythm_density=0.30 + index / 72.0 * 0.45,
+                spectral_brightness=0.25 + index / 72.0 * 0.50,
+                harmonic_change=0.35,
+                arrangement_change=0.45,
             )
             timestamp += 1 / 24.0
             seen_build |= section == "build"
+            seen_drop_onset |= analyzer._last_transition_event == "drop_onset"
         self.assertTrue(seen_build)
-        section, _ = analyzer._classify_section(
-            timestamp, 0.92, 0.95, 0.62, 0.90
-        )
-        self.assertEqual(section, "release")
+        for _ in range(72):
+            section, _ = analyzer._classify_section(
+                timestamp,
+                0.92,
+                0.95,
+                0.62,
+                0.90,
+                rhythm_density=0.82,
+                spectral_brightness=0.75,
+                harmonic_change=0.70,
+                arrangement_change=0.85,
+            )
+            timestamp += 1 / 24.0
+            seen_drop_onset |= analyzer._last_transition_event == "drop_onset"
+        self.assertEqual(section, "drop")
+        self.assertTrue(seen_drop_onset)
         for index in range(60):
             timestamp += 1 / 24.0
             section, _ = analyzer._classify_section(
@@ -58,10 +88,43 @@ class AudioAnalyzerTests(unittest.TestCase):
                 0.62 if index % 8 == 0 else 0.16,
                 0.46,
                 0.48 if index % 8 == 0 else 0.20,
+                rhythm_density=0.72,
+                spectral_brightness=0.68,
+                arrangement_change=0.18,
             )
-            if index < 36:
-                self.assertEqual(section, "release")
-        self.assertEqual(section, "groove")
+        self.assertEqual(section, "drop")
+
+    def test_section_tracker_holds_quiet_arrangement_as_breakdown(self) -> None:
+        analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=1)
+        timestamp = 0.0
+        for _ in range(180):
+            analyzer._classify_section(
+                timestamp,
+                0.82,
+                0.28,
+                0.48,
+                0.22,
+                rhythm_density=0.70,
+                spectral_brightness=0.62,
+            )
+            timestamp += 1 / 24.0
+        seen_breakdown = False
+        for _ in range(300):
+            section, _ = analyzer._classify_section(
+                timestamp,
+                0.25,
+                0.08,
+                0.18,
+                0.12,
+                rhythm_density=0.16,
+                spectral_brightness=0.20,
+                harmonic_change=0.10,
+                arrangement_change=0.18,
+            )
+            timestamp += 1 / 24.0
+            seen_breakdown |= section == "breakdown"
+        self.assertTrue(seen_breakdown)
+        self.assertEqual(section, "breakdown")
 
     def test_silence_is_bounded(self) -> None:
         analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=1)
@@ -148,13 +211,22 @@ class AudioAnalyzerTests(unittest.TestCase):
                 pcm, timestamp_s=chunk * frames / sample_rate
             )
         self.assertIsNotNone(observation.bpm)
-        for offset in range(30):
+        tracker = analyzer._tempo_tracker
+        assert tracker is not None
+        locked_bpm = tracker.diagnostics["locked_bpm"]
+        for offset in range(40):
             observation = analyzer.analyze_pcm16(
                 bytes(frames * 2),
                 timestamp_s=(180 + offset) * frames / sample_rate,
             )
         self.assertIsNone(observation.bpm)
         self.assertLess(observation.beat_confidence, 0.05)
+        self.assertIs(analyzer._tempo_tracker, tracker)
+        self.assertAlmostEqual(
+            analyzer._tempo_tracker.diagnostics["locked_bpm"],
+            locked_bpm,
+            delta=0.02,
+        )
         analyzer.reset()
         self.assertEqual(analyzer._section, "groove")
         self.assertIsNone(analyzer._tempo_tracker)
