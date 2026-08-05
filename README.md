@@ -280,7 +280,8 @@ The Open-DMX adapter repeats the latest full 512-channel universe on a dedicated
 the FT232R device at a time, so stop Party Parrot before running Lumen's direct
 output commands.
 
-See [Architecture](docs/architecture.md) and
+See [Architecture](docs/architecture.md),
+[Threadripper compute-node link](docs/threadripper-compute-node.md), and
 [Roadmap](docs/roadmap.md) for the decisions and next milestones. The
 [progress log](CHANGELOG.md) records restorable versions, and the
 [backup and restore runbook](docs/backup-and-restore.md) explains how to rebuild

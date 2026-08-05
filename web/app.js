@@ -22,6 +22,9 @@ const app = {
   systemRefreshing: false,
   teachingRefreshing: false,
   researchRefreshing: false,
+  operatorTask: null,
+  operatorTaskSerial: 0,
+  researchTaskStartedAt: 0,
   lastStatusReceivedAt: 0,
   statusLatencyMs: 0,
   controlTimer: null,
@@ -163,6 +166,102 @@ function toast(title, message = "", kind = "") {
   element.innerHTML = `<b>${escapeHtml(title)}</b>${message ? `<span>${escapeHtml(message)}</span>` : ""}`;
   $("toast-stack").append(element);
   window.setTimeout(() => element.remove(), 4200);
+}
+
+function beginOperatorTask(title, detail = "", button = null) {
+  const task = {
+    id: ++app.operatorTaskSerial,
+    title,
+    detail,
+    startedAt: Date.now(),
+    button,
+    buttonWasDisabled: Boolean(button?.disabled),
+  };
+  app.operatorTask = task;
+  if (button) {
+    button.classList.add("task-pending");
+    button.setAttribute("aria-busy", "true");
+    button.disabled = true;
+  }
+  renderOperatorTask();
+  return task;
+}
+
+function finishOperatorTask(task) {
+  if (task?.button) {
+    task.button.classList.remove("task-pending");
+    task.button.removeAttribute("aria-busy");
+    task.button.disabled = task.buttonWasDisabled;
+  }
+  if (app.operatorTask?.id === task?.id) app.operatorTask = null;
+  renderOperatorTask();
+}
+
+function researchServerTask(research = app.bootstrap?.research || {}) {
+  const preparation = Boolean(research.preparation?.running);
+  const worker = research.worker || {};
+  if (!preparation && !worker.running) {
+    app.researchTaskStartedAt = 0;
+    return null;
+  }
+  if (!app.researchTaskStartedAt) app.researchTaskStartedAt = Date.now();
+  const progress = worker.progress || {};
+  const currentType = String(progress.current_job_type || "");
+  const done = Number(progress.processed || 0);
+  const planned = Number(progress.planned || 0);
+  const stage = String(progress.resources?.stage || "");
+  const stageLabels = {
+    student_feature_preparation: "Preparing causal audio features",
+    student_training: "Training the temporal model",
+  };
+  if (preparation) {
+    return {
+      title: "Preparing captured audio",
+      detail: "Verifying continuity, recording identity, checksums, and full-song eligibility.",
+      startedAt: app.researchTaskStartedAt,
+    };
+  }
+  if (worker.cancel_requested) {
+    return {
+      title: "Pausing offline work",
+      detail: "Waiting for the current model checkpoint; completed jobs are preserved.",
+      startedAt: app.researchTaskStartedAt,
+    };
+  }
+  if (currentType === "student.train") {
+    return {
+      title: "Training and validating the structure model",
+      detail: stageLabels[stage] || "Using trusted training songs, then evaluating the held-out songs.",
+      startedAt: app.researchTaskStartedAt,
+    };
+  }
+  return {
+    title: "Analyzing recordings with EDMFormer",
+    detail: planned > 0
+      ? `${done} of ${planned} queued jobs finished. The current full-song job is still active.`
+      : "A full-song teacher job is active. Progress will update after each recording completes.",
+    startedAt: app.researchTaskStartedAt,
+  };
+}
+
+function renderOperatorTask(research = app.bootstrap?.research || {}) {
+  const element = $("operator-task");
+  if (!element) return;
+  const task = app.operatorTask || researchServerTask(research);
+  element.classList.toggle("hidden", !task);
+  if (!task) return;
+  setText("operator-task-title", task.title || "Working");
+  setText("operator-task-detail", task.detail || "Lumen is completing the requested operation.");
+  const elapsed = Math.max(0, (Date.now() - Number(task.startedAt || Date.now())) / 1000);
+  setText("operator-task-elapsed", formatUptime(elapsed));
+}
+
+function confirmButtonPress(button) {
+  if (!button) return;
+  button.classList.remove("press-confirmed");
+  void button.offsetWidth;
+  button.classList.add("press-confirmed");
+  window.setTimeout(() => button.classList.remove("press-confirmed"), 380);
 }
 
 function setText(id, value) {
@@ -1583,6 +1682,7 @@ function renderResearch(research = {}) {
   }
   const runButton = $("research-run-button");
   const engineRunning = Boolean(app.status?.engine?.running);
+  const currentJobType = String(research.worker?.progress?.current_job_type || "");
   if (runButton) {
     runButton.disabled = engineRunning || preparationRunning || Boolean(research.worker?.running);
     runButton.textContent = preparationRunning
@@ -1590,6 +1690,14 @@ function renderResearch(research = {}) {
       : research.worker?.running
         ? cancelRequested ? "Pausing analysis…" : "Analysis running…"
         : "Analyze new recordings";
+    runButton.classList.toggle(
+      "task-pending",
+      preparationRunning || Boolean(research.worker?.running && currentJobType !== "student.train"),
+    );
+    runButton.setAttribute(
+      "aria-busy",
+      String(preparationRunning || Boolean(research.worker?.running && currentJobType !== "student.train")),
+    );
   }
   const cancelButton = $("research-cancel-button");
   if (cancelButton) {
@@ -1599,12 +1707,18 @@ function renderResearch(research = {}) {
       ? "Managed by local worker"
       : cancelRequested ? "Pausing…" : "Pause analysis";
   }
-  if ($("research-train-button")) {
-    $("research-train-button").disabled = engineRunning || preparationRunning || Boolean(research.worker?.running) || !training.train_ready;
+  const trainButton = $("research-train-button");
+  if (trainButton) {
+    trainButton.disabled = engineRunning || preparationRunning || Boolean(research.worker?.running) || !training.train_ready;
+    const trainingNow = Boolean(research.worker?.running && currentJobType === "student.train");
+    trainButton.textContent = trainingNow ? "Training and validating…" : "Train and validate";
+    trainButton.classList.toggle("task-pending", trainingNow);
+    trainButton.setAttribute("aria-busy", String(trainingNow));
   }
   if ($("research-import-button")) {
     $("research-import-button").disabled = engineRunning || preparationRunning || Boolean(research.worker?.running);
   }
+  renderOperatorTask(research);
   const list = $("research-components");
   if (!list) return;
   list.innerHTML = (research.components || []).map((component) => {
@@ -1644,7 +1758,11 @@ async function refreshResearch() {
 
 async function importResearchAnnotations() {
   const button = $("research-import-button");
-  if (button) button.disabled = true;
+  const task = beginOperatorTask(
+    "Refreshing normalized research annotations",
+    "Reading the installed label datasets and rebuilding their normalized local timelines.",
+    button,
+  );
   try {
     const result = await api("/api/research/import-annotations", {
       method: "POST",
@@ -1659,6 +1777,7 @@ async function importResearchAnnotations() {
   } catch (error) {
     toast("Annotation import failed", error.message, "error");
   } finally {
+    finishOperatorTask(task);
     if (button) button.disabled = false;
   }
 }
@@ -1666,8 +1785,12 @@ async function importResearchAnnotations() {
 async function runResearchJob() {
   const button = $("research-run-button");
   if (button?.disabled) return;
+  const task = beginOperatorTask(
+    "Preparing recordings for analysis",
+    "Checking new captures, reconstructing coherent songs, verifying checksums, and queuing EDMFormer.",
+    button,
+  );
   if (button) {
-    button.disabled = true;
     button.textContent = "Preparing capture…";
   }
   try {
@@ -1681,16 +1804,24 @@ async function runResearchJob() {
     if (result.started === false) {
       toast("Analysis already current", result.message || "No structure jobs are queued.", "success");
     } else {
-      toast("Recording analysis started", "Both structure teachers run in a resumable offline batch.", "success");
+      toast("Recording analysis started", "EDMFormer is running as a resumable offline batch.", "success");
     }
   } catch (error) {
     toast("Research job could not start", error.message, "error");
   } finally {
     await refreshResearch();
+    finishOperatorTask(task);
+    renderResearch(app.bootstrap?.research || {});
   }
 }
 
 async function cancelResearch() {
+  const button = $("research-cancel-button");
+  const task = beginOperatorTask(
+    "Requesting an analysis pause",
+    "The current model process will stop at its checkpoint and return unfinished work to the queue.",
+    button,
+  );
   try {
     const research = await api("/api/research/cancel", { method: "POST", body: {} });
     app.bootstrap.research = research;
@@ -1698,10 +1829,20 @@ async function cancelResearch() {
     toast("Analysis pausing", "The current teacher process will stop and its job will return to the queue.", "success");
   } catch (error) {
     toast("Analysis could not pause", error.message, "error");
+  } finally {
+    finishOperatorTask(task);
+    renderResearch(app.bootstrap?.research || {});
   }
 }
 
 async function trainStructureStudent() {
+  const button = $("research-train-button");
+  if (button?.disabled) return;
+  const task = beginOperatorTask(
+    "Starting neural training and validation",
+    "Selecting trusted teacher examples, preserving held-out songs, and preparing the causal model.",
+    button,
+  );
   try {
     const result = await api("/api/research/train-student", {
       method: "POST",
@@ -1716,6 +1857,10 @@ async function trainStructureStudent() {
     );
   } catch (error) {
     toast("Student training could not start", error.message, "error");
+  } finally {
+    await refreshResearch();
+    finishOperatorTask(task);
+    renderResearch(app.bootstrap?.research || {});
   }
 }
 
@@ -2478,6 +2623,7 @@ function calibrationJog() {
 }
 
 function installFeedbackButton(button) {
+  button.dataset.manualConfirmation = "true";
   let start = null;
   let cancelled = false;
   let touchArmed = false;
@@ -2501,6 +2647,7 @@ function installFeedbackButton(button) {
     // button; mouse/keyboard clicks remain immediate on the desktop.
     if (start?.pointerType === "touch" && !touchArmed) return;
     touchArmed = false;
+    confirmButtonPress(button);
     const surface = button.closest(".remote-section") ? "remote" : "desktop";
     sendFeedback(button.dataset.feedback, button.dataset.value, null, surface);
   });
@@ -2508,6 +2655,7 @@ function installFeedbackButton(button) {
 
 function installWakeProtectedAction(button, action) {
   if (!button) return;
+  button.dataset.manualConfirmation = "true";
   let start = null;
   let allowed = false;
   button.addEventListener("pointerdown", (event) => {
@@ -2526,6 +2674,7 @@ function installWakeProtectedAction(button, action) {
       return;
     }
     allowed = false;
+    confirmButtonPress(button);
     action(event);
   });
 }
@@ -3061,21 +3210,36 @@ function renderServiceDetails() {
 }
 
 async function startEngine(mode) {
+  const button = $(`${mode}-button`);
+  const task = beginOperatorTask(
+    `Starting ${label(mode)} mode`,
+    mode === "live" ? "Opening line-in and the physical DMX output." : "Opening the audio engine and preparing the selected output.",
+    button,
+  );
   try {
     app.status = await api("/api/engine/start", { method: "POST", body: { mode } });
     renderStatus();
     toast(`${label(mode)} mode starting`, mode === "live" ? "Opening line-in and the FT232R DMX interface." : mode === "monitor" ? "Listening to line-in with virtual output." : "Running the built-in demonstration.", "success");
   } catch (error) {
     toast(`Could not start ${mode} mode`, error.message, "error");
+  } finally {
+    finishOperatorTask(task);
   }
 }
 
 async function stopEngine() {
+  const task = beginOperatorTask(
+    "Stopping the engine",
+    "Closing the active session and finalizing its recorded audio and synchronized context.",
+    $("stop-button"),
+  );
   try {
     app.status = await api("/api/engine/stop", { method: "POST", body: {} });
     renderStatus();
   } catch (error) {
     toast("Could not stop engine", error.message, "error");
+  } finally {
+    finishOperatorTask(task);
   }
 }
 
@@ -3210,7 +3374,12 @@ async function sendTrainingAnnotation(kind, labelValue, surface = "desktop") {
   }
 }
 
-async function rescanSystem() {
+async function rescanSystem(button = null) {
+  const task = beginOperatorTask(
+    "Scanning connected hardware",
+    "Refreshing ALSA, FTDI, network, and Spotify status.",
+    button,
+  );
   try {
     toast("Scanning hardware", "Refreshing ALSA, FTDI, network, and Spotify state.");
     app.system = await api("/api/system");
@@ -3218,6 +3387,8 @@ async function rescanSystem() {
     updateComponentStatuses();
   } catch (error) {
     toast("Hardware scan failed", error.message, "error");
+  } finally {
+    finishOperatorTask(task);
   }
 }
 
@@ -3256,6 +3427,11 @@ async function saveTrainingSettings() {
 }
 
 async function exportTrainingData() {
+  const task = beginOperatorTask(
+    "Building the training manifest",
+    "Validating captured sessions and writing the versioned local dataset index.",
+    $("training-export-button"),
+  );
   try {
     const result = await api("/api/training/export", { method: "POST", body: {} });
     if (app.status?.training) app.status.training.last_export = result.path;
@@ -3263,6 +3439,8 @@ async function exportTrainingData() {
     toast("Training manifest built", result.path, "success");
   } catch (error) {
     toast("Training export failed", error.message, "error");
+  } finally {
+    finishOperatorTask(task);
   }
 }
 
@@ -3284,6 +3462,12 @@ function toggleBlackout() {
 }
 
 function installHandlers() {
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (button && button.dataset.manualConfirmation !== "true") {
+      confirmButtonPress(button);
+    }
+  });
   for (const id of ["feedback-listener-name", "remote-listener-name"]) {
     $(id)?.addEventListener("change", (event) => {
       updateParticipantName(event.target.value);
@@ -3596,8 +3780,8 @@ function installHandlers() {
   });
   installRigPointerHandlers();
 
-  $("rescan-system-button")?.addEventListener("click", rescanSystem);
-  $("system-rescan-button")?.addEventListener("click", rescanSystem);
+  $("rescan-system-button")?.addEventListener("click", () => rescanSystem($("rescan-system-button")));
+  $("system-rescan-button")?.addEventListener("click", () => rescanSystem($("system-rescan-button")));
   $("shutdown-lumen-button")?.addEventListener("click", shutdownLumen);
   $("audio-input-test-button")?.addEventListener("click", () => {
     if (app.status?.engine?.running && app.status.engine.mode === "monitor") stopEngine();
@@ -3821,6 +4005,7 @@ function updateClock() {
   const clock = now.toLocaleTimeString([], { hour12: false });
   setText("clock", clock);
   setText("footer-time", clock.slice(0, 5));
+  renderOperatorTask();
   if (app.page === "audio") {
     const age = app.lastStatusReceivedAt ? Date.now() - app.lastStatusReceivedAt : Infinity;
     setText(

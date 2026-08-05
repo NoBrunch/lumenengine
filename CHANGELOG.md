@@ -10,6 +10,39 @@ result. Git commit history remains the detailed engineering log.
 - Before pushing a backup, move completed items into a dated version entry,
   run the complete test suite, and record the result.
 
+## 0.7.1 - 2026-08-04
+
+### Added
+
+- A console-wide task strip with an activity spinner, current stage,
+  human-readable detail, and elapsed time for capture preparation, EDMFormer
+  analysis, student feature preparation, training/validation, engine startup
+  and shutdown, hardware scans, and manifest generation.
+- Visible confirmation animation for every accepted desktop and mobile button
+  press. Wake/scroll-protected mobile feedback confirms only after the touch is
+  accepted.
+- A durable Threadripper compute-node architecture note covering the private
+  Gigabit link, authority boundary, checksummed job contract, implementation
+  stages, and acceptance tests.
+- Static operator-interface contract tests for task status, press confirmation,
+  typography, and the compute-node decision record.
+
+### Changed
+
+- Every fixed-pixel interface font is two pixels larger; the smallest fixed
+  text increased from 7 px to 9 px and normal body text from 15 px to 17 px.
+- Analyze explicitly names EDMFormer as the active resumable teacher. Analyze
+  and Train buttons remain visibly busy for their server-side work and expose
+  `aria-busy` state.
+
+### Verification
+
+- `PATH="$PWD/.venv/bin:$PATH" PYTHONPATH=src python3 -m unittest discover -s tests -v`
+- 333 tests passed on 2026-08-04.
+- `node --check web/app.js` passed.
+- The local console and research API were smoke-tested on `127.0.0.1:4099` and
+  stopped afterward. No engine mode or physical DMX output was opened.
+
 ## 0.7.0 - 2026-08-04
 
 ### Added

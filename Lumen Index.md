@@ -20,12 +20,13 @@ control, term, or workflow changes, update this index in the same change.
 6. [Feedback and learning](#feedback-and-learning)
 7. [Neural training dataset](#neural-training-dataset)
 8. [Musical-structure research stack](#musical-structure-research-stack)
-9. [Calibration](#calibration)
-10. [Spotify](#spotify)
-11. [3D room interaction](#3d-room-interaction)
-12. [Troubleshooting](#troubleshooting)
-13. [Development maintenance](#development-maintenance)
-14. [Glossary](#glossary)
+9. [Threadripper compute node](#threadripper-compute-node)
+10. [Calibration](#calibration)
+11. [Spotify](#spotify)
+12. [3D room interaction](#3d-room-interaction)
+13. [Troubleshooting](#troubleshooting)
+14. [Development maintenance](#development-maintenance)
+15. [Glossary](#glossary)
 
 ## Quick start
 
@@ -961,6 +962,24 @@ are not merely stored as descriptive metadata. The interface labels and model
 vocabulary share the same identifiers, including **No strobes**, **Not busy
 enough**, **Too dim**, and faster/slower side-arm requests.
 
+## Threadripper compute node
+
+The approved future link keeps this Ubuntu PC responsible for line-in timing,
+the operator interface, feedback, canonical song memory, choreography, spatial
+resolution, and DMX. A direct Gigabit Ethernet connection will send only heavy
+offline work to the 3970X/128 GB Threadripper workstation: coherent full-song
+EDMFormer inference, feature generation, student training, held-out evaluation,
+and simulation.
+
+Lumen will transfer immutable checksummed recordings and job manifests, then
+validate and import immutable result bundles. The machines will not share a
+writable SQLite database, and the Threadripper will not drive beat timing or
+DMX. Approved song timelines and activated student models remain on Lumen so a
+network outage or powered-down compute node cannot affect Live.
+
+The full authority boundary, staged implementation, network plan, and
+acceptance checks are maintained in `docs/threadripper-compute-node.md`.
+
 ## Calibration
 
 Open Room & rig on the desktop PC and select a moving head.
@@ -1212,6 +1231,9 @@ runbook before treating any Git checkout as operational.
   musical section has begun, independently of naming that section.
 - **Causal model**: A model that uses only the present and past, making it
   suitable for live use without looking ahead in the song.
+- **Compute node**: The Threadripper service that executes versioned offline
+  analysis or training jobs and returns checksummed artifacts. It is not the
+  live lighting authority and does not drive DMX.
 - **Choreography sequence**: An ordered set of semantic fixture actions with
   group scope, beat start times, durations, intensity, palette, strobe, and
   entry/exit behavior.

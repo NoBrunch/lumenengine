@@ -56,3 +56,16 @@
 - Related-recording handling
 - Learned gesture ranking
 - Small CPU-optimized temporal model if it outperforms the authored baseline
+
+## Milestone 6 — Threadripper offline compute node
+
+- Private point-to-point Gigabit Ethernet link
+- Versioned, checksummed remote research-job bundles
+- Remote full-song EDMFormer execution without shared database writes
+- Remote student training and held-out evaluation
+- Resumable transfers, leases, progress, cancellation, and result import
+- Audio Laboratory compute-node status and execution-target controls
+- Live/DMX isolation and network-loss acceptance testing
+
+The approved authority boundary and acceptance criteria are recorded in
+[Threadripper compute-node link](threadripper-compute-node.md).
