@@ -53,6 +53,7 @@ const app = {
   editingStructureTimelineId: null,
   choreographyUndo: null,
   touchBlockedUntil: Date.now() + 1200,
+  floatingPanelZ: 200,
 };
 
 function blockWakeTouches(milliseconds = 1200) {
@@ -318,9 +319,241 @@ function setPage(name) {
   if (name === "music") refreshSpotifyConsole(false);
 }
 
+function panelWorkspaceKey(panel, index) {
+  const page = panel.closest(".workspace-page")?.dataset.page || "workspace";
+  const heading = panel.querySelector(":scope > .panel-titlebar h3")?.textContent
+    || panel.className;
+  const slug = heading.trim().toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `${page}.${slug || index}`;
+}
+
+function saveFloatingPanel(panel) {
+  const key = panel.dataset.panelWorkspaceKey;
+  if (!key) return;
+  const state = panel.classList.contains("panel-floating")
+    ? {
+        floating: true,
+        left: parseFloat(panel.style.left) || 0,
+        top: parseFloat(panel.style.top) || 0,
+        width: parseFloat(panel.style.width) || panel.offsetWidth,
+        height: parseFloat(panel.style.height) || panel.offsetHeight,
+      }
+    : { floating: false };
+  window.localStorage.setItem(`lumen.panel.${key}.v2`, JSON.stringify(state));
+}
+
+function constrainFloatingPanel(panel) {
+  const minimumWidth = Math.min(340, window.innerWidth - 16);
+  const minimumHeight = Math.min(210, window.innerHeight - 16);
+  const width = Math.max(
+    minimumWidth,
+    Math.min(
+      parseFloat(panel.style.width) || panel.offsetWidth,
+      window.innerWidth - 8,
+    ),
+  );
+  const height = Math.max(
+    minimumHeight,
+    Math.min(
+      parseFloat(panel.style.height) || panel.offsetHeight,
+      window.innerHeight - 8,
+    ),
+  );
+  const left = Math.max(
+    4,
+    Math.min(
+      parseFloat(panel.style.left) || 4,
+      window.innerWidth - width - 4,
+    ),
+  );
+  const top = Math.max(
+    4,
+    Math.min(
+      parseFloat(panel.style.top) || 4,
+      window.innerHeight - height - 4,
+    ),
+  );
+  Object.assign(panel.style, {
+    width: `${width}px`,
+    height: `${height}px`,
+    left: `${left}px`,
+    top: `${top}px`,
+  });
+}
+
+function setPanelFloating(panel, floating, saved = null) {
+  const button = panel.querySelector(
+    ":scope > .panel-titlebar .panel-float-toggle",
+  );
+  if (!floating) {
+    panel.classList.remove("panel-floating");
+    for (const property of ["left", "top", "width", "height", "zIndex", "cursor"]) {
+      panel.style[property] = "";
+    }
+    if (button) {
+      button.textContent = "↗";
+      button.title = "Float, move, and resize this panel";
+      button.setAttribute("aria-label", button.title);
+    }
+    saveFloatingPanel(panel);
+    return;
+  }
+  const rect = panel.getBoundingClientRect();
+  const preferredWidth = panel.classList.contains("sequence-editor-panel")
+    ? Math.max(rect.width, window.innerWidth * 0.82)
+    : Math.max(rect.width, Math.min(760, window.innerWidth * 0.7));
+  const preferredHeight = panel.classList.contains("sequence-editor-panel")
+    ? Math.max(rect.height, window.innerHeight * 0.82)
+    : Math.max(rect.height, Math.min(620, window.innerHeight * 0.72));
+  panel.classList.add("panel-floating");
+  Object.assign(panel.style, {
+    left: `${saved?.left ?? Math.max(12, (window.innerWidth - preferredWidth) / 2)}px`,
+    top: `${saved?.top ?? Math.max(12, (window.innerHeight - preferredHeight) / 2)}px`,
+    width: `${saved?.width ?? preferredWidth}px`,
+    height: `${saved?.height ?? preferredHeight}px`,
+    zIndex: String(++app.floatingPanelZ),
+  });
+  constrainFloatingPanel(panel);
+  if (button) {
+    button.textContent = "↙";
+    button.title = "Dock this panel back into the dashboard";
+    button.setAttribute("aria-label", button.title);
+  }
+  saveFloatingPanel(panel);
+}
+
+function beginPanelMove(event, panel) {
+  if (!panel.classList.contains("panel-floating") || event.button !== 0) return;
+  if (event.target.closest("button, input, select, a, summary")) return;
+  event.preventDefault();
+  panel.style.zIndex = String(++app.floatingPanelZ);
+  const rect = panel.getBoundingClientRect();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const move = (next) => {
+    panel.style.left = `${rect.left + next.clientX - startX}px`;
+    panel.style.top = `${rect.top + next.clientY - startY}px`;
+    constrainFloatingPanel(panel);
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    saveFloatingPanel(panel);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+}
+
+function beginPanelResize(event, panel, edge) {
+  if (!panel.classList.contains("panel-floating") || event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  panel.style.zIndex = String(++app.floatingPanelZ);
+  const rect = panel.getBoundingClientRect();
+  const startX = event.clientX;
+  const startY = event.clientY;
+  const minimumWidth = Math.min(340, window.innerWidth - 16);
+  const minimumHeight = Math.min(210, window.innerHeight - 16);
+  const move = (next) => {
+    const dx = next.clientX - startX;
+    const dy = next.clientY - startY;
+    let left = rect.left;
+    let top = rect.top;
+    let width = rect.width;
+    let height = rect.height;
+    if (edge.includes("e")) width = Math.max(minimumWidth, rect.width + dx);
+    if (edge.includes("s")) height = Math.max(minimumHeight, rect.height + dy);
+    if (edge.includes("w")) {
+      width = Math.max(minimumWidth, rect.width - dx);
+      left = rect.right - width;
+    }
+    if (edge.includes("n")) {
+      height = Math.max(minimumHeight, rect.height - dy);
+      top = rect.bottom - height;
+    }
+    Object.assign(panel.style, {
+      left: `${left}px`,
+      top: `${top}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+    });
+    constrainFloatingPanel(panel);
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    saveFloatingPanel(panel);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+}
+
+function panelResizeEdge(event, panel) {
+  if (!panel.classList.contains("panel-floating")) return "";
+  const rect = panel.getBoundingClientRect();
+  const margin = 12;
+  const vertical = event.clientY - rect.top <= margin
+    ? "n"
+    : rect.bottom - event.clientY <= margin ? "s" : "";
+  const horizontal = event.clientX - rect.left <= margin
+    ? "w"
+    : rect.right - event.clientX <= margin ? "e" : "";
+  return `${vertical}${horizontal}`;
+}
+
+function installPanelWorkspace() {
+  if (app.remote) return;
+  $$(".desktop-workspace .panel").forEach((panel, index) => {
+    const titlebar = panel.querySelector(":scope > .panel-titlebar");
+    if (!titlebar || titlebar.querySelector(".panel-float-toggle")) return;
+    panel.dataset.panelWorkspaceKey = panelWorkspaceKey(panel, index);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mini-tool panel-float-toggle";
+    button.textContent = "↗";
+    button.title = "Float, move, and resize this panel";
+    button.setAttribute("aria-label", button.title);
+    button.addEventListener("click", () => {
+      setPanelFloating(panel, !panel.classList.contains("panel-floating"));
+    });
+    titlebar.append(button);
+    titlebar.addEventListener(
+      "pointerdown",
+      (event) => beginPanelMove(event, panel),
+    );
+    panel.addEventListener("pointerdown", (event) => {
+      const edge = panelResizeEdge(event, panel);
+      if (edge) beginPanelResize(event, panel, edge);
+    }, { capture: true });
+    panel.addEventListener("pointermove", (event) => {
+      if (!panel.classList.contains("panel-floating")) return;
+      const cursors = {
+        n: "ns-resize", s: "ns-resize", e: "ew-resize", w: "ew-resize",
+        ne: "nesw-resize", sw: "nesw-resize", nw: "nwse-resize", se: "nwse-resize",
+      };
+      panel.style.cursor = cursors[panelResizeEdge(event, panel)] || "";
+    });
+    panel.addEventListener("pointerleave", () => {
+      if (panel.classList.contains("panel-floating")) panel.style.cursor = "";
+    });
+    const storageKey = `lumen.panel.${panel.dataset.panelWorkspaceKey}.v2`;
+    try {
+      const saved = JSON.parse(
+        window.localStorage.getItem(storageKey) || "null",
+      );
+      if (saved?.floating) setPanelFloating(panel, true, saved);
+    } catch {
+      window.localStorage.removeItem(storageKey);
+    }
+  });
+}
+
 async function initialize() {
   if (app.remote) document.body.classList.add("remote-mode");
   installHandlers();
+  installPanelWorkspace();
   renderParticipantIdentity();
   renderSequenceDraft();
   updateClock();
@@ -344,6 +577,7 @@ async function initialize() {
   }
   app.polling = window.setTimeout(pollStatus, 100);
   window.addEventListener("resize", () => {
+    $$(".panel-floating").forEach(constrainFloatingPanel);
     drawPerformanceRoom();
     drawRig();
     drawScope();
@@ -955,12 +1189,23 @@ function renderStructureTimelines(teaching = {}) {
   const count = $("structure-timeline-count");
   if (!container) return;
   const timelines = teaching.structure_timelines || [];
-  if (count) count.textContent = `${timelines.length} ${timelines.length === 1 ? "TIMELINE" : "TIMELINES"}`;
+  if (count && !Array.isArray(teaching.catalog)) {
+    count.textContent = `${timelines.length} ${timelines.length === 1 ? "TIMELINE" : "TIMELINES"}`;
+  }
   if (!timelines.length) {
     container.innerHTML = '<p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p>';
     return;
   }
-  container.innerHTML = timelines.map((timeline) => {
+  const pendingTimelines = timelines.filter((timeline) => (
+    timeline.review_eligible !== false
+    && !["approved", "rejected"].includes(
+      timeline.review?.status || "unreviewed",
+    )
+  ));
+  const displayedTimelines = pendingTimelines.length
+    ? pendingTimelines
+    : timelines;
+  container.innerHTML = displayedTimelines.map((timeline) => {
     const teacher = timeline.teacher?.name || timeline.provenance || "Local timeline";
     const scored = Number(timeline.confidence || 0) > 0;
     const review = timeline.review?.status || "unreviewed";
@@ -974,19 +1219,25 @@ function renderStructureTimelines(teaching = {}) {
       const end = segment.end_ms === null || segment.end_ms === undefined ? "" : Number(segment.end_ms) / 1000;
       const timing = isEditing
         ? `<td class="structure-time-edit"><input data-structure-start="${index}" type="number" min="0" step="0.1" value="${start}"><span>to</span><input data-structure-end="${index}" type="number" min="0" step="0.1" value="${end}"></td>`
-        : `<td>${songTime(segment.start_ms)}–${segment.end_ms === null ? "end" : songTime(segment.end_ms)}</td>`;
+        : `<td class="structure-time-readout"><b>${songTime(segment.start_ms)}</b><span>to</span><b>${segment.end_ms === null ? "end" : songTime(segment.end_ms)}</b></td>`;
       return `<tr data-structure-segment="${index}">${timing}${cells}<td title="Original teacher label">${escapeHtml(segment.raw_label || "—")}</td><td>${segment.label_confidence > 0 ? percent(segment.label_confidence) : "unscored"}</td></tr>`;
     }).join("");
     const reviewDisabled = timeline.review_eligible === false ? " disabled title=\"Diagnostic evidence cannot be approved for Live recall\"" : "";
+    const reviewActions = review === "approved" || review === "rejected"
+      ? `<span class="structure-review-complete state-${escapeHtml(review)}">${escapeHtml(label(review))}</span><button data-timeline-review="unreviewed" data-timeline-id="${escapeHtml(timeline.id)}">Reopen review</button>`
+      : `<button data-timeline-review="approved" data-timeline-id="${escapeHtml(timeline.id)}"${reviewDisabled}>Approve</button><button data-timeline-review="rejected" data-timeline-id="${escapeHtml(timeline.id)}">Reject</button>`;
     return `<article class="structure-timeline-card${review === "approved" ? " approved" : review === "rejected" ? " rejected" : ""}">
-      <header><div><b>${escapeHtml(teacher)}</b><span>${scored ? `${percent(timeline.confidence)} model confidence` : "unscored model output"} · ${escapeHtml(label(timeline.recall_authority || review))}</span><small>${escapeHtml(timeline.timeline_version || "unknown version")}${correctedFrom ? ` · correction of ${escapeHtml(correctedFrom)}` : ""}</small></div><div class="structure-review-actions"><button data-timeline-review="approved" data-timeline-id="${escapeHtml(timeline.id)}"${reviewDisabled}>Approve</button><button data-timeline-review="rejected" data-timeline-id="${escapeHtml(timeline.id)}">Reject</button><button data-timeline-correct="${escapeHtml(timeline.id)}">${isEditing ? "Cancel correction" : "Correct labels"}</button></div></header>
+      <header><div><b>${escapeHtml(teacher)}</b><span>${scored ? `${percent(timeline.confidence)} model confidence` : "unscored model output"} · ${escapeHtml(label(timeline.recall_authority || review))}</span><small>${escapeHtml(timeline.timeline_version || "unknown version")}${correctedFrom ? ` · correction of ${escapeHtml(correctedFrom)}` : ""}</small></div><div class="structure-review-actions">${reviewActions}<button data-timeline-correct="${escapeHtml(timeline.id)}">${isEditing ? "Cancel correction" : "Correct labels"}</button></div></header>
       <div class="structure-table-wrap"><table><thead><tr><th>Time</th><th>Function</th><th>Energy</th><th>Content</th><th>Transition event</th><th>Raw teacher label</th><th>Model score</th></tr></thead><tbody>${rows}</tbody></table></div>
       ${isEditing ? `<div class="structure-correction-actions"><label><span>Correction note</span><input id="structure-correction-note" maxlength="1000" placeholder="What did the teacher get wrong?"></label><button class="primary" data-timeline-save="${escapeHtml(timeline.id)}">Save immutable correction</button></div>` : ""}
     </article>`;
-  }).join("");
+  }).join("") + (pendingTimelines.length && timelines.length > pendingTimelines.length
+    ? `<p class="structure-reviewed-hidden">${timelines.length - pendingTimelines.length} reviewed or historical timeline${timelines.length - pendingTimelines.length === 1 ? " is" : "s are"} hidden while this song still has active review work. Select Reviewed after completing the queue to inspect the full history.</p>`
+    : "");
 }
 
 async function reviewStructureTimeline(timelineId, status) {
+  const reviewedRecordingId = app.selectedStructureRecordingId;
   try {
     await api("/api/structure/review", { method: "POST", body: {
       timeline_id: timelineId,
@@ -995,9 +1246,33 @@ async function reviewStructureTimeline(timelineId, status) {
       participant_id: app.participantId,
       participant_name: app.participantName || null,
     }});
-    await refreshStructureLibrary(app.selectedStructureRecordingId);
+    await refreshStructureLibrary(reviewedRecordingId);
     await refreshSongTeaching(true);
-    toast("Timeline review saved", `${label(status)} · model probability was not changed`, "success");
+    const currentStillPending = (app.structureLibrary?.catalog || []).some(
+      (item) => item.recording_id === reviewedRecordingId
+        && item.review_status === "needs_review",
+    );
+    const nextReview = !currentStillPending && (app.structureLibrary?.catalog || []).find(
+      (item) => item.review_status === "needs_review"
+        && item.recording_id !== reviewedRecordingId,
+    );
+    if (nextReview && status !== "unreviewed") {
+      await refreshStructureLibrary(nextReview.recording_id);
+    }
+    const confirmation = {
+      approved: "Approved for exact-song recall; your trust decision is stored with this timeline.",
+      rejected: "Excluded from exact-song recall and future student targets; it remains available in review history.",
+      unreviewed: "Returned to the review queue.",
+    }[status] || "Review state updated.";
+    toast(
+      status === "unreviewed" ? "Timeline review reopened" : `Timeline ${status}`,
+      nextReview && status !== "unreviewed"
+        ? `${confirmation} Opened the next song awaiting review.`
+        : currentStillPending && status !== "unreviewed"
+          ? `${confirmation} Opened the next timeline for this song.`
+        : confirmation,
+      "success",
+    );
   } catch (error) {
     toast("Timeline review failed", error.message, "error");
   }
@@ -1646,6 +1921,7 @@ function renderResearch(research = {}) {
       const heldoutName = label(evaluation.held_out_split || "held-out");
       const heldout = evaluation.evaluation?.[evaluation.held_out_split || "test"] || {};
       const energy = heldout.energy || {};
+      const functional = heldout.functional || {};
       const content = heldout.content || {};
       const boundary = heldout.boundary || {};
       const notApplicable = new Set(evaluation.not_applicable_axes || []);
@@ -1660,8 +1936,10 @@ function renderResearch(research = {}) {
       if (hasMetric(content.accuracy) && hasMetric(content.majority_baseline)) {
         metricDetails.push(`content ${(Number(content.accuracy) * 100).toFixed(1)}% versus ${(Number(content.majority_baseline) * 100 + 0.5).toFixed(1)}% required`);
       }
-      if (notApplicable.has("functional")) {
-        metricDetails.push("functional sections are not applicable to the EDMFormer techno student");
+      if (hasMetric(functional.accuracy) && hasMetric(functional.majority_baseline)) {
+        metricDetails.push(`functional ${(Number(functional.accuracy) * 100).toFixed(1)}% versus ${(Number(functional.majority_baseline) * 100 + 0.5).toFixed(1)}% required`);
+      } else if (notApplicable.has("functional")) {
+        metricDetails.push("functional form was not present in this candidate's trusted teacher data");
       }
       const boundaryPrecision = boundary.event_precision ?? boundary.precision;
       const boundaryF1 = boundary.event_f1 ?? boundary.f1;
@@ -1673,7 +1951,7 @@ function renderResearch(research = {}) {
         : reasons.length ? ` ${reasons.join("; ")}.` : "";
       readiness.textContent = model.active
         ? `The validated model remains active; the latest candidate was rejected.${resultDetail}`
-        : `Training completed, but the current candidate was not authorized for Live because it did not generalize to unseen songs.${resultDetail} Review or correct the held-out song timelines and retrain after the trusted data changes; repeating Analyze and Train with unchanged data is not expected to help.`;
+        : `Training completed. The candidate was retained for diagnosis but not authorized for Live because held-out qualification did not pass.${resultDetail} Review or correct the held-out song timelines, then retrain after the trusted data changes; repeating training with identical inputs produces the same qualification evidence.`;
       if (modelNotice) readiness.textContent += ` ${modelNotice}`;
       readiness.textContent += recoveryNote;
       readiness.className = "research-readiness";

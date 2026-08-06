@@ -82,17 +82,17 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
         self.assertIn(
-            "did not generalize to unseen songs",
+            "held-out qualification did not pass",
             script,
         )
         self.assertIn(
-            "repeating Analyze and Train with unchanged data is not "
-            "expected to help",
+            "repeating training with identical inputs produces the same "
+            "qualification evidence",
             script,
         )
         self.assertIn(
-            "functional sections are not applicable to the EDMFormer "
-            "techno student",
+            "functional form was not present in this candidate's trusted "
+            "teacher data",
             script,
         )
         self.assertIn('id="research-song-results"', html)
@@ -120,6 +120,34 @@ class OperatorInterfaceContractTests(unittest.TestCase):
             script,
         )
         self.assertIn('setWidth(`audio-meter-${name}`, expression[name])', script)
+
+    def test_timeline_editor_has_readable_times_and_review_advances(self) -> None:
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        stylesheet = (ROOT / "web" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('class="structure-time-readout"', script)
+        self.assertIn("Opened the next song awaiting review", script)
+        self.assertIn('data-timeline-review="unreviewed"', script)
+        self.assertIn(".sequence-editor-panel {", stylesheet)
+        self.assertIn("grid-column: 1 / 3;", stylesheet)
+        self.assertIn(".structure-time-readout { min-width: 13rem; }", stylesheet)
+
+    def test_desktop_panels_float_move_and_resize_from_every_edge(self) -> None:
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        stylesheet = (ROOT / "web" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function installPanelWorkspace", script)
+        self.assertIn("function beginPanelMove", script)
+        self.assertIn("function beginPanelResize", script)
+        self.assertIn("function panelResizeEdge", script)
+        self.assertIn('edge.includes("w")', script)
+        self.assertIn('edge.includes("n")', script)
+        self.assertIn("lumen.panel.${key}.v2", script)
+        self.assertIn(".panel-floating {", stylesheet)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,29 @@ EDMFORMER_PREPROCESSING_VERSION = (
     "local30s:global420s:cpu_sdpa_v1:"
     f"{TEACHER_NORMALIZATION_VERSION}"
 )
+SONGFORMER_PREPROCESSING_PREFIX = (
+    "songformer_official_features_cpu_windowed_v1:"
+)
+
+
+def current_songformer_preprocessing(value: object) -> bool:
+    """Return whether a SongFormer run uses the current bounded CPU contract."""
+
+    text = str(value or "")
+    prefix = SONGFORMER_PREPROCESSING_PREFIX
+    suffix = f":{TEACHER_NORMALIZATION_VERSION}"
+    if not text.startswith(prefix) or not text.endswith(suffix):
+        return False
+    window = text[len(prefix):-len(suffix)]
+    if not window.endswith("s"):
+        return False
+    try:
+        seconds = int(window[:-1])
+    except ValueError:
+        return False
+    return 30 <= seconds <= 60
+
+
 _CANONICAL_STRUCTURE_LABELS = {
     "functional_label": {value.value for value in FunctionalSection},
     "energy_label": {value.value for value in EnergySection},
@@ -2603,12 +2626,23 @@ class SongMemoryStore:
                     and operator_authority
                 )
                 or (
-                    teacher_name == "edmformer"
+                    teacher_name in {"edmformer", "songformer"}
                     and row["teacher_status"] == "complete"
                     and str(timeline.get("timeline_version") or "")
                     == TEACHER_NORMALIZATION_VERSION
-                    and str(row["preprocessing_version"] or "")
-                    == EDMFORMER_PREPROCESSING_VERSION
+                    and (
+                        (
+                            teacher_name == "edmformer"
+                            and str(row["preprocessing_version"] or "")
+                            == EDMFORMER_PREPROCESSING_VERSION
+                        )
+                        or (
+                            teacher_name == "songformer"
+                            and current_songformer_preprocessing(
+                                row["preprocessing_version"]
+                            )
+                        )
+                    )
                 )
             )
             review_status = str(
@@ -2627,7 +2661,8 @@ class SongMemoryStore:
             if not technically_eligible:
                 timeline["recall_authority"] = (
                     "non_authoritative_teacher"
-                    if teacher_name and teacher_name != "edmformer"
+                    if teacher_name
+                    and teacher_name not in {"edmformer", "songformer"}
                     else "ineligible_version_or_run"
                 )
             elif review_status == "rejected":
@@ -2700,6 +2735,30 @@ class SongMemoryStore:
             metadata = json.loads(item.pop("metadata_json"))
             track = metadata.get("track_identity") or {}
             candidates = states.get(str(item["id"]), [])
+
+            def eligible_teacher(candidate: dict[str, Any]) -> bool:
+                teacher = str(
+                    candidate.get("teacher_name") or ""
+                ).casefold()
+                preprocessing = candidate.get("preprocessing_version")
+                return bool(
+                    teacher in {"edmformer", "songformer"}
+                    and candidate.get("teacher_status") == "complete"
+                    and candidate.get("timeline_version")
+                    == TEACHER_NORMALIZATION_VERSION
+                    and (
+                        (
+                            teacher == "edmformer"
+                            and preprocessing
+                            == EDMFORMER_PREPROCESSING_VERSION
+                        )
+                        or (
+                            teacher == "songformer"
+                            and current_songformer_preprocessing(preprocessing)
+                        )
+                    )
+                )
+
             corrected = any(
                 "operator" in str(candidate.get("provenance") or "").casefold()
                 or "correction" in str(candidate.get("provenance") or "").casefold()
@@ -2710,29 +2769,32 @@ class SongMemoryStore:
                 == "approved"
                 for candidate in candidates
             )
+            eligible_candidates = [
+                candidate for candidate in candidates
+                if eligible_teacher(candidate)
+            ]
             rejected = sum(
                 str(candidate.get("review_status") or "").casefold()
                 == "rejected"
-                for candidate in candidates
+                for candidate in eligible_candidates
             )
             eligible_unreviewed = any(
-                str(candidate.get("teacher_name") or "").casefold()
-                == "edmformer"
-                and candidate.get("teacher_status") == "complete"
-                and candidate.get("timeline_version")
-                == TEACHER_NORMALIZATION_VERSION
-                and candidate.get("preprocessing_version")
-                == EDMFORMER_PREPROCESSING_VERSION
-                and not candidate.get("review_status")
+                eligible_teacher(candidate)
+                and str(
+                    candidate.get("review_status") or "unreviewed"
+                ).casefold() == "unreviewed"
                 for candidate in candidates
             )
-            if corrected:
+            if eligible_unreviewed:
+                review_status = "needs_review"
+            elif corrected:
                 review_status = "corrected"
             elif approved:
                 review_status = "approved"
-            elif eligible_unreviewed:
-                review_status = "needs_review"
-            elif rejected == len(candidates) and candidates:
+            elif (
+                rejected == len(eligible_candidates)
+                and eligible_candidates
+            ):
                 review_status = "rejected"
             else:
                 review_status = "diagnostic_only"
@@ -2742,13 +2804,9 @@ class SongMemoryStore:
             supervision = metadata.get("structure_supervision") or {}
             canonical_runs = [
                 candidate for candidate in candidates
-                if str(candidate.get("teacher_name") or "").casefold()
-                == "edmformer"
-                and candidate.get("teacher_status") == "complete"
-                and candidate.get("timeline_version")
-                == TEACHER_NORMALIZATION_VERSION
-                and candidate.get("preprocessing_version")
-                == EDMFORMER_PREPROCESSING_VERSION
+                if eligible_teacher(candidate)
+                and str(candidate.get("review_status") or "").casefold()
+                != "rejected"
             ]
             teacher_sources = sorted({
                 str(candidate.get("teacher_name") or "Local").strip()
@@ -3036,11 +3094,10 @@ class SongMemoryStore:
     ) -> dict[str, Any] | None:
         """Fuse completed cached teacher timelines at one playback position.
 
-        Only the current EDMFormer techno ontology is active model authority.
-        SongFormer and obsolete timelines remain durable research artifacts;
-        operator corrections remain eligible and outrank model output. This
-        lookup supplies structural context only: the audio sample clock stays
-        authoritative for beat-synchronous output.
+        EDMFormer supplies techno energy form while SongFormer supplies
+        functional/content form. Operator corrections outrank both. Obsolete
+        timelines remain durable research artifacts but cannot enter this
+        lookup. Audio sample timing stays authoritative for beat output.
         """
         recording: dict[str, Any] | None
         if recording_id is not None:
@@ -3158,7 +3215,10 @@ class SongMemoryStore:
                 "operator" in provenance_name
                 or "correction" in provenance_name
             )
-            if teacher_name != "edmformer" and not operator_authority:
+            if (
+                teacher_name not in {"edmformer", "songformer"}
+                and not operator_authority
+            ):
                 continue
             if (
                 teacher_name == "edmformer"
@@ -3171,6 +3231,17 @@ class SongMemoryStore:
             ):
                 # Preserve obsolete timelines for audit/reprocessing without
                 # admitting their unmerged or synthetic-confidence output.
+                continue
+            if (
+                teacher_name == "songformer"
+                and (
+                    str(row["timeline_version"] or "")
+                    != TEACHER_NORMALIZATION_VERSION
+                    or not current_songformer_preprocessing(
+                        row["preprocessing_version"]
+                    )
+                )
+            ):
                 continue
             if any(
                 segment.get(field) is not None
@@ -3195,9 +3266,9 @@ class SongMemoryStore:
             return None
 
         axis_preferences = {
-            "functional": ("edmformer",),
+            "functional": ("songformer", "edmformer"),
             "energy": ("edmformer", "edm-98", "edm98"),
-            "content": ("edmformer",),
+            "content": ("songformer", "edmformer"),
         }
 
         def source_priority(
@@ -3226,6 +3297,7 @@ class SongMemoryStore:
         for timeline in timelines:
             timeline_id = str(timeline["id"])
             teacher = teacher_by_timeline[timeline_id]
+            teacher_name = str(teacher.get("name") or "").casefold()
             source = " / ".join(
                 str(value)
                 for value in (timeline.get("provenance"), teacher.get("name"))
@@ -3283,6 +3355,8 @@ class SongMemoryStore:
                     if position_ms >= end_value and not final_endpoint:
                         continue
                 for axis in ("functional", "energy", "content"):
+                    if teacher_name == "songformer" and axis == "energy":
+                        continue
                     label = segment.get(f"{axis}_label")
                     if label is None or not str(label).strip():
                         continue

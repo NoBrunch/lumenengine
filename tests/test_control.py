@@ -756,7 +756,7 @@ class ControlApplicationTests(unittest.TestCase):
         self.application.close()
         self.temporary.cleanup()
 
-    def test_songformer_timeline_cannot_be_approved_for_live_recall(
+    def test_obsolete_songformer_timeline_cannot_be_approved_for_live_recall(
         self,
     ) -> None:
         media = MediaIdentity(
@@ -813,6 +813,69 @@ class ControlApplicationTests(unittest.TestCase):
             recording_id=recording_id,
             playback_position_ms=10_000,
         ))
+
+    def test_current_songformer_function_can_be_approved_for_recall(
+        self,
+    ) -> None:
+        media = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:current-songformer",
+            title="Current functional teacher",
+            duration_ms=60_000,
+            observed_position_ms=10_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=False,
+        )
+        song_id = self.application.memory.remember_media(media)
+        recording_id = self.application.memory.remember_recording_version(
+            provider=media.provider,
+            provider_item_id=media.provider_item_id,
+            duration_ms=media.duration_ms,
+            song_id=song_id,
+        )
+        run_id = self.application.memory.begin_teacher_run(
+            teacher_name="SongFormer",
+            teacher_version="current",
+            device="cpu",
+            preprocessing_version=(
+                "songformer_official_features_cpu_windowed_v1:60s:"
+                f"{TEACHER_NORMALIZATION_VERSION}"
+            ),
+            recording_id=recording_id,
+        )
+        timeline_id = self.application.memory.save_structure_timeline(
+            provenance="songformer_teacher",
+            timeline_version=TEACHER_NORMALIZATION_VERSION,
+            confidence=0.0,
+            recording_id=recording_id,
+            teacher_run_id=run_id,
+            segments=[{
+                "start_ms": 0,
+                "end_ms": 60_000,
+                "functional_label": "chorus",
+                "content_label": "instrumental",
+            }],
+        )
+        self.application.memory.finish_teacher_run(run_id, status="complete")
+        self.application.media = media
+        self.application.song_id = song_id
+
+        result = self.application.review_structure_timeline({
+            "timeline_id": timeline_id,
+            "status": "approved",
+        })
+
+        self.assertEqual(result["review"]["status"], "approved")
+        cached = self.application.memory.cached_structure_at(
+            recording_id=recording_id,
+            playback_position_ms=10_000,
+        )
+        assert cached is not None
+        self.assertEqual(cached["axes"]["functional"]["label"], "chorus")
+        self.assertEqual(
+            cached["axes"]["functional"]["teacher"]["name"],
+            "SongFormer",
+        )
 
     def test_timeline_library_can_review_song_without_active_playback(self) -> None:
         recording_id = self.application.memory.remember_recording_version(

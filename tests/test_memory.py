@@ -71,6 +71,14 @@ class MemoryTests(unittest.TestCase):
                 store.structure_timeline_catalog()[0]["review_status"],
                 "approved",
             )
+            store.review_structure_timeline(
+                timeline_id=timeline_id,
+                status="unreviewed",
+            )
+            self.assertEqual(
+                store.structure_timeline_catalog()[0]["review_status"],
+                "needs_review",
+            )
 
     def test_live_store_defers_wal_checkpoints_until_explicit_request(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -547,7 +555,7 @@ class MemoryTests(unittest.TestCase):
                         "energy_label": "build",
                         "boundary_confidence": 0.94,
                     },
-                    {"start_ms": 45_000, "end_ms": 90_000, "energy_label": "drop"},
+                    {"start_ms": 45_000, "end_ms": 90_000},
                 ],
             )
             store.finish_teacher_run(edm_run, status="complete")
@@ -555,7 +563,10 @@ class MemoryTests(unittest.TestCase):
                 teacher_name="SongFormer",
                 teacher_version="2",
                 device="cpu",
-                preprocessing_version="v2",
+                preprocessing_version=(
+                    "songformer_official_features_cpu_windowed_v1:60s:"
+                    f"{TEACHER_NORMALIZATION_VERSION}"
+                ),
                 recording_id=recording_id,
             )
             store.save_structure_timeline(
@@ -581,6 +592,7 @@ class MemoryTests(unittest.TestCase):
                         "start_ms": 60_000,
                         "end_ms": 90_000,
                         "functional_label": "outro",
+                        "energy_label": "drop",
                         "content_label": "instrumental",
                     },
                 ],
@@ -613,23 +625,23 @@ class MemoryTests(unittest.TestCase):
             assert context is not None
             self.assertEqual(context["recording"]["id"], recording_id)
             self.assertEqual(context["axes"]["energy"]["label"], "build")
-            self.assertIsNone(context["axes"]["functional"])
-            self.assertIsNone(context["axes"]["content"])
+            self.assertEqual(context["axes"]["functional"]["label"], "chorus")
+            self.assertEqual(context["axes"]["content"]["label"], "vocal")
             self.assertEqual(context["boundary"]["next"]["time_ms"], 45_000)
             self.assertEqual(context["boundary"]["next"]["in_ms"], 10_000)
             self.assertEqual(context["boundary"]["current_confidence"], 0.0)
             self.assertEqual(context["beat_sync_authority"], "audio_sample_clock")
-            self.assertEqual(len(context["provenance"]), 1)
+            self.assertEqual(len(context["provenance"]), 2)
             history = store.structure_timelines_for_recording(recording_id)
             songformer = next(
                 item for item in history
                 if item["teacher"]["name"] == "SongFormer"
             )
-            self.assertFalse(songformer["review_eligible"])
-            self.assertFalse(songformer["recall_eligible"])
+            self.assertTrue(songformer["review_eligible"])
+            self.assertTrue(songformer["recall_eligible"])
             self.assertEqual(
                 songformer["recall_authority"],
-                "non_authoritative_teacher",
+                "scored_teacher",
             )
             boundary = store.cached_structure_at(
                 provider="spotify",
@@ -648,6 +660,17 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(
                 boundary["boundary"]["provenance"],
                 boundary["axes"]["energy"]["provenance"],
+            )
+            outro = store.cached_structure_at(
+                provider="spotify",
+                provider_item_id="fused",
+                duration_ms=90_100,
+                playback_position_ms=70_000,
+            )
+            assert outro is not None
+            self.assertIsNone(outro["axes"]["energy"])
+            self.assertEqual(
+                outro["axes"]["functional"]["label"], "outro"
             )
 
     def test_obsolete_teacher_timeline_is_preserved_but_not_recalled(self) -> None:

@@ -31,6 +31,7 @@ from lumen_engine.memory import (
     EDMFORMER_PREPROCESSING_VERSION,
     SongMemoryStore,
     TEACHER_NORMALIZATION_VERSION,
+    current_songformer_preprocessing,
 )
 from lumen_engine.student import (
     LABELS,
@@ -56,11 +57,14 @@ APPLIANCE_OFFLINE_MEMORY_FILE = Path(
 STUDENT_AUDIO_FEATURE_VERSION = "realtime_audio_analyzer_causal_10hz_v2"
 STUDENT_EXAMPLE_VERSION = "teacher_timeline_examples_v4"
 STUDENT_ACTIVATION_GATE_VERSION = "heldout_song_event_gate_v3"
+TEACHER_FUSION_VERSION = "edmformer_energy_songformer_form_v1"
 MIN_CLASSIFIER_BASELINE_MARGIN = 0.005
 MIN_BALANCED_ACCURACY_MARGIN = 0.05
 MIN_ACTIVATION_TEST_GROUPS = 5
 BOUNDARY_TARGET_WINDOW_MS = 1_500
-EDMFORMER_STUDENT_AXES = frozenset({"energy", "content", "boundary"})
+COMBINED_STUDENT_AXES = frozenset(
+    {"functional", "energy", "content", "boundary"}
+)
 
 
 class OfflineJobCancelled(RuntimeError):
@@ -641,6 +645,11 @@ class ResearchJobCoordinator:
                     and not self._completed_edmformer_job_is_trusted(job)
                 ):
                     continue
+                if (
+                    job_type == SONGFORMER_JOB
+                    and not self._completed_songformer_job_is_trusted(job)
+                ):
+                    continue
                 return True
         return False
 
@@ -700,10 +709,83 @@ class ResearchJobCoordinator:
             "unavailable": unavailable,
         }
 
+    def requeue_obsolete_songformer_jobs(self) -> dict[str, Any]:
+        """Queue current functional-teacher replacements from cached WAVs."""
+
+        queued: list[str] = []
+        unavailable: list[dict[str, str]] = []
+        for job in self.store.list_analysis_jobs(limit=100_000):
+            if job.get("job_type") != SONGFORMER_JOB:
+                continue
+            payload = dict(job.get("payload") or {})
+            recording_id = str(payload.get("recording_id") or "")
+            content_sha256 = str(payload.get("content_sha256") or "")
+            audio_path = Path(str(payload.get("audio_path") or ""))
+            if not recording_id or not content_sha256:
+                continue
+            if self._already_queued(
+                SONGFORMER_JOB,
+                recording_id,
+                content_sha256,
+                priority=int(job.get("priority") or 10),
+            ):
+                continue
+            supervision = payload.get("structure_supervision") or {}
+            if not bool(supervision.get("eligible", True)):
+                continue
+            if not audio_path.is_file():
+                unavailable.append({
+                    "recording_id": recording_id,
+                    "reason": "materialized_teacher_audio_missing",
+                    "audio_path": str(audio_path),
+                })
+                continue
+            replacement = dict(payload)
+            replacement["teacher_normalization_version"] = (
+                TEACHER_NORMALIZATION_VERSION
+            )
+            replacement["songformer_window_seconds"] = 60
+            queued.append(self.store.enqueue_analysis_job(
+                job_type=SONGFORMER_JOB,
+                payload=replacement,
+                priority=int(job.get("priority") or 10),
+            ))
+        return {
+            "jobs_queued": len(queued),
+            "job_ids": queued,
+            "unavailable": unavailable,
+        }
+
     def _completed_edmformer_job_is_trusted(
         self, job: dict[str, Any]
     ) -> bool:
         """Return whether a completed job still owns usable local artifacts."""
+        return self._completed_structure_job_is_trusted(
+            job,
+            teacher_name=ACTIVE_TECHNO_TEACHER,
+            preprocessing_matches=lambda value: (
+                value == EDMFORMER_PREPROCESSING_VERSION
+            ),
+        )
+
+    def _completed_songformer_job_is_trusted(
+        self, job: dict[str, Any]
+    ) -> bool:
+        """Return whether a completed functional-teacher job is reusable."""
+        return self._completed_structure_job_is_trusted(
+            job,
+            teacher_name=ACTIVE_FUNCTION_TEACHER,
+            preprocessing_matches=current_songformer_preprocessing,
+        )
+
+    def _completed_structure_job_is_trusted(
+        self,
+        job: dict[str, Any],
+        *,
+        teacher_name: str,
+        preprocessing_matches: Any,
+    ) -> bool:
+        """Verify a completed teacher's DB ownership and derived JSONL."""
         job_id = str(job.get("id") or "")
         payload = job.get("payload") or {}
         recording_id = str(payload.get("recording_id") or "")
@@ -715,10 +797,11 @@ class ResearchJobCoordinator:
             if (
                 str(run.get("analysis_job_id") or "") != job_id
                 or str(run.get("teacher_name") or "").casefold()
-                != ACTIVE_TECHNO_TEACHER
+                != teacher_name
                 or str(run.get("recording_id") or "") != recording_id
-                or str(run.get("preprocessing_version") or "")
-                != EDMFORMER_PREPROCESSING_VERSION
+                or not preprocessing_matches(
+                    str(run.get("preprocessing_version") or "")
+                )
             ):
                 continue
             metrics = run.get("metrics") or {}
@@ -751,6 +834,8 @@ class ResearchJobCoordinator:
                 path = Path(str(summary["path"])).resolve()
                 if (
                     not supervision["eligible"]
+                    or summary.get("schema_version")
+                    != STUDENT_EXAMPLE_VERSION
                     or not path.is_relative_to(examples_root)
                     or not path.is_file()
                     or _hash_file(path) != str(summary.get("sha256") or "")
@@ -771,8 +856,6 @@ class ResearchJobCoordinator:
                     )
                     and str(row.get("timeline_version") or "")
                     == TEACHER_NORMALIZATION_VERSION
-                    and str(row.get("energy") or "unknown")
-                    in {"unknown", *CANONICAL_TECHNO_SECTIONS}
                     and str(row.get("split") or "train")
                     == _recording_split(
                         str(
@@ -1512,7 +1595,7 @@ class OfflineResearchWorker:
             and payload.get("source_scope")
             == "active_database_completed_teacher_runs"
         ):
-            declared_applicable_axes = EDMFORMER_STUDENT_AXES
+            declared_applicable_axes = COMBINED_STUDENT_AXES
         applicable_axes = {
             str(axis)
             for axis in (declared_applicable_axes or all_axes)
@@ -1697,6 +1780,9 @@ class OfflineResearchWorker:
                 EDMFORMER_PREPROCESSING_VERSION
             ),
             "activation_gate_version": STUDENT_ACTIVATION_GATE_VERSION,
+            "teacher_fusion_version": payload.get(
+                "teacher_fusion_version", "legacy_single_teacher"
+            ),
             "teacher_run_ids": payload.get("teacher_run_ids", []),
             "source_files": payload.get("source_files", []),
             "split_counts": statistics["split_counts"],
@@ -1706,6 +1792,9 @@ class OfflineResearchWorker:
             "operator_consensus": payload.get("operator_consensus"),
             "operator_consensus_revision": payload.get(
                 "operator_consensus_revision"
+            ),
+            "operator_timeline_corrections": payload.get(
+                "operator_timeline_corrections"
             ),
             "feature_preprocessing": feature_preprocessing,
         }
@@ -1727,14 +1816,25 @@ class OfflineResearchWorker:
                 output_path.stem + ".evaluation.json"
             )
             active_gate_version = None
+            active_fusion_version = None
             if active_evaluation_path.is_file():
                 try:
-                    active_gate_version = json.loads(
+                    active_report = json.loads(
                         active_evaluation_path.read_text(encoding="utf-8")
-                    ).get("activation_gate_version")
+                    )
+                    active_gate_version = active_report.get(
+                        "activation_gate_version"
+                    )
+                    active_fusion_version = active_report.get(
+                        "teacher_fusion_version"
+                    )
                 except (OSError, ValueError, TypeError):
                     active_gate_version = None
-            if active_gate_version != STUDENT_ACTIVATION_GATE_VERSION:
+                    active_fusion_version = None
+            if (
+                active_gate_version != STUDENT_ACTIVATION_GATE_VERSION
+                or active_fusion_version != TEACHER_FUSION_VERSION
+            ):
                 # Preserve the old artifact for diagnosis, but do not let an
                 # approval made by an obsolete gate continue controlling
                 # Live. The rejected candidate already carries an empty
@@ -1907,10 +2007,22 @@ class OfflineResearchWorker:
 
 
 ACTIVE_TECHNO_TEACHER = "edmformer"
+ACTIVE_FUNCTION_TEACHER = "songformer"
+ACTIVE_STRUCTURE_TEACHERS = frozenset(
+    {ACTIVE_TECHNO_TEACHER, ACTIVE_FUNCTION_TEACHER}
+)
 _AXIS_TEACHER_PRIORITY = {
-    "functional": {ACTIVE_TECHNO_TEACHER: 20},
-    "energy": {ACTIVE_TECHNO_TEACHER: 20},
-    "content": {ACTIVE_TECHNO_TEACHER: 20},
+    "functional": {
+        ACTIVE_FUNCTION_TEACHER: 30,
+        ACTIVE_TECHNO_TEACHER: 10,
+    },
+    "energy": {
+        ACTIVE_TECHNO_TEACHER: 30,
+    },
+    "content": {
+        ACTIVE_FUNCTION_TEACHER: 30,
+        ACTIVE_TECHNO_TEACHER: 10,
+    },
 }
 
 
@@ -1924,8 +2036,9 @@ def _teacher_source(row: dict[str, Any]) -> str:
     return str(row.get("target_provenance") or "unknown")
 
 
-def _authoritative_techno_row(row: dict[str, Any]) -> bool:
-    return ACTIVE_TECHNO_TEACHER in _teacher_source(row).casefold()
+def _authoritative_structure_row(row: dict[str, Any]) -> bool:
+    source = _teacher_source(row).casefold()
+    return any(teacher in source for teacher in ACTIVE_STRUCTURE_TEACHERS)
 
 
 def _merge_teacher_example_rows(
@@ -1933,17 +2046,18 @@ def _merge_teacher_example_rows(
     *,
     authoritative_only: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Deduplicate authoritative EDMFormer targets per captured audio frame.
+    """Fuse axis-specific teacher targets per captured audio frame.
 
-    Explicit developer-supplied paths may opt out of authority filtering, but
-    automatic Lumen training never mixes SongFormer into the techno target.
+    EDMFormer has precedence for techno energy; SongFormer has precedence for
+    functional/content form. Boundaries are the union of either current
+    teacher, while explicit developer paths may opt out of authority filtering.
     """
 
     source_count = len(rows)
     if any(not isinstance(row, dict) for row in rows):
         raise ValueError("student example row is not an object")
     authoritative_rows = (
-        [row for row in rows if _authoritative_techno_row(row)]
+        [row for row in rows if _authoritative_structure_row(row)]
         if authoritative_only
         else list(rows)
     )
@@ -2031,6 +2145,8 @@ def _merge_teacher_example_rows(
                 if label == "unknown":
                     continue
                 source = _teacher_source(row)
+                if source.casefold() not in source_priority:
+                    continue
                 confidence = float(row.get("target_confidence") or 0.0)
                 labeled.append(
                     (
@@ -2133,7 +2249,8 @@ def _merge_teacher_example_rows(
         "axis_precedence": _AXIS_TEACHER_PRIORITY,
         "boundary_merge": "maximum",
         "active_teacher_authority": (
-            ACTIVE_TECHNO_TEACHER if authoritative_only else "explicit_paths"
+            "axis_specific_edmformer_songformer"
+            if authoritative_only else "explicit_paths"
         ),
     }
 
@@ -2238,6 +2355,97 @@ def _apply_operator_consensus_rows(
         "rows_corrected": corrected_rows,
         "axis_rows_corrected": corrected_axes,
         "boundary_rows_corrected": boundary_rows,
+    }
+
+
+def _apply_operator_timeline_corrections(
+    store: SongMemoryStore,
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Overlay the latest immutable desktop correction per recording."""
+
+    correction_by_recording: dict[str, dict[str, Any]] = {}
+    for recording_id in {
+        str(row["recording_id"])
+        for row in rows
+        if row.get("recording_id")
+    }:
+        correction = next(
+            (
+                timeline
+                for timeline in store.structure_timelines_for_recording(
+                    recording_id
+                )
+                if str(timeline.get("provenance") or "").casefold()
+                == "operator_correction"
+            ),
+            None,
+        )
+        if correction is not None:
+            correction_by_recording[recording_id] = correction
+
+    corrected_rows = 0
+    corrected_axes = {
+        axis: 0 for axis in ("functional", "energy", "content")
+    }
+    corrected_boundaries = 0
+    result: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        recording_id = str(row.get("recording_id") or "")
+        timeline = correction_by_recording.get(recording_id)
+        if timeline is None:
+            result.append(row)
+            continue
+        position_ms = int(row.get("recording_offset_ms") or 0)
+        segment = _segment_at_position(
+            list(timeline.get("segments") or ()), position_ms
+        )
+        if segment is None:
+            result.append(row)
+            continue
+        changed = False
+        provenance_by_axis = dict(
+            row.get("target_provenance_by_axis") or {}
+        )
+        for axis in ("functional", "energy", "content"):
+            value = str(segment.get(f"{axis}_label") or "unknown")
+            if value == "unknown":
+                continue
+            if row.get(axis) != value:
+                corrected_axes[axis] += 1
+                changed = True
+            row[axis] = value
+            provenance_by_axis[axis] = {
+                "source": "operator_correction",
+                "timeline_id": timeline.get("id"),
+                "label": value,
+                "note": (timeline.get("metadata") or {}).get("note"),
+            }
+        boundary_distance = abs(
+            position_ms - int(segment.get("start_ms") or 0)
+        )
+        if boundary_distance <= BOUNDARY_TARGET_WINDOW_MS:
+            if int(row.get("boundary") or 0) != 1:
+                corrected_boundaries += 1
+                changed = True
+            row["boundary"] = 1
+            row["boundary_supervised"] = True
+            row["milliseconds_since_boundary"] = boundary_distance
+            row["boundary_provenance"] = {
+                "source": "operator_correction",
+                "timeline_id": timeline.get("id"),
+                "event_tolerance_ms": BOUNDARY_TARGET_WINDOW_MS,
+            }
+        row["target_provenance_by_axis"] = provenance_by_axis
+        if changed:
+            corrected_rows += 1
+        result.append(row)
+    return result, {
+        "recordings": len(correction_by_recording),
+        "rows_corrected": corrected_rows,
+        "axis_rows_corrected": corrected_axes,
+        "boundary_rows_corrected": corrected_boundaries,
     }
 
 
@@ -2389,9 +2597,13 @@ def enqueue_student_training(
         "revision": store.operator_consensus_revision(),
         "rows_corrected": 0,
     }
+    correction_report: dict[str, Any] = {"rows_corrected": 0}
     if not example_paths:
         merged_rows, consensus_report = _apply_operator_consensus_rows(
             store, merged_rows
+        )
+        merged_rows, correction_report = (
+            _apply_operator_timeline_corrections(store, merged_rows)
         )
     rows = len(merged_rows)
     with partial.open("w", encoding="utf-8") as output:
@@ -2438,8 +2650,10 @@ def enqueue_student_training(
             },
             "label_balance": label_balance,
             "teacher_merge": merge_report,
+            "teacher_fusion_version": TEACHER_FUSION_VERSION,
             "operator_consensus": consensus_report,
             "operator_consensus_revision": consensus_report.get("revision"),
+            "operator_timeline_corrections": correction_report,
             "trainer_version": StreamingStructureStudent.format_version,
             "refresh_audio_features": not bool(example_paths),
             "feature_preprocessing_version": (
@@ -2449,7 +2663,7 @@ def enqueue_student_training(
             ),
             "require_activation_gate": not bool(example_paths),
             "applicable_axes": (
-                sorted(EDMFORMER_STUDENT_AXES)
+                sorted(COMBINED_STUDENT_AXES)
                 if not example_paths
                 else sorted({*LABELS.keys(), "boundary"})
             ),
@@ -2469,6 +2683,7 @@ def enqueue_student_training(
         "teacher_merge": merge_report,
         "operator_consensus": consensus_report,
         "operator_consensus_revision": consensus_report.get("revision"),
+        "operator_timeline_corrections": correction_report,
         "teacher_run_ids": provenance.get("teacher_run_ids", []),
     }
 
@@ -2478,11 +2693,10 @@ def refresh_current_student_examples(
     *,
     research_root: str | Path,
 ) -> dict[str, int]:
-    """Upgrade authoritative EDMFormer examples without rerunning the model.
+    """Upgrade current teacher examples without rerunning either model.
 
-    Teacher timelines are the durable model result. SongFormer artifacts are
-    retained but deliberately skipped. Student JSONL files are a derived
-    training view and can be rebuilt when that view's schema changes.
+    Teacher timelines are the durable model result. Student JSONL files are a
+    derived training view and can be rebuilt when that view's schema changes.
     This migration runs only when training is explicitly requested; status
     inspection remains read-only.
     """
@@ -2492,10 +2706,14 @@ def refresh_current_student_examples(
     for run in store.list_teacher_runs(status="complete"):
         teacher_name = str(run.get("teacher_name") or "").casefold()
         preprocessing_version = str(run.get("preprocessing_version") or "")
-        if (
-            teacher_name != ACTIVE_TECHNO_TEACHER
-            or preprocessing_version != EDMFORMER_PREPROCESSING_VERSION
-        ):
+        current_preprocessing = (
+            teacher_name == ACTIVE_TECHNO_TEACHER
+            and preprocessing_version == EDMFORMER_PREPROCESSING_VERSION
+        ) or (
+            teacher_name == ACTIVE_FUNCTION_TEACHER
+            and current_songformer_preprocessing(preprocessing_version)
+        )
+        if not current_preprocessing:
             continue
         metrics = dict(run.get("metrics") or {})
         supervision = _recording_structure_supervision(
@@ -2563,7 +2781,7 @@ def trusted_student_examples(
     for run in completed_runs:
         teacher_name = str(run.get("teacher_name") or "").casefold()
         summary = (run.get("metrics") or {}).get("student_examples") or {}
-        if teacher_name != ACTIVE_TECHNO_TEACHER:
+        if teacher_name not in ACTIVE_STRUCTURE_TEACHERS:
             count = int(summary.get("examples") or 0)
             excluded_examples += count
             excluded_runs.append(
@@ -2571,12 +2789,33 @@ def trusted_student_examples(
                     "teacher_run_id": str(run["id"]),
                     "recording_id": run.get("recording_id"),
                     "examples": count,
-                    "reason": "non_authoritative_techno_teacher",
+                    "reason": "non_authoritative_structure_teacher",
                     "teacher_name": run.get("teacher_name"),
-                    "active_teacher_authority": ACTIVE_TECHNO_TEACHER,
+                    "active_teacher_authority": (
+                        "axis_specific_edmformer_songformer"
+                    ),
                     "artifacts_preserved": True,
                 }
             )
+            continue
+        timeline_id = str(
+            (run.get("metrics") or {}).get("timeline_id") or ""
+        )
+        review = (
+            store.structure_timeline_review(timeline_id)
+            if timeline_id else None
+        )
+        if str((review or {}).get("status") or "").casefold() == "rejected":
+            count = int(summary.get("examples") or 0)
+            excluded_examples += count
+            excluded_runs.append({
+                "teacher_run_id": str(run["id"]),
+                "recording_id": run.get("recording_id"),
+                "timeline_id": timeline_id,
+                "examples": count,
+                "reason": "operator_rejected_teacher_target",
+                "artifacts_preserved": True,
+            })
             continue
         raw_path = summary.get("path")
         if not raw_path or int(summary.get("examples") or 0) <= 0:
@@ -2584,10 +2823,14 @@ def trusted_student_examples(
         preprocessing_version = str(
             run.get("preprocessing_version") or ""
         )
-        if (
+        current_preprocessing = (
             teacher_name == ACTIVE_TECHNO_TEACHER
-            and preprocessing_version != EDMFORMER_PREPROCESSING_VERSION
-        ):
+            and preprocessing_version == EDMFORMER_PREPROCESSING_VERSION
+        ) or (
+            teacher_name == ACTIVE_FUNCTION_TEACHER
+            and current_songformer_preprocessing(preprocessing_version)
+        )
+        if not current_preprocessing:
             count = int(summary.get("examples") or 0)
             excluded_examples += count
             excluded_runs.append(
@@ -2600,6 +2843,11 @@ def trusted_student_examples(
                     "required_normalization_version": TEACHER_NORMALIZATION_VERSION,
                     "required_preprocessing_version": (
                         EDMFORMER_PREPROCESSING_VERSION
+                        if teacher_name == ACTIVE_TECHNO_TEACHER
+                        else (
+                            "songformer_official_features_cpu_windowed_v1:"
+                            f"30-60s:{TEACHER_NORMALIZATION_VERSION}"
+                        )
                     ),
                 }
             )
@@ -2655,8 +2903,7 @@ def trusted_student_examples(
                         continue
                     row = json.loads(line)
                     if (
-                        teacher_name == ACTIVE_TECHNO_TEACHER
-                        and str(row.get("timeline_version") or "")
+                        str(row.get("timeline_version") or "")
                         != TEACHER_NORMALIZATION_VERSION
                     ):
                         raise ValueError(
@@ -2775,6 +3022,9 @@ def trusted_student_examples(
             merged_rows, consensus_report = _apply_operator_consensus_rows(
                 store, merged_rows
             )
+            merged_rows, correction_report = (
+                _apply_operator_timeline_corrections(store, merged_rows)
+            )
         except (OSError, ValueError, json.JSONDecodeError) as error:
             errors.append(
                 {"teacher_run_id": "merged_teacher_examples", "error": str(error)}
@@ -2786,22 +3036,24 @@ def trusted_student_examples(
                 "revision": store.operator_consensus_revision(),
                 "rows_corrected": 0,
             }
+            correction_report = {"rows_corrected": 0}
     else:
         consensus_report = {
             "revision": store.operator_consensus_revision(),
             "rows_corrected": 0,
         }
+        correction_report = {"rows_corrected": 0}
     merged_statistics = _student_example_statistics(merged_rows)
     return {
         "scope": "active_database_completed_teacher_runs",
-        "active_teacher_authority": ACTIVE_TECHNO_TEACHER,
+        "active_teacher_authority": "axis_specific_edmformer_songformer",
         "paths": paths,
         "teacher_run_ids": run_ids,
         "completed_teacher_runs": len(completed_runs),
         "preserved_non_authoritative_runs": sum(
             1
             for item in excluded_runs
-            if item.get("reason") == "non_authoritative_techno_teacher"
+            if item.get("reason") == "non_authoritative_structure_teacher"
         ),
         "usable_teacher_runs": len(run_ids),
         "examples": len(merged_rows),
@@ -2812,6 +3064,7 @@ def trusted_student_examples(
         "teacher_merge": merge_report,
         "operator_consensus": consensus_report,
         "operator_consensus_revision": consensus_report.get("revision"),
+        "operator_timeline_corrections": correction_report,
         "errors": errors,
         "excluded_teacher_runs": excluded_runs,
         "excluded_examples": excluded_examples,
@@ -2828,7 +3081,7 @@ def training_readiness(
     trusted = trusted_student_examples(store, research_root=research_root)
     jobs = store.list_analysis_jobs(limit=100_000)
     teacher_types = {EDMFORMER_JOB, SONGFORMER_JOB}
-    active_teacher_types = {EDMFORMER_JOB}
+    active_teacher_types = {EDMFORMER_JOB, SONGFORMER_JOB}
     teacher_jobs = [job for job in jobs if job["job_type"] in teacher_types]
     trusted_run_ids = set(trusted.get("teacher_run_ids") or ())
     trusted_teacher_job_ids = {
@@ -2842,21 +3095,18 @@ def training_readiness(
         for job_type in teacher_types
     }
     active_job_counts = {
-        EDMFORMER_JOB: {
+        job_type: {
             status: 0
             for status in ("queued", "running", "complete", "failed")
         }
+        for job_type in active_teacher_types
     }
     excluded_job_reasons: dict[str, str] = {}
-    active_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    current_edm_inventory_jobs: list[dict[str, Any]] = []
+    active_groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    current_teacher_inventory_jobs: list[dict[str, Any]] = []
     for job in teacher_jobs:
         job_id = str(job["id"])
-        if job["job_type"] != EDMFORMER_JOB:
-            excluded_job_reasons[job_id] = (
-                "non_authoritative_techno_teacher"
-            )
-            continue
+        job_type = str(job["job_type"])
         payload = job.get("payload") or {}
         result = job.get("result") or {}
         version = str(
@@ -2864,12 +3114,15 @@ def training_readiness(
             or payload.get("teacher_normalization_version")
             or ""
         )
-        if version != TEACHER_NORMALIZATION_VERSION:
+        if (
+            version != TEACHER_NORMALIZATION_VERSION
+            and str(job.get("status") or "") not in {"queued", "running"}
+        ):
             excluded_job_reasons[job_id] = (
                 "obsolete_teacher_normalization_version"
             )
             continue
-        current_edm_inventory_jobs.append(job)
+        current_teacher_inventory_jobs.append(job)
         if result.get("reason") == "reused_completed_edmformer":
             excluded_job_reasons[job_id] = "reused_duplicate_edmformer"
             continue
@@ -2887,7 +3140,7 @@ def training_readiness(
             recording_key = f"job:{job_id}"
             content_key = "unidentified"
         active_groups.setdefault(
-            (recording_key, content_key), []
+            (job_type, recording_key, content_key), []
         ).append(job)
     active_job_ids: set[str] = set()
     status_rank = {"complete": 4, "running": 3, "queued": 2, "failed": 1}
@@ -2905,7 +3158,7 @@ def training_readiness(
             duplicate_id = str(duplicate["id"])
             if duplicate_id != str(representative["id"]):
                 excluded_job_reasons[duplicate_id] = (
-                    "duplicate_active_edmformer_work_item"
+                    "duplicate_active_teacher_work_item"
                 )
     captured_recording_ids: set[str] = set()
     eligible_recording_ids: set[str] = set()
@@ -2939,7 +3192,7 @@ def training_readiness(
             unknown_recording_ids.add(recording_id)
     inventory_from_captures = bool(capture_inventory)
     if not inventory_from_captures:
-        for job in current_edm_inventory_jobs:
+        for job in current_teacher_inventory_jobs:
             recording_id = (job.get("payload") or {}).get("recording_id")
             if not recording_id:
                 continue
@@ -3017,8 +3270,8 @@ def training_readiness(
                 }
             )
             continue
-        active_job_counts[EDMFORMER_JOB].setdefault(status, 0)
-        active_job_counts[EDMFORMER_JOB][status] += 1
+        active_job_counts[job_type].setdefault(status, 0)
+        active_job_counts[job_type][status] += 1
         eligible_teacher_jobs += 1
         if recording_id:
             recording_key = str(recording_id)
@@ -3155,6 +3408,9 @@ def training_readiness(
     ) and isinstance(evaluation, dict) and (
         evaluation.get("activation_gate_version")
         == STUDENT_ACTIVATION_GATE_VERSION
+    ) and (
+        evaluation.get("teacher_fusion_version")
+        == TEACHER_FUSION_VERSION
     )
     active_provenance_current = bool(
         active_model.is_file()
@@ -3166,6 +3422,8 @@ def training_readiness(
         == EDMFORMER_PREPROCESSING_VERSION
         and active_evaluation.get("activation_gate_version")
         == STUDENT_ACTIVATION_GATE_VERSION
+        and active_evaluation.get("teacher_fusion_version")
+        == TEACHER_FUSION_VERSION
         and str(active_evaluation.get("operator_consensus_revision") or "")
         == trusted_consensus_revision
     )
@@ -3180,8 +3438,14 @@ def training_readiness(
             "transition_events": [
                 event.value for event in TransitionEvent
             ],
-            "active_teacher_authority": ACTIVE_TECHNO_TEACHER,
-            "songformer_role": "preserved_research_artifact_only",
+            "active_teacher_authority": "axis_specific_edmformer_songformer",
+            "axis_teachers": {
+                "functional": "SongFormer",
+                "energy": "EDMFormer",
+                "content": "SongFormer",
+                "boundary": "EDMFormer + SongFormer",
+            },
+            "songformer_role": "functional_content_and_boundary_teacher",
             "edmformer_preprocessing_version": (
                 EDMFORMER_PREPROCESSING_VERSION
             ),
@@ -3193,9 +3457,9 @@ def training_readiness(
         "recordings_processed": len(completed_recordings),
         "teacher_jobs": job_counts,
         "active_teacher_jobs": active_job_counts,
-        "active_teacher_authority": ACTIVE_TECHNO_TEACHER,
+        "active_teacher_authority": "axis_specific_edmformer_songformer",
         "active_teacher_job_types": sorted(active_teacher_types),
-        "preserved_non_authoritative_job_types": [SONGFORMER_JOB],
+        "preserved_non_authoritative_job_types": [],
         "teacher_jobs_all_total": len(teacher_jobs),
         "teacher_jobs_total": total,
         "teacher_jobs_complete": completed,

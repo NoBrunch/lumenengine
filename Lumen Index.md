@@ -287,13 +287,19 @@ Open **Analyzed song database & timeline review** to browse retained recordings
 without playing them. Its visible table shows title, artist, duration, teacher,
 timeline-review state, active-model training status, split, capture status, and
 analysis age. Search and status filters narrow the table; clicking a row opens
-the song's large color-coded section bar and detailed timeline below. Each
+the song's large color-coded section bar and detailed timeline below. The
+editor spans the rehearsal workspace, gives the time column enough width for
+both endpoints, and scrolls horizontally when a complete teacher record is
+wider than the panel. Each
 timeline entry names its teacher/version provenance,
 normalization version, model confidence (or **unscored**), normalized axes,
 segment boundaries, and the original raw teacher label. **Approve** makes an
 otherwise unscored timeline authoritative for this recording through a
 separate operator-trust field; it does not rewrite the model probability.
-**Reject** excludes it from recall. **Correct labels** saves a new linked
+**Reject** excludes it from recall and automatic student targets. After either
+decision Lumen removes that item from the active review view and opens the next
+unreviewed timeline for that song, then the next song. **Reopen review** returns
+a completed decision to the queue. **Correct labels** saves a new linked
 operator timeline, including any adjusted boundaries, while retaining the
 complete teacher original for audit and later training.
 
@@ -602,10 +608,9 @@ garage-specific lighting vocabulary.
   300 timelines and 2,918 segments; Lumen excludes audio, mel images, and media
   links and preserves a manifest audit of two source repairs and thirteen
   source timeline discontinuities.
-- **SongFormer**: a preserved experimental research artifact. Its jobs and
-  results remain inspectable, but it is excluded from automatic merge, student
-  training, and Live recall. EDMFormer is the sole active teacher for the
-  current techno ontology.
+- **SongFormer**: the active functional/content teacher. Its functional song
+  roles, content roles, and boundary evidence complement EDMFormer's techno
+  energy labels. SongFormer energy labels do not override EDMFormer.
 
 All imported labels are normalized onto independent axes:
 
@@ -678,9 +683,8 @@ by durable SQLite jobs and executes outside the DMX loop. The Audio laboratory's
    so **Analyze new recordings** reports retained partial or unidentified audio
    rather than incorrectly claiming that nothing was captured.
 2. Press **Analyze new recordings**. Lumen rebuilds the verified manifest,
-   queues current EDMFormer work, and processes the durable queue as a batch.
-   Preserved SongFormer work can be run only as an explicit diagnostic opt-in;
-   it is never part of the default button. Held-out songs are prioritized so honest validation becomes
+   queues both current EDMFormer and SongFormer work, and processes the durable
+   queue as a resumable batch. Held-out songs are prioritized so honest validation becomes
    available early. **Pause analysis** requests cancellation at the current
    job's checkpoint and returns unfinished work to the queue; completed jobs
    are retained. Press Analyze again to resume. Engine modes remain unavailable
@@ -691,8 +695,8 @@ by durable SQLite jobs and executes outside the DMX loop. The Audio laboratory's
    balance, and exact failures. The capture count includes every recording;
    eligible, partial, and unidentified counts come from the capture inventory,
    including fragments that were never queued for a teacher. An eligible song
-   is shown as processed after its active EDMFormer job completes. Preserved
-   experimental job totals are reported separately. A
+   is shown as fully processed after its required current teacher jobs complete.
+   Per-teacher progress and failures remain visible. A
    preliminary model may be trained once trusted completed runs contain at
    least two distinct training-song groups plus a separate held-out song;
    remaining teacher work can continue later.
@@ -701,10 +705,13 @@ by durable SQLite jobs and executes outside the DMX loop. The Audio laboratory's
    completed teacher runs in the active Lumen database. Unowned smoke-test or
    stale JSONL files are ignored.
 
-Automatic examples come only from current-version EDMFormer timelines using
-the canonical techno ontology. SongFormer timelines and retired/noncanonical
-labels remain durable provenance for inspection, but cannot enter the merge,
-student-training, or active-recall paths.
+Automatic examples come from current-version EDMFormer and SongFormer
+timelines. Before training, Lumen merges aligned ten-Hz frames by axis:
+EDMFormer is authoritative for energy, SongFormer is authoritative for
+functional/content labels, and boundary evidence is the union of both.
+Retired, rejected, noncanonical, corrupt, or unowned artifacts remain durable
+history but cannot enter student training or active recall. Every merged row
+records its source timeline and teacher for each axis.
 
 Before automatic training is queued, Lumen refreshes the participant-consensus
 view and overlays its accepted sparse corrections on the corresponding
@@ -769,11 +776,11 @@ Unapproved functional/content predictions cannot enter choreography ranking,
 and an unapproved boundary head cannot accelerate the stable decoder. The
 candidate remains inspectable with exact per-axis reasons.
 
-EDMFormer's active techno contract supplies energy, content, and boundary
-supervision. Pop-style functional form is marked **not applicable** instead of
-being counted as a failed EDMFormer output. Lumen still retains the functional
-head for explicit non-EDM research, but it is not expected to qualify the
-techno student.
+The combined teacher contract supplies all four student targets. EDMFormer
+supplies energy and boundary supervision; SongFormer supplies functional,
+content, and boundary supervision. Each head still qualifies independently,
+so a failed functional head cannot contaminate a passed energy head and no
+teacher is credited with an axis outside its assigned authority.
 
 Boundary training uses a versioned 1.5-second causal target window immediately
 after each teacher transition. Qualification does not demand exact 10-Hz frame
@@ -926,15 +933,17 @@ a recording without playing it. The table defaults to all retained songs with
 actionable work sorted first; **Show** can narrow it to needs-review, reviewed,
 or diagnostic-only timelines.
 **Select playing song** jumps back to the currently identified Spotify item.
-The library distinguishes actionable EDMFormer work from preserved diagnostic
-timelines. Approve, reject, and immutable correction operations apply to the
-selected library recording and therefore do not require active Spotify
-playback.
+The library distinguishes actionable current EDMFormer/SongFormer work from
+obsolete diagnostic timelines. Approve, reject, reopen, and immutable
+correction operations apply to the selected library recording and therefore do
+not require active Spotify playback. Active review cards clear after a decision
+and the workspace advances through the remaining queue.
 
 When Spotify identifies a recording, Lumen resolves the provider/track identity
 and duration to the matching stable recording version. Current normalized
-EDMFormer timelines can supply functional, energy, and content axes at the
-coarse playback position. The selected context retains the exact recording and
+EDMFormer timelines supply energy; current normalized SongFormer timelines
+supply functional and content context. Boundary evidence can come from either.
+The selected context retains the exact recording and
 timeline IDs, teacher version, raw/model confidence, separate operator trust,
 boundary information, and segment provenance. Incomplete, rejected, obsolete,
 or noncanonical teacher runs are not recalled.
@@ -1080,10 +1089,12 @@ so quiet sections settle without removing the routine variety.
 
 ## Desktop workspace sizing
 
-Desktop dashboard panels can be resized from their lower-right corner and
-scroll internally when text or diagnostics exceed the panel. The layout is
-saved by the browser where supported; resizing is a view preference and does
-not change the rig or DMX behavior.
+Every desktop dashboard panel has a **↗** control. It floats the panel above the
+dashboard so it can be dragged by its title bar and resized from its left,
+right, top, bottom, or any corner. **↙** docks it back into the normal layout.
+Floating position and size are saved locally by the browser, panels scroll
+internally when their contents exceed the chosen size, and these view settings
+do not change rig or DMX behavior.
 
 ## Spotify
 

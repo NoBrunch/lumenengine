@@ -3093,7 +3093,7 @@ class LumenApplication:
                 self.memory,
                 training_root=self.training_root,
                 research_root=self.training_root / "research",
-            ).prepare_export(result["path"], queue_songformer=False)
+            ).prepare_export(result["path"], queue_songformer=True)
             consensus = self.memory.refresh_operator_structure_consensus()
             self.memory.mark_research_session_prepared(
                 session_id, result["path"]
@@ -3942,7 +3942,7 @@ class LumenApplication:
                 self.memory,
                 training_root=self.training_root,
                 research_root=self.training_root / "research",
-            ).prepare_export(result["path"], queue_songformer=False)
+            ).prepare_export(result["path"], queue_songformer=True)
             result["research"] = research
             training_history = self.memory.training_summary()
             with self._lock:
@@ -4081,7 +4081,7 @@ class LumenApplication:
         return recovered
 
     def analyze_training_data(self) -> dict[str, Any]:
-        """Prepare captures, queue active EDMFormer work, and resume it."""
+        """Prepare captures, queue both axis teachers, and resume them."""
         self._recover_abandoned_research_jobs()
         external_research_running = any(
             job["status"] == "running"
@@ -4120,7 +4120,7 @@ class LumenApplication:
         export = self._prepare_unindexed_research_captures()
         queued = sum(
             job["status"] == "queued"
-            and job["job_type"] == EDMFORMER_JOB
+            and job["job_type"] in {EDMFORMER_JOB, SONGFORMER_JOB}
             for job in self.memory.list_analysis_jobs(limit=100_000)
         )
         if not queued:
@@ -4146,7 +4146,7 @@ class LumenApplication:
                 "message": message,
             }
         research = self.start_research_worker(
-            {"job_types": [EDMFORMER_JOB]}
+            {"job_types": [EDMFORMER_JOB, SONGFORMER_JOB]}
         )
         return {
             "export": export,
@@ -4182,7 +4182,7 @@ class LumenApplication:
                     self.memory, self.training_root, session_id
                 )
                 research = coordinator.prepare_export(
-                    result["path"], queue_songformer=False
+                    result["path"], queue_songformer=True
                 )
                 self.memory.refresh_operator_structure_consensus()
                 self.memory.mark_research_session_prepared(
@@ -4196,7 +4196,11 @@ class LumenApplication:
                 partial += int(research.get("recordings_partial") or 0)
                 unknown += int(research.get("recordings_unknown") or 0)
             replacements = coordinator.requeue_obsolete_edmformer_jobs()
+            songformer_replacements = (
+                coordinator.requeue_obsolete_songformer_jobs()
+            )
             jobs_queued += int(replacements["jobs_queued"])
+            jobs_queued += int(songformer_replacements["jobs_queued"])
             with self._lock:
                 if exports:
                     self._last_training_export = exports[-1]
@@ -4213,7 +4217,7 @@ class LumenApplication:
                 ),
                 "obsolete_teacher_audio_unavailable": list(
                     replacements["unavailable"]
-                ),
+                ) + list(songformer_replacements["unavailable"]),
                 "recordings_ineligible": ineligible,
                 "recordings_partial": partial,
                 "recordings_unknown": unknown,
@@ -4226,7 +4230,10 @@ class LumenApplication:
         self, payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         payload = payload or {}
-        requested_types = payload.get("job_types") or [EDMFORMER_JOB]
+        requested_types = payload.get("job_types") or [
+            EDMFORMER_JOB,
+            SONGFORMER_JOB,
+        ]
         allowed_types = {EDMFORMER_JOB, SONGFORMER_JOB, STUDENT_TRAIN_JOB}
         job_types = tuple(str(item) for item in requested_types)
         if not job_types or any(item not in allowed_types for item in job_types):

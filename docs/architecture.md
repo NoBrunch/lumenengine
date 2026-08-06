@@ -184,6 +184,15 @@ computer; a cancellation request must reach its checkpoint before the engine
 can start. Capture-manifest preparation is similarly serialized against manual
 exports and engine startup.
 
+The two teachers have axis-specific authority. EDMFormer supplies techno
+energy; SongFormer supplies functional form and content; boundaries are merged
+from either. Current outputs are aligned by recording, capture session, and
+audio-frame index before student training. The merged rows retain provenance
+per axis. SongFormer energy output is intentionally ignored, while obsolete or
+operator-rejected timelines remain audit history without entering recall or
+training. Exact-song recall uses the same authority rules, so the offline,
+student, and Live vocabularies remain continuous.
+
 Teacher eligibility requires at least 10 seconds of coherent recording audio.
 Short identity-boundary fragments remain preserved capture evidence, but queue
 preparation reports `recording_too_short`; the worker enforces the same rule

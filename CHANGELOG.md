@@ -8,6 +8,13 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Corrected exact-song teacher fusion to resolve authority from each timeline's
+  own teacher instead of a stale database-loop value, and added strict
+  SongFormer artifact ownership/checksum validation before a completed job can
+  suppress reprocessing.
+- Timeline review now advances after approve/reject, hides completed cards from
+  active review, supports reopening a decision, and uses direct professional
+  confirmation text.
 - Separated an obsolete previous student artifact from a rejected current
   candidate in the research console. Expected model-version retirement is now
   an informational notice instead of a load error.
@@ -22,6 +29,14 @@ result. Git commit history remains the detailed engineering log.
 
 ### Added
 
+- Axis-specific EDMFormer/SongFormer fusion: EDMFormer owns techno energy,
+  SongFormer owns functional/content form, both contribute boundaries, and
+  every merged target retains teacher/timeline provenance. Analyze, readiness,
+  exact-song recall, student training, evaluation, and staleness checks now use
+  the combined contract.
+- A full-width song timeline/sequence workspace with readable start/end times,
+  plus float/dock controls that let every desktop panel move and resize from
+  every edge or corner with browser-local layout persistence.
 - Mirrored the Performance Console's live expressive state beneath the ALSA
   report in Audio Analysis, including gesture, decision reason, confidence,
   energy, tension, motion, and intimacy from the same runtime decision.
@@ -32,8 +47,8 @@ result. Git commit history remains the detailed engineering log.
   state while the final test population is smaller.
 - Per-class classification precision, recall, F1, support, macro F1, and
   balanced accuracy in student evaluation reports.
-- An EDMFormer-specific applicability contract: energy, content, and boundary
-  are evaluated; pop-style functional form is reported as not applicable.
+- A combined-teacher applicability contract with independently evaluated
+  functional, energy, content, and boundary axes.
 - Versioned 1.5-second causal transition targets and a new v3 activation gate,
   preventing models approved under older evaluation rules from controlling
   Live.
@@ -41,7 +56,7 @@ result. Git commit history remains the detailed engineering log.
 ### Verification
 
 - `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`
-- 339 tests passed on 2026-08-05.
+- 345 tests passed on 2026-08-05.
 - `node --check web/app.js` and `git diff --check` passed.
 
 ## 0.7.2 - 2026-08-04

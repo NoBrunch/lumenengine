@@ -21,6 +21,7 @@ from lumen_engine.offline import (
     MIN_TEACHER_DURATION_MS,
     SONGFORMER_JOB,
     STUDENT_ACTIVATION_GATE_VERSION,
+    TEACHER_FUSION_VERSION,
     STUDENT_EXAMPLE_VERSION,
     STUDENT_TRAIN_JOB,
     OfflineJobCancelled,
@@ -30,6 +31,7 @@ from lumen_engine.offline import (
     ResearchJobCoordinator,
     _normalize_teacher_segments,
     _offline_memory_limit_bytes,
+    _apply_operator_timeline_corrections,
     _merge_teacher_example_rows,
     _validate_teacher_coverage,
     _capture_split_group,
@@ -55,6 +57,136 @@ def _complete_supervision() -> dict:
 
 
 class OfflineResearchTests(unittest.TestCase):
+    def test_rejected_teacher_timeline_is_excluded_from_student_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            research = root / "research"
+            examples = research / "exports" / "student-examples" / "run.jsonl"
+            examples.parent.mkdir(parents=True)
+            store = SongMemoryStore(root / "lumen.sqlite3")
+            recording_id = store.remember_recording_version(
+                provider="spotify",
+                provider_item_id="rejected-target",
+                duration_ms=30_000,
+            )
+            run_id = store.begin_teacher_run(
+                teacher_name="EDMFormer",
+                teacher_version="test",
+                device="cpu",
+                preprocessing_version=EDMFORMER_PREPROCESSING_VERSION,
+                recording_id=recording_id,
+            )
+            timeline_id = store.save_structure_timeline(
+                provenance="edmformer_teacher",
+                timeline_version=TEACHER_NORMALIZATION_VERSION,
+                confidence=0.8,
+                recording_id=recording_id,
+                teacher_run_id=run_id,
+                segments=[{
+                    "start_ms": 0,
+                    "end_ms": 30_000,
+                    "energy_label": "drop",
+                }],
+            )
+            row = {
+                "teacher_run_id": run_id,
+                "timeline_id": timeline_id,
+                "timeline_version": TEACHER_NORMALIZATION_VERSION,
+                "recording_id": recording_id,
+                "capture_session_id": "capture-rejected",
+                "audio_frame_index": 0,
+                "recording_offset_ms": 0,
+                "position_ms": 0,
+                "split_group_id": "spotify:rejected-target",
+                "split": _recording_split("spotify:rejected-target"),
+                "features": [0.0] * len(FEATURE_NAMES),
+                "functional": "unknown",
+                "energy": "drop",
+                "content": "unknown",
+                "boundary": 1,
+                "structure_supervision": _complete_supervision(),
+                "target_provenance_details": {"source": "EDMFormer"},
+            }
+            examples.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            store.finish_teacher_run(
+                run_id,
+                status="complete",
+                metrics={
+                    "timeline_id": timeline_id,
+                    "structure_supervision": _complete_supervision(),
+                    "student_examples": {
+                        "path": str(examples),
+                        "examples": 1,
+                        "sha256": hashlib.sha256(
+                            examples.read_bytes()
+                        ).hexdigest(),
+                        "schema_version": STUDENT_EXAMPLE_VERSION,
+                    },
+                },
+            )
+            store.review_structure_timeline(
+                timeline_id=timeline_id,
+                status="rejected",
+            )
+
+            trusted = trusted_student_examples(
+                store, research_root=research
+            )
+
+            self.assertEqual(trusted["usable_teacher_runs"], 0)
+            self.assertEqual(trusted["examples"], 0)
+            self.assertEqual(
+                trusted["excluded_teacher_runs"][0]["reason"],
+                "operator_rejected_teacher_target",
+            )
+
+    def test_desktop_timeline_correction_overrides_teacher_targets(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SongMemoryStore(root / "lumen.sqlite3")
+            recording_id = store.remember_recording_version(
+                provider="spotify",
+                provider_item_id="corrected-target",
+                duration_ms=20_000,
+            )
+            correction_id = store.save_structure_timeline(
+                provenance="operator_correction",
+                timeline_version="lumen_operator_correction_v1",
+                confidence=1.0,
+                recording_id=recording_id,
+                segments=[{
+                    "start_ms": 0,
+                    "end_ms": 20_000,
+                    "functional_label": "chorus",
+                    "energy_label": "drop",
+                    "content_label": "instrumental",
+                }],
+            )
+            row = {
+                "recording_id": recording_id,
+                "recording_offset_ms": 0,
+                "functional": "verse",
+                "energy": "groove",
+                "content": "vocal",
+                "boundary": 0,
+            }
+
+            corrected, report = _apply_operator_timeline_corrections(
+                store, [row]
+            )
+
+            self.assertEqual(corrected[0]["functional"], "chorus")
+            self.assertEqual(corrected[0]["energy"], "drop")
+            self.assertEqual(corrected[0]["content"], "instrumental")
+            self.assertEqual(corrected[0]["boundary"], 1)
+            self.assertEqual(
+                corrected[0]["target_provenance_by_axis"]["energy"][
+                    "timeline_id"
+                ],
+                correction_id,
+            )
+            self.assertEqual(report["rows_corrected"], 1)
+
     def test_offline_memory_limit_uses_appliance_config_and_env_override(self):
         with tempfile.TemporaryDirectory() as temporary:
             memory_file = Path(temporary) / "offline-memory-gib"
@@ -200,7 +332,8 @@ class OfflineResearchTests(unittest.TestCase):
                 json.dumps({
                     "activation_gate_version": (
                         STUDENT_ACTIVATION_GATE_VERSION
-                    )
+                    ),
+                    "teacher_fusion_version": TEACHER_FUSION_VERSION,
                 }),
                 encoding="utf-8",
             )
@@ -450,17 +583,15 @@ class OfflineResearchTests(unittest.TestCase):
                 store, research_root=root / "research"
             )
             self.assertEqual(readiness["teacher_jobs_all_total"], 4)
-            self.assertEqual(readiness["teacher_jobs_total"], 1)
+            self.assertEqual(readiness["teacher_jobs_total"], 2)
             self.assertEqual(readiness["teacher_jobs_complete"], 1)
-            self.assertEqual(readiness["teacher_jobs_remaining"], 0)
+            self.assertEqual(readiness["teacher_jobs_remaining"], 1)
             excluded_reasons = {
                 item["reason"]
                 for item in readiness["excluded_teacher_jobs"]
             }
             self.assertTrue({
                 "reused_duplicate_edmformer",
-                "obsolete_teacher_normalization_version",
-                "non_authoritative_techno_teacher",
             } <= excluded_reasons)
             store.update_analysis_job(obsolete_job_id, status="complete")
             store.update_analysis_job(songformer_job_id, status="complete")
@@ -569,7 +700,8 @@ class OfflineResearchTests(unittest.TestCase):
             self.assertEqual(readiness["recordings_processed"], 0)
             self.assertEqual(readiness["recordings_planned"], 1)
             self.assertEqual(
-                readiness["active_teacher_authority"], "edmformer"
+                readiness["active_teacher_authority"],
+                "axis_specific_edmformer_songformer",
             )
             self.assertEqual(
                 readiness["ontology"]["sustained_states"],
@@ -583,17 +715,17 @@ class OfflineResearchTests(unittest.TestCase):
                 readiness["ontology"]["transition_events"],
             )
             self.assertEqual(
-                readiness["active_teacher_job_types"], [EDMFORMER_JOB]
+                readiness["active_teacher_job_types"],
+                [EDMFORMER_JOB, SONGFORMER_JOB],
             )
             self.assertEqual(readiness["teacher_jobs_total"], 0)
             self.assertEqual(readiness["teacher_jobs_all_total"], 6)
             self.assertEqual(
                 sum(
-                    item.get("reason")
-                    == "non_authoritative_techno_teacher"
+                    bool(item.get("structure_supervision"))
                     for item in readiness["excluded_teacher_jobs"]
                 ),
-                3,
+                4,
             )
 
     def test_export_preparation_reconstructs_audio_and_deduplicates_jobs(self):
@@ -1187,20 +1319,23 @@ class OfflineResearchTests(unittest.TestCase):
         }
         merged, report = _merge_teacher_example_rows([edm, song])
         self.assertEqual(len(merged), 1)
-        self.assertEqual(merged[0]["functional"], "unknown")
+        self.assertEqual(merged[0]["functional"], "verse")
         self.assertEqual(merged[0]["energy"], "drop")
-        self.assertEqual(merged[0]["content"], "unknown")
-        self.assertEqual(merged[0]["boundary"], 0)
-        self.assertEqual(report["duplicates_collapsed"], 0)
-        self.assertEqual(report["excluded_non_authoritative_rows"], 1)
+        self.assertEqual(merged[0]["content"], "vocal")
+        self.assertEqual(merged[0]["boundary"], 1)
+        self.assertEqual(report["duplicates_collapsed"], 1)
+        self.assertEqual(report["excluded_non_authoritative_rows"], 0)
         self.assertEqual(
             merged[0]["target_provenance_by_axis"]["energy"][
                 "teacher_name"
             ],
             "EDMFormer",
         )
-        self.assertNotIn(
-            "functional", merged[0]["target_provenance_by_axis"]
+        self.assertEqual(
+            merged[0]["target_provenance_by_axis"]["functional"][
+                "teacher_name"
+            ],
+            "SongFormer",
         )
 
     def test_teacher_merge_fills_legacy_missing_supervision_snapshot(self):
@@ -1240,11 +1375,13 @@ class OfflineResearchTests(unittest.TestCase):
         )
 
         self.assertEqual(len(merged), 1)
-        self.assertEqual(report["duplicates_collapsed"], 0)
-        self.assertEqual(report["excluded_non_authoritative_rows"], 1)
+        self.assertEqual(report["duplicates_collapsed"], 1)
+        self.assertEqual(report["excluded_non_authoritative_rows"], 0)
         self.assertEqual(merged[0]["energy"], "drop")
-        self.assertEqual(merged[0]["functional"], "unknown")
-        self.assertNotIn("structure_supervision", merged[0])
+        self.assertEqual(merged[0]["functional"], "chorus")
+        self.assertEqual(
+            merged[0]["structure_supervision"], _complete_supervision()
+        )
 
         explicit_edm = {
             **legacy_edm,
@@ -1259,13 +1396,11 @@ class OfflineResearchTests(unittest.TestCase):
                 "evidence": {},
             },
         }
-        merged, report = _merge_teacher_example_rows(
-            [explicit_edm, conflicting_song]
-        )
-        self.assertEqual(
-            merged[0]["structure_supervision"], _complete_supervision()
-        )
-        self.assertEqual(report["excluded_non_authoritative_rows"], 1)
+        with self.assertRaisesRegex(
+            ValueError,
+            "structure_supervision",
+        ):
+            _merge_teacher_example_rows([explicit_edm, conflicting_song])
 
     def test_student_examples_use_capture_relative_teacher_time(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1560,15 +1695,9 @@ class OfflineResearchTests(unittest.TestCase):
             trusted = trusted_student_examples(
                 store, research_root=research
             )
-            self.assertEqual(trusted["usable_teacher_runs"], 0)
-            self.assertEqual(trusted["preserved_non_authoritative_runs"], 1)
-            self.assertEqual(
-                trusted["excluded_teacher_runs"][0]["reason"],
-                "non_authoritative_techno_teacher",
-            )
-            self.assertTrue(
-                trusted["excluded_teacher_runs"][0]["artifacts_preserved"]
-            )
+            self.assertEqual(trusted["usable_teacher_runs"], 1)
+            self.assertEqual(trusted["preserved_non_authoritative_runs"], 0)
+            self.assertEqual(trusted["excluded_teacher_runs"], [])
 
     def test_teacher_subprocess_cancellation_terminates_process_group(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1702,6 +1831,7 @@ class OfflineResearchTests(unittest.TestCase):
             active_report = {
                 "activated": True,
                 "activation_gate_version": STUDENT_ACTIVATION_GATE_VERSION,
+                "teacher_fusion_version": TEACHER_FUSION_VERSION,
                 "teacher_normalization_version": (
                     TEACHER_NORMALIZATION_VERSION
                 ),
@@ -1720,6 +1850,7 @@ class OfflineResearchTests(unittest.TestCase):
                     "source_scope": (
                         "active_database_completed_teacher_runs"
                     ),
+                    "teacher_fusion_version": TEACHER_FUSION_VERSION,
                     "applicable_axes": ["energy", "content", "boundary"],
                 },
             )
@@ -2094,6 +2225,66 @@ class OfflineResearchTests(unittest.TestCase):
                 TEACHER_NORMALIZATION_VERSION,
             )
             self.assertEqual(queued[0]["priority"], 15)
+
+    def test_songformer_completion_without_owned_artifacts_requeues(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            audio_path = root / "materialized.wav"
+            audio_path.write_bytes(b"verified-local-audio")
+            store = SongMemoryStore(root / "lumen.sqlite3")
+            coordinator = ResearchJobCoordinator(
+                store,
+                training_root=root / "training",
+                research_root=root / "research",
+            )
+            stale_job_id = store.enqueue_analysis_job(
+                job_type=SONGFORMER_JOB,
+                payload={
+                    "recording_id": "recording",
+                    "content_sha256": "b" * 64,
+                    "audio_path": str(audio_path),
+                    "duration_ms": 60_000,
+                    "songformer_window_seconds": 60,
+                    "teacher_normalization_version": (
+                        TEACHER_NORMALIZATION_VERSION
+                    ),
+                    "structure_supervision": {"eligible": True},
+                },
+                priority=9,
+            )
+            store.update_analysis_job(
+                stale_job_id,
+                status="complete",
+                result={
+                    "teacher_normalization_version": (
+                        TEACHER_NORMALIZATION_VERSION
+                    )
+                },
+            )
+
+            self.assertFalse(
+                coordinator._already_queued(
+                    SONGFORMER_JOB,
+                    "recording",
+                    "b" * 64,
+                    priority=10,
+                )
+            )
+            result = coordinator.requeue_obsolete_songformer_jobs()
+
+            self.assertEqual(result["jobs_queued"], 1)
+            queued = next(
+                job for job in store.list_analysis_jobs(limit=10)
+                if job["id"] in result["job_ids"]
+            )
+            self.assertEqual(queued["priority"], 9)
+            self.assertEqual(
+                queued["payload"]["teacher_normalization_version"],
+                TEACHER_NORMALIZATION_VERSION,
+            )
+            self.assertEqual(
+                queued["payload"]["songformer_window_seconds"], 60
+            )
 
     def test_current_file_with_retired_release_state_is_excluded(self):
         with tempfile.TemporaryDirectory() as temporary:
