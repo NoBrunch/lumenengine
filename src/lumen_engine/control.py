@@ -61,6 +61,7 @@ from lumen_engine.memory import (
     SongMemoryStore,
     TEACHER_NORMALIZATION_VERSION,
 )
+from lumen_engine.link import LumenLinkCoordinator
 from lumen_engine.models import (
     Feedback,
     MediaIdentity,
@@ -456,6 +457,18 @@ class LumenApplication:
             self.training_root / "research",
             store=self.memory,
         )
+        # Lumen Link owns only offline job leases and immutable transfers.
+        # It has no reference to the runtime, audio capture, or DMX output.
+        self.lumen_link = LumenLinkCoordinator(
+            self.memory,
+            research_root=self.training_root / "research",
+            state_root=state_root / "lumen-link",
+            config_path=state_root / "lumen-link" / "config.json",
+            can_import=lambda: (
+                self.engine_mode == "standby"
+                and not (self._thread and self._thread.is_alive())
+            ),
+        )
         # The exact readiness audit verifies checksums and parses every trusted
         # teacher-example file.  On the installed library that is roughly a
         # gigabyte of reads, so it must never run synchronously in bootstrap or
@@ -632,6 +645,10 @@ class LumenApplication:
         )
         self._feedback_refresh_thread.start()
         self.solve_target(self.selected_target)
+        # Start remote polling only after all engine state exists and stale
+        # local worker leases have been recovered. A restarted link can then
+        # idempotently resume the same immutable remote job.
+        self.lumen_link.start()
 
     def _load_student_model(self) -> None:
         self._student_model = None
@@ -2313,6 +2330,9 @@ class LumenApplication:
         self._recover_abandoned_research_jobs()
         external_research_running = any(
             job["status"] == "running"
+            and not str(job.get("worker_id") or "").startswith(
+                "lumen-link:"
+            )
             for job in self.memory.list_analysis_jobs(limit=100_000)
         )
         with self._lock:
@@ -2373,6 +2393,7 @@ class LumenApplication:
         errors: list[str] = []
         self._stop.set()
         self._research_cancel.set()
+        self.lumen_link.close()
         thread = self._thread
         if thread is not None and thread.is_alive():
             # Audio chunks are short; allow the owner thread to finalize its
@@ -4184,6 +4205,9 @@ class LumenApplication:
             job
             for job in self.memory.list_analysis_jobs(limit=100_000)
             if job["status"] == "running"
+            and not str(job.get("worker_id") or "").startswith(
+                "lumen-link:"
+            )
         ]
         with self._lock:
             worker = self._research_worker_thread
@@ -4289,6 +4313,9 @@ class LumenApplication:
         self._recover_abandoned_research_jobs()
         external_research_running = any(
             job["status"] == "running"
+            and not str(job.get("worker_id") or "").startswith(
+                "lumen-link:"
+            )
             for job in self.memory.list_analysis_jobs(limit=100_000)
         )
         # Reject a duplicate/unsafe request before reconstructing WAV files or
@@ -4322,10 +4349,12 @@ class LumenApplication:
         # otherwise a crash-stranded `running` row can make Analyze appear to
         # have no resumable work.
         export = self._prepare_unindexed_research_captures()
+        routed_to_link = self.lumen_link.route_queued_jobs()
+        analysis_jobs = self.memory.list_analysis_jobs(limit=100_000)
         queued = sum(
             job["status"] == "queued"
             and job["job_type"] in {EDMFORMER_JOB, SONGFORMER_JOB}
-            for job in self.memory.list_analysis_jobs(limit=100_000)
+            for job in analysis_jobs
         )
         if not queued:
             ineligible = int(export.get("recordings_ineligible") or 0)
@@ -4351,13 +4380,34 @@ class LumenApplication:
                 "started": False,
                 "message": message,
             }
-        research = self.start_research_worker(
-            {"job_types": [EDMFORMER_JOB, SONGFORMER_JOB]}
+        local_job_types = [
+            job_type
+            for job_type in (EDMFORMER_JOB, SONGFORMER_JOB)
+            if not (
+                job_type == EDMFORMER_JOB
+                and self.lumen_link.ready_for_offload()
+            )
+            if any(
+                job["status"] == "queued"
+                and job["job_type"] == job_type
+                and str(
+                    (job.get("payload") or {}).get("execution_target")
+                    or "automatic"
+                )
+                != "threadripper"
+                for job in analysis_jobs
+            )
+        ]
+        research = (
+            self.start_research_worker({"job_types": local_job_types})
+            if local_job_types
+            else self.research_status(wait_for_readiness=False)
         )
         return {
             "export": export,
             "research": research,
             "started": True,
+            "routed_to_threadripper": routed_to_link,
         }
 
     def _prepare_unindexed_research_captures(self) -> dict[str, Any]:
@@ -4452,7 +4502,11 @@ class LumenApplication:
         self._recover_abandoned_research_jobs()
         analysis_jobs = self.memory.list_analysis_jobs(limit=100_000)
         external_research_running = any(
-            job["status"] == "running" for job in analysis_jobs
+            job["status"] == "running"
+            and not str(job.get("worker_id") or "").startswith(
+                "lumen-link:"
+            )
+            for job in analysis_jobs
         )
         available = sum(
             job["status"] == "queued" and job["job_type"] in job_types
@@ -4526,6 +4580,9 @@ class LumenApplication:
         self._recover_abandoned_research_jobs()
         external_research_running = any(
             job["status"] == "running"
+            and not str(job.get("worker_id") or "").startswith(
+                "lumen-link:"
+            )
             for job in self.memory.list_analysis_jobs(limit=100_000)
         )
         with self._lock:
@@ -6976,6 +7033,29 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
+        if path == "/api/link/status":
+            query_values = parse_qs(parsed.query)
+            summary_only = query_values.get("summary", ["0"])[0] in {
+                "1",
+                "true",
+                "yes",
+            }
+            status = self.server.application.lumen_link.status()
+            if summary_only:
+                # The phone remote needs only enough information to show
+                # connection and active-work state. Keep the detailed event
+                # history and full job list off its periodic response.
+                status = {
+                    **status,
+                    "jobs": list(status.get("jobs") or [])[:1],
+                    "events": [],
+                    "summary": True,
+                }
+            self._json(
+                HTTPStatus.OK,
+                status,
+            )
+            return
         if path == "/api/spotify":
             query_values = parse_qs(parsed.query)
             query = query_values.get("q", [""])[0]
@@ -7059,6 +7139,17 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.cancel_research_worker()
             elif path == "/api/research/train-student":
                 result = app.train_structure_student(payload)
+            elif path.startswith("/api/link/"):
+                action = path.rsplit("/", 1)[-1]
+                if action not in {
+                    "test",
+                    "enable",
+                    "pause",
+                    "resume",
+                    "disable",
+                }:
+                    raise ValueError("unknown Lumen Link control")
+                result = app.lumen_link.control(action)
             elif path == "/api/spotify/connect":
                 result = app.connect_spotify(payload)
             elif path == "/api/spotify/control":

@@ -1014,21 +1014,32 @@ enough**, **Too dim**, and faster/slower side-arm requests.
 
 ## Threadripper compute node
 
-The approved future link keeps this Ubuntu PC responsible for line-in timing,
-the operator interface, feedback, canonical song memory, choreography, spatial
-resolution, and DMX. A direct Gigabit Ethernet connection will send only heavy
-offline work to the 3970X/128 GB Threadripper workstation: coherent full-song
-EDMFormer inference, feature generation, student training, held-out evaluation,
-and simulation.
+**Lumen Link v1** keeps this Ubuntu PC responsible for line-in timing, the
+operator interface, feedback, canonical song memory, choreography, spatial
+resolution, and DMX. A direct Gigabit Ethernet connection sends eligible
+full-song EDMFormer jobs to the 3970X/128 GiB Threadripper WSL node.
 
-Lumen will transfer immutable checksummed recordings and job manifests, then
-validate and import immutable result bundles. The machines will not share a
-writable SQLite database, and the Threadripper will not drive beat timing or
-DMX. Approved song timelines and activated student models remain on Lumen so a
-network outage or powered-down compute node cannot affect Live.
+The transfer protocol uses a shared mode-600 secret for timestamped,
+nonce-bound HMAC authentication. Audio objects are immutable and addressed by
+SHA-256; uploads resume by byte offset. The worker accepts only fixed job types
+and verifies the Lumen revision, EDMFormer source revision, model checksum,
+normalization version, and preprocessing version. Results are signed in
+transit, identity-checked, normalized, and imported into the canonical local
+database only while Lumen is in standby. A disconnect leaves Live, feedback,
+Spotify, audio timing, and DMX independent.
 
-The full authority boundary, staged implementation, network plan, and
-acceptance checks are maintained in `docs/threadripper-compute-node.md`.
+The standalone **Lumen Link** page shows the local/remote topology, connection
+latency, queue, active job stage, transfer volume, worker resources, event
+history, and supported versus gated capabilities. The phone/tablet interface
+has a compact status card. **Test connection**, **Enable link**, **Pause jobs**,
+and **Resume jobs** change only the offline coordinator.
+
+Version 1 executes remote EDMFormer only. SongFormer, student training,
+held-out evaluation, and simulation remain explicit capability gates until
+their immutable result/model import paths pass the same recovery and parity
+checks. The deployment procedure is `docs/lumen-link-wsl-deployment.md`; the
+Threadripper-side Codex handoff is `docs/lumen-link-codex-handoff.md`; the full
+authority boundary is `docs/threadripper-compute-node.md`.
 
 ## Calibration
 
@@ -1306,6 +1317,9 @@ runbook before treating any Git checkout as operational.
 - **Compute node**: The Threadripper service that executes versioned offline
   analysis or training jobs and returns checksummed artifacts. It is not the
   live lighting authority and does not drive DMX.
+- **Lumen Link**: The authenticated, resumable private-LAN coordinator between
+  the Lumen PC and the Threadripper WSL compute node. Version 1 offloads
+  EDMFormer while leaving all live authority and canonical memory local.
 - **Choreography sequence**: An ordered set of semantic fixture actions with
   group scope, beat start times, durations, intensity, palette, strobe, and
   entry/exit behavior.

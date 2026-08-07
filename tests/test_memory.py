@@ -17,6 +17,36 @@ from lumen_engine.models import Feedback, MediaIdentity
 
 
 class MemoryTests(unittest.TestCase):
+    def test_analysis_workers_claim_only_their_execution_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SongMemoryStore(Path(directory) / "memory.sqlite3")
+            remote_id = store.enqueue_analysis_job(
+                job_type="teacher.edmformer", payload={}
+            )
+            local_id = store.enqueue_analysis_job(
+                job_type="teacher.edmformer", payload={}
+            )
+            store.set_analysis_job_execution_target(
+                remote_id, execution_target="threadripper"
+            )
+            store.set_analysis_job_execution_target(
+                local_id, execution_target="local"
+            )
+            local = store.claim_analysis_job(
+                ("teacher.edmformer",),
+                worker_id="local",
+                worker_pid=os.getpid(),
+                execution_targets=("automatic", "local"),
+            )
+            self.assertEqual(local["id"], local_id)
+            remote = store.claim_analysis_job(
+                ("teacher.edmformer",),
+                worker_id="lumen-link:test",
+                worker_pid=os.getpid(),
+                execution_targets=("threadripper",),
+            )
+            self.assertEqual(remote["id"], remote_id)
+
     def test_structure_timeline_catalog_exposes_unplayed_review_work(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SongMemoryStore(Path(directory) / "memory.sqlite3")

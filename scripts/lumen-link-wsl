@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# Provision and operate the Threadripper side of Lumen Link under WSL Ubuntu.
+# No arguments performs a read-only status check. Network, sudo, and file
+# mutations require an explicit command plus --apply.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LINK_CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/lumen-link"
+LINK_STATE_ROOT="${XDG_STATE_HOME:-${HOME}/.local/state}/lumen-link"
+WORKER_CONFIG="${LINK_CONFIG_ROOT}/worker.json"
+SECRET_FILE="${LINK_CONFIG_ROOT}/shared-secret"
+USER_SERVICE_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+USER_SERVICE="${USER_SERVICE_ROOT}/lumen-link-worker.service"
+PYENV_ROOT="${LUMEN_LINK_PYENV_ROOT:-${HOME}/.local/share/lumen-link/pyenv}"
+PYENV_REVISION=v2.6.27
+CPU_THREADS_DEFAULT=24
+CORE_PYTHON_VERSION=3.12.8
+SONGFORMER_PYTHON_VERSION=3.10.20
+
+SYSTEM_PACKAGES=(
+    ca-certificates curl wget git git-lfs openssh-server rsync jq openssl
+    build-essential gcc g++ make cmake pkg-config ffmpeg libsndfile1
+    python3 python3-dev python3-pip python3-venv llvm
+    libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev
+    libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev
+    libffi-dev liblzma-dev libgdbm-dev libnss3-dev uuid-dev
+)
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/lumen-link-wsl COMMAND [OPTIONS]
+
+Commands:
+  status               Read-only WSL, service, configuration and model status
+  preflight            Validate that this is a suitable WSL compute node
+  install --apply      Install OS/Python/Lumen/research dependencies and config
+  configure --apply    Create private secret, worker config and user service
+  provision --apply    Provision pinned EDMFormer and SongFormer environments
+  install-ssh --apply --lumen-public-key-file PATH
+                       Install the Lumen PC public key for bootstrap SSH
+  verify               Run non-mutating deployment and research verification
+  start                 Start the already-installed user service
+  stop                  Stop the user service
+  restart               Restart the user service
+  logs                  Follow the user-service journal
+  run [--config PATH]   Run the worker in the foreground (used by systemd)
+
+Options:
+  --apply               Authorize installation/configuration mutations
+  --config PATH         Worker JSON path (default: ~/.config/lumen-link/worker.json)
+  --cpu-threads N       Worker CPU threads (default: 24)
+  --lumen-public-key-file PATH
+                       Existing Ed25519 public key from the Lumen PC
+
+The repository, models, job objects and Python environments must remain in the
+Linux filesystem (normally ~/lumenengine), never /mnt/c. Runtime transport is
+HMAC-authenticated HTTP on TCP 8765; SSH is bootstrap/diagnostics only.
+EOF
+}
+
+shell_join() {
+    local value
+    printf 'DRY-RUN:'
+    for value in "$@"; do
+        printf ' %q' "$value"
+    done
+    printf '\n'
+}
+
+apply_or_print() {
+    if [[ "$APPLY" == "1" ]]; then
+        "$@"
+    else
+        shell_join "$@"
+    fi
+}
+
+is_wsl() {
+    grep -Eqi '(microsoft|wsl)' /proc/sys/kernel/osrelease /proc/version 2>/dev/null
+}
+
+command_state() {
+    local label="$1"
+    local command_name="$2"
+    if command -v "$command_name" >/dev/null 2>&1; then
+        printf '  %-24s ready (%s)\n' "$label" "$(command -v "$command_name")"
+    else
+        printf '  %-24s missing\n' "$label"
+    fi
+}
+
+python_state() {
+    local label="$1"
+    local path="$2"
+    local expected="$3"
+    if [[ ! -x "$path" ]]; then
+        printf '  %-24s missing (requires %s)\n' "$label" "$expected"
+        return
+    fi
+    local actual
+    actual="$($path -c 'import platform; print(platform.python_version())' 2>/dev/null || printf 'unreadable')"
+    printf '  %-24s %s%s\n' "$label" "$actual" "$([[ "$actual" == "$expected" ]] && printf ' (ready)' || printf ' (expected %s)' "$expected")"
+}
+
+verify_python_version() {
+    local label="$1"
+    local path="$2"
+    local expected="$3"
+    [[ -x "$path" ]] || { printf 'FAIL: %s Python is missing at %s.\n' "$label" "$path" >&2; return 1; }
+    local actual
+    actual="$($path -c 'import platform; print(platform.python_version())')"
+    [[ "$actual" == "$expected" ]] || {
+        printf 'FAIL: %s requires Python %s; found %s at %s.\n' "$label" "$expected" "$actual" "$path" >&2
+        return 1
+    }
+}
+
+service_state() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        systemctl --user is-active lumen-link-worker.service 2>/dev/null || true
+    else
+        printf 'unavailable (enable systemd in WSL)\n'
+    fi
+}
+
+status() {
+    printf 'Lumen Link — Threadripper/WSL status\n'
+    printf '  project root             %s\n' "$PROJECT_ROOT"
+    printf '  Linux filesystem         %s\n' "$([[ "$PROJECT_ROOT" == /mnt/* ]] && printf 'NO — move to ~/lumenengine' || printf 'yes')"
+    printf '  WSL environment          %s\n' "$(is_wsl && printf 'yes' || printf 'not detected')"
+    printf '  processors               %s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 'unknown')"
+    printf '  memory                   %s GiB\n' "$(awk '/MemTotal/ {printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || printf 'unknown')"
+    printf '  worker config            %s\n' "$([[ -f "$WORKER_CONFIG" ]] && printf 'ready' || printf 'missing')"
+    if [[ -f "$SECRET_FILE" ]]; then
+        printf '  shared secret            ready (mode %s; value not displayed)\n' "$(stat -c '%a' "$SECRET_FILE")"
+    else
+        printf '  shared secret            missing\n'
+    fi
+    printf '  user service             %s\n' "$(service_state)"
+    printf '  core environment         %s\n' "$([[ -x "${PROJECT_ROOT}/.venv/bin/lumen" ]] && printf 'ready' || printf 'missing')"
+    printf '  EDMFormer environment    %s\n' "$([[ -x "${PROJECT_ROOT}/state/training/research/environments/edmformer/bin/python" ]] && printf 'ready' || printf 'missing')"
+    printf '  SongFormer environment   %s\n' "$([[ -x "${PROJECT_ROOT}/state/training/research/environments/songformer/bin/python" ]] && printf 'ready' || printf 'missing')"
+    command_state "git" git
+    command_state "ffmpeg" ffmpeg
+    command_state "rsync" rsync
+    command_state "sshd" sshd
+    python_state "pinned core Python" "${PYENV_ROOT}/versions/${CORE_PYTHON_VERSION}/bin/python" "$CORE_PYTHON_VERSION"
+    python_state "core venv Python" "${PROJECT_ROOT}/.venv/bin/python" "$CORE_PYTHON_VERSION"
+    python_state "EDMFormer Python" "${PROJECT_ROOT}/state/training/research/environments/edmformer/bin/python" "$CORE_PYTHON_VERSION"
+    python_state "SongFormer Python" "${PROJECT_ROOT}/state/training/research/environments/songformer/bin/python" "$SONGFORMER_PYTHON_VERSION"
+    if [[ -d "${PYENV_ROOT}/.git" ]]; then
+        printf '  %-24s %s (expected %s)\n' "pyenv revision" "$(git -C "$PYENV_ROOT" describe --tags --exact-match 2>/dev/null || git -C "$PYENV_ROOT" rev-parse --short HEAD)" "$PYENV_REVISION"
+    else
+        printf '  %-24s missing (requires %s)\n' "pyenv revision" "$PYENV_REVISION"
+    fi
+    printf '\nWindows-side link checks are performed by scripts/lumen-link-windows.ps1.\n'
+}
+
+preflight() {
+    local failed=0
+    if ! is_wsl; then
+        printf 'FAIL: WSL was not detected. Run this inside the Ubuntu WSL shell.\n' >&2
+        failed=1
+    fi
+    if [[ "$PROJECT_ROOT" == /mnt/* ]]; then
+        printf 'FAIL: clone Lumen into ~/lumenengine, not /mnt/c.\n' >&2
+        failed=1
+    fi
+    local processors memory_gib free_gib
+    processors="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '0')"
+    memory_gib="$(awk '/MemTotal/ {printf "%d", $2/1048576}' /proc/meminfo)"
+    free_gib="$(df -Pk "$PROJECT_ROOT" | awk 'NR==2 {printf "%d", $4/1048576}')"
+    printf 'Preflight: processors=%s memory=%sGiB free=%sGiB\n' "$processors" "$memory_gib" "$free_gib"
+    (( processors >= 8 )) || { printf 'FAIL: at least 8 visible processors are required.\n' >&2; failed=1; }
+    (( memory_gib >= 24 )) || { printf 'FAIL: expose at least 24 GiB to WSL.\n' >&2; failed=1; }
+    (( free_gib >= 32 )) || { printf 'FAIL: at least 32 GiB free Linux storage is required.\n' >&2; failed=1; }
+    if [[ -x "${PYENV_ROOT}/versions/${CORE_PYTHON_VERSION}/bin/python" ]]; then
+        verify_python_version "pinned core" "${PYENV_ROOT}/versions/${CORE_PYTHON_VERSION}/bin/python" "$CORE_PYTHON_VERSION" || failed=1
+    fi
+    if [[ -x "${PYENV_ROOT}/versions/${SONGFORMER_PYTHON_VERSION}/bin/python" ]]; then
+        verify_python_version "SongFormer" "${PYENV_ROOT}/versions/${SONGFORMER_PYTHON_VERSION}/bin/python" "$SONGFORMER_PYTHON_VERSION" || failed=1
+    fi
+    return "$failed"
+}
+
+install_system_packages() {
+    apply_or_print sudo apt-get update
+    apply_or_print sudo apt-get install -y "${SYSTEM_PACKAGES[@]}"
+}
+
+install_python_runtimes() {
+    if [[ ! -x "${PYENV_ROOT}/bin/pyenv" ]]; then
+        apply_or_print git clone --depth 1 --branch "$PYENV_REVISION" \
+            https://github.com/pyenv/pyenv.git "$PYENV_ROOT"
+    elif [[ -d "${PYENV_ROOT}/.git" ]]; then
+        local actual_revision
+        actual_revision="$(git -C "$PYENV_ROOT" describe --tags --exact-match 2>/dev/null || true)"
+        if [[ "$actual_revision" != "$PYENV_REVISION" ]]; then
+            printf 'Lumen Link pyenv is %s, expected %s; refusing to change an existing checkout.\n' \
+                "${actual_revision:-untagged}" "$PYENV_REVISION" >&2
+            return 1
+        fi
+    fi
+    if [[ "$APPLY" == "0" ]]; then
+        shell_join env PYENV_ROOT="$PYENV_ROOT" "${PYENV_ROOT}/bin/pyenv" install -s "$CORE_PYTHON_VERSION"
+        shell_join env PYENV_ROOT="$PYENV_ROOT" "${PYENV_ROOT}/bin/pyenv" install -s "$SONGFORMER_PYTHON_VERSION"
+        return
+    fi
+    export PYENV_ROOT
+    export PATH="${PYENV_ROOT}/bin:${PATH}"
+    "${PYENV_ROOT}/bin/pyenv" install -s "$CORE_PYTHON_VERSION"
+    "${PYENV_ROOT}/bin/pyenv" install -s "$SONGFORMER_PYTHON_VERSION"
+}
+
+install_core_environment() {
+    local pinned_python="${PYENV_ROOT}/versions/${CORE_PYTHON_VERSION}/bin/python"
+    if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+        local existing_version
+        existing_version="$("${PROJECT_ROOT}/.venv/bin/python" -c 'import platform; print(platform.python_version())')"
+        if [[ "$existing_version" != "$CORE_PYTHON_VERSION" ]]; then
+            local backup="${PROJECT_ROOT}/.venv.incompatible-${existing_version}-$(date +%Y%m%d%H%M%S)"
+            apply_or_print mv "${PROJECT_ROOT}/.venv" "$backup"
+        fi
+    fi
+    apply_or_print "$pinned_python" -m venv "${PROJECT_ROOT}/.venv"
+    apply_or_print "${PROJECT_ROOT}/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
+    apply_or_print "${PROJECT_ROOT}/.venv/bin/python" -m pip install -e "$PROJECT_ROOT"
+}
+
+prepare_research_environment_version() {
+    local name="$1"
+    local expected="$2"
+    local environment="${PROJECT_ROOT}/state/training/research/environments/${name}"
+    local python="${environment}/bin/python"
+    [[ -x "$python" ]] || return 0
+    local actual
+    actual="$($python -c 'import platform; print(platform.python_version())')"
+    [[ "$actual" == "$expected" ]] && return 0
+    local backup="${environment}.incompatible-${actual}-$(date +%Y%m%d%H%M%S)"
+    apply_or_print mv "$environment" "$backup"
+}
+
+provision_research() {
+    prepare_research_environment_version edmformer "$CORE_PYTHON_VERSION"
+    prepare_research_environment_version songformer "$SONGFORMER_PYTHON_VERSION"
+    if [[ "$APPLY" == "0" ]]; then
+        shell_join env PYENV_ROOT="$PYENV_ROOT" PATH="${PYENV_ROOT}/bin:${PATH}" "${PROJECT_ROOT}/scripts/setup-research" provision
+        return
+    fi
+    export PYENV_ROOT
+    export PATH="${PYENV_ROOT}/bin:${PATH}"
+    "${PROJECT_ROOT}/scripts/setup-research" provision
+}
+
+render_configuration() {
+    local threads="$1"
+    if [[ "$APPLY" == "0" ]]; then
+        shell_join mkdir -p "$LINK_CONFIG_ROOT" "$LINK_STATE_ROOT" "$USER_SERVICE_ROOT"
+        printf 'DRY-RUN: generate a private 256-bit secret at %q (mode 600)\n' "$SECRET_FILE"
+        printf 'DRY-RUN: render %q and %q\n' "$WORKER_CONFIG" "$USER_SERVICE"
+        return
+    fi
+    mkdir -p "$LINK_CONFIG_ROOT" "$LINK_STATE_ROOT" "$USER_SERVICE_ROOT"
+    chmod 700 "$LINK_CONFIG_ROOT" "$LINK_STATE_ROOT"
+    if [[ ! -f "$SECRET_FILE" ]]; then
+        umask 077
+        openssl rand -hex 32 > "$SECRET_FILE"
+    fi
+    chmod 600 "$SECRET_FILE"
+    python3 - "$PROJECT_ROOT" "$LINK_STATE_ROOT" "$SECRET_FILE" "$threads" "$WORKER_CONFIG" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+project, state, secret, threads, output = sys.argv[1:]
+template = Path(project, "config/lumen-link/worker.wsl.example.json").read_text(encoding="utf-8")
+payload = json.loads(
+    template.replace("@@PROJECT_ROOT@@", project)
+    .replace("@@STATE_ROOT@@", state)
+    .replace("@@SECRET_FILE@@", secret)
+    .replace("@@RESEARCH_ROOT@@", str(Path(project, "state/training/research")))
+)
+payload["execution"]["cpu_threads"] = int(threads)
+Path(output).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+    chmod 600 "$WORKER_CONFIG"
+    sed \
+        -e "s|@@PROJECT_ROOT@@|${PROJECT_ROOT}|g" \
+        -e "s|@@CONFIG_PATH@@|${WORKER_CONFIG}|g" \
+        "${PROJECT_ROOT}/config/lumen-link/lumen-link-worker.service" > "$USER_SERVICE"
+    chmod 600 "$USER_SERVICE"
+    systemctl --user daemon-reload
+    systemctl --user enable lumen-link-worker.service
+}
+
+install_ssh_key() {
+    local public_key_file="$1"
+    [[ -n "$public_key_file" ]] || {
+        printf 'install-ssh requires --lumen-public-key-file PATH.\n' >&2
+        return 2
+    }
+    [[ -f "$public_key_file" ]] || {
+        printf 'Public key not found: %s\n' "$public_key_file" >&2
+        return 2
+    }
+    grep -Eq '^ssh-ed25519 [A-Za-z0-9+/=]+( .*)?$' "$public_key_file" || {
+        printf 'Only an Ed25519 OpenSSH public key is accepted.\n' >&2
+        return 2
+    }
+    if [[ "$APPLY" == "0" ]]; then
+        printf 'DRY-RUN: append the verified public key to ~/.ssh/authorized_keys without displaying it\n'
+        shell_join sudo systemctl enable --now ssh.service
+        return
+    fi
+    install -d -m 700 "${HOME}/.ssh"
+    touch "${HOME}/.ssh/authorized_keys"
+    chmod 600 "${HOME}/.ssh/authorized_keys"
+    if ! grep -Fqx "$(<"$public_key_file")" "${HOME}/.ssh/authorized_keys"; then
+        printf '%s\n' "$(<"$public_key_file")" >> "${HOME}/.ssh/authorized_keys"
+    fi
+    local ssh_policy
+    ssh_policy="$(mktemp)"
+    printf '%s\n' \
+        'PasswordAuthentication no' \
+        'KbdInteractiveAuthentication no' \
+        'PermitRootLogin no' \
+        "AllowUsers ${USER}" > "$ssh_policy"
+    sudo install -m 644 "$ssh_policy" /etc/ssh/sshd_config.d/99-lumen-link.conf
+    rm -f "$ssh_policy"
+    sudo sshd -t
+    sudo systemctl enable --now ssh.service
+    sudo systemctl restart ssh.service
+}
+
+verify() {
+    preflight
+    [[ -x "${PROJECT_ROOT}/.venv/bin/lumen" ]] || { printf 'FAIL: core environment missing.\n' >&2; return 1; }
+    verify_python_version "pinned core" "${PYENV_ROOT}/versions/${CORE_PYTHON_VERSION}/bin/python" "$CORE_PYTHON_VERSION"
+    verify_python_version "core environment" "${PROJECT_ROOT}/.venv/bin/python" "$CORE_PYTHON_VERSION"
+    verify_python_version "EDMFormer environment" "${PROJECT_ROOT}/state/training/research/environments/edmformer/bin/python" "$CORE_PYTHON_VERSION"
+    verify_python_version "SongFormer environment" "${PROJECT_ROOT}/state/training/research/environments/songformer/bin/python" "$SONGFORMER_PYTHON_VERSION"
+    [[ -f "$WORKER_CONFIG" ]] || { printf 'FAIL: worker config missing.\n' >&2; return 1; }
+    [[ -f "$SECRET_FILE" && "$(stat -c '%a' "$SECRET_FILE")" == "600" ]] || {
+        printf 'FAIL: HMAC secret is missing or not mode 600.\n' >&2
+        return 1
+    }
+    python3 -m json.tool "$WORKER_CONFIG" >/dev/null
+    "${PROJECT_ROOT}/scripts/setup-research" verify
+    printf 'Lumen Link WSL deployment verified.\n'
+}
+
+run_worker() {
+    [[ -r "$WORKER_CONFIG" ]] || { printf 'Worker config is not readable: %s\n' "$WORKER_CONFIG" >&2; return 1; }
+    local -a worker_arguments=()
+    mapfile -t worker_arguments < <(python3 - "$WORKER_CONFIG" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+if value.get("execution", {}).get("job_types") != ["teacher.edmformer"]:
+    raise SystemExit(
+        "worker config must enable only the currently supported "
+        "teacher.edmformer job type"
+    )
+fields = [
+    "--host", str(value["listen"]["host"]),
+    "--port", str(int(value["listen"]["port"])),
+    "--secret-file", str(value["authentication"]["secret_file"]),
+    "--spool", str(value["storage"]["root"]),
+    "--root", str(value["lumen"]["research_root"]),
+    "--max-threads", str(int(value["execution"]["cpu_threads"])),
+    "--max-memory-gib", str(float(value["execution"]["maximum_memory_gib"])),
+]
+print("\n".join(fields))
+PY
+)
+    exec "${PROJECT_ROOT}/.venv/bin/lumen" link-node "${worker_arguments[@]}"
+}
+
+COMMAND="${1:-status}"
+if (( $# )); then shift; fi
+APPLY=0
+CPU_THREADS="$CPU_THREADS_DEFAULT"
+PUBLIC_KEY_FILE=""
+while (( $# )); do
+    case "$1" in
+        --apply) APPLY=1 ;;
+        --config) shift; WORKER_CONFIG="${1:?--config requires a path}" ;;
+        --cpu-threads) shift; CPU_THREADS="${1:?--cpu-threads requires a number}" ;;
+        --lumen-public-key-file) shift; PUBLIC_KEY_FILE="${1:?--lumen-public-key-file requires a path}" ;;
+        -h|--help) usage; exit 0 ;;
+        *) printf 'Unknown option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
+    esac
+    shift
+done
+[[ "$CPU_THREADS" =~ ^[1-9][0-9]*$ ]] || { printf 'CPU threads must be a positive integer.\n' >&2; exit 2; }
+
+case "$COMMAND" in
+    status) status ;;
+    preflight) preflight ;;
+    install)
+        preflight
+        install_system_packages
+        install_python_runtimes
+        install_core_environment
+        provision_research
+        render_configuration "$CPU_THREADS"
+        ;;
+    configure) render_configuration "$CPU_THREADS" ;;
+    provision)
+        install_python_runtimes
+        provision_research
+        ;;
+    install-ssh) install_ssh_key "$PUBLIC_KEY_FILE" ;;
+    verify) verify ;;
+    start) systemctl --user start lumen-link-worker.service ;;
+    stop) systemctl --user stop lumen-link-worker.service ;;
+    restart) systemctl --user restart lumen-link-worker.service ;;
+    logs) journalctl --user -u lumen-link-worker.service -f ;;
+    run) run_worker ;;
+    -h|--help|help) usage ;;
+    *) printf 'Unknown command: %s\n' "$COMMAND" >&2; usage >&2; exit 2 ;;
+esac

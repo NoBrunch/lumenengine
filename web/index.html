@@ -46,6 +46,7 @@
         <button data-nav="audio">Analysis</button>
         <button data-nav="memory">Memory</button>
         <button data-nav="music">Music</button>
+        <button data-nav="link">Lumen Link</button>
         <button data-nav="system">System</button>
         <span class="menubar-spacer"></span>
         <button id="hotkey-help-button"><u>H</u>otkeys</button>
@@ -134,10 +135,15 @@
             <span><b>Spotify console</b><small>Chromecast control</small></span>
             <kbd>6</kbd>
           </button>
+          <button class="nav-item" data-nav="link">
+            <span class="nav-glyph link-glyph"></span>
+            <span><b>Lumen Link</b><small>Threadripper compute</small></span>
+            <kbd>7</kbd>
+          </button>
           <button class="nav-item" data-nav="system">
             <span class="nav-glyph system-glyph"></span>
             <span><b>System</b><small>Hardware and service</small></span>
-            <kbd>7</kbd>
+            <kbd>8</kbd>
           </button>
 
           <div class="nav-section-label lower">Active session</div>
@@ -1061,11 +1067,13 @@
                 <div class="panel-titlebar"><h3>Desktop hotkeys</h3></div>
                 <div class="hotkey-grid">
                   <div><kbd>1</kbd><span>Performance</span></div>
-                  <div><kbd>2</kbd><span>Room &amp; rig</span></div>
-                  <div><kbd>3</kbd><span>Audio lab</span></div>
-                  <div><kbd>4</kbd><span>Song memory</span></div>
-                  <div><kbd>5</kbd><span>Spotify console</span></div>
-                  <div><kbd>6</kbd><span>System</span></div>
+                  <div><kbd>2</kbd><span>Rehearsal</span></div>
+                  <div><kbd>3</kbd><span>Room &amp; rig</span></div>
+                  <div><kbd>4</kbd><span>Audio lab</span></div>
+                  <div><kbd>5</kbd><span>Song memory</span></div>
+                  <div><kbd>6</kbd><span>Spotify console</span></div>
+                  <div><kbd>7</kbd><span>Lumen Link</span></div>
+                  <div><kbd>8</kbd><span>System</span></div>
                   <div><kbd>B</kbd><span>Toggle blackout</span></div>
                   <div><kbd>M</kbd><span>Start monitor</span></div>
                   <div><kbd>L</kbd><span>Start performance</span></div>
@@ -1097,6 +1105,107 @@
                     <span id="spotify-client-summary">Not configured</span>
                   </div>
                   <div class="integration-status" id="spotify-integration-status">No Spotify token is stored on this computer.</div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-page" data-page="link">
+            <div class="page-heading link-page-heading">
+              <div>
+                <span class="eyebrow">Offline compute bridge</span>
+                <h2>Lumen Link</h2>
+              </div>
+              <div class="heading-actions">
+                <span id="link-state-badge" class="link-state-badge offline"><i></i>NOT CONFIGURED</span>
+                <button class="compact-button" id="link-test-button">Test connection</button>
+                <button class="compact-button primary" id="link-enable-button">Enable link</button>
+                <button class="compact-button" id="link-pause-button">Pause dispatch</button>
+              </div>
+            </div>
+
+            <div class="link-layout">
+              <section class="panel link-topology-panel">
+                <div class="panel-titlebar"><h3>Compute path</h3><span id="link-last-seen" class="panel-note">Waiting for status</span></div>
+                <div class="link-topology">
+                  <article class="link-node local">
+                    <span class="link-node-role">LIVE AUTHORITY</span>
+                    <div class="link-node-orbit"><i></i><b></b></div>
+                    <h3 id="link-local-name">Lumen PC</h3>
+                    <p id="link-local-detail">Audio · DMX · operator memory</p>
+                    <code id="link-local-address">This computer</code>
+                  </article>
+                  <div class="link-bridge" id="link-bridge" aria-label="Lumen Link connection">
+                    <span class="link-bridge-line"><i></i><b></b></span>
+                    <strong id="link-connection-label">OFFLINE</strong>
+                    <small id="link-connection-detail">Configure the Threadripper node to begin</small>
+                  </div>
+                  <article class="link-node remote">
+                    <span class="link-node-role">OFFLINE COMPUTE</span>
+                    <div class="link-node-orbit"><i></i><b></b></div>
+                    <h3 id="link-remote-name">Threadripper</h3>
+                    <p id="link-remote-detail">Teacher analysis · training · validation</p>
+                    <code id="link-remote-address">Awaiting WSL node</code>
+                  </article>
+                </div>
+                <div class="link-contract-note">
+                  <span>Live audio and DMX remain on this PC.</span>
+                  <span>Only offline job bundles and verified results cross the link.</span>
+                  <span>The nodes never share a writable database.</span>
+                  <span>Pausing stops new dispatch; an active remote process continues.</span>
+                </div>
+              </section>
+
+              <section class="panel link-summary-panel">
+                <div class="panel-titlebar"><h3>Workload</h3><span id="link-queue-state" class="panel-badge">IDLE</span></div>
+                <div class="link-summary-grid">
+                  <div><span>QUEUED</span><b id="link-queued">0</b><small>waiting locally</small></div>
+                  <div><span>RUNNING</span><b id="link-running">0</b><small>on compute node</small></div>
+                  <div><span>COMPLETE</span><b id="link-completed">0</b><small>verified results</small></div>
+                  <div><span>FAILED</span><b id="link-failed">0</b><small>need attention</small></div>
+                </div>
+                <div class="link-transfer-summary">
+                  <span><b id="link-transfer-total">0 B</b> transferred</span>
+                  <span><b id="link-transfer-pending">0 B</b> pending</span>
+                </div>
+              </section>
+
+              <section class="panel link-jobs-panel">
+                <div class="panel-titlebar"><h3>Job pipeline</h3><span class="panel-note">Newest activity first</span></div>
+                <div id="link-jobs" class="link-jobs"><div class="link-empty">No offloaded work has been submitted.</div></div>
+              </section>
+
+              <section class="panel link-resources-panel">
+                <div class="panel-titlebar"><h3>Threadripper resources</h3><span id="link-resource-state" class="panel-note">No telemetry</span></div>
+                <div class="link-resource-list">
+                  <div class="link-resource"><span>CPU</span><div><i id="link-cpu-meter"></i></div><b id="link-cpu-value">—</b><small id="link-cpu-detail">Awaiting node</small></div>
+                  <div class="link-resource"><span>RAM</span><div><i id="link-memory-meter"></i></div><b id="link-memory-value">—</b><small id="link-memory-detail">Awaiting node</small></div>
+                  <div class="link-resource"><span>DISK</span><div><i id="link-disk-meter"></i></div><b id="link-disk-value">—</b><small id="link-disk-detail">Awaiting node</small></div>
+                  <div class="link-resource"><span>GPU</span><div><i id="link-gpu-meter"></i></div><b id="link-gpu-value">—</b><small id="link-gpu-detail">Optional accelerator</small></div>
+                </div>
+              </section>
+
+              <section class="panel link-events-panel">
+                <div class="panel-titlebar"><h3>Link activity</h3><span class="panel-note">Connection, transfer, execution, verification</span></div>
+                <div id="link-events" class="link-events"><div class="link-empty">No link events yet.</div></div>
+              </section>
+
+              <section class="panel link-setup-panel">
+                <div class="panel-titlebar"><h3>Deployment &amp; setup</h3><span id="link-setup-state" class="panel-badge">NOT STARTED</span></div>
+                <div class="link-setup-body">
+                  <div class="link-setup-copy">
+                    <span>NEXT ACTION</span>
+                    <strong id="link-next-action">Install Lumen Link inside Ubuntu on the Threadripper PC.</strong>
+                    <p>Setup commands are generated locally. Secrets are never shown in this dashboard or committed to Git.</p>
+                  </div>
+                  <ol class="link-setup-steps">
+                    <li><b>Prepare WSL</b><span>Install the compute-node package and dependencies.</span></li>
+                    <li><b>Pair the nodes</b><span>Run the setup scripts to install the same private shared secret on both computers.</span></li>
+                    <li><b>Test the contract</b><span>Authenticate the worker and verify its code and model assets without dispatching a job.</span></li>
+                    <li><b>Enable offload</b><span>Future offline analysis and training can enter the remote queue.</span></li>
+                  </ol>
+                  <div id="link-capabilities" class="link-capabilities"></div>
+                  <div id="link-setup-commands" class="link-setup-commands"></div>
                 </div>
               </section>
             </div>
@@ -1227,6 +1336,20 @@
           </details>
         </section>
 
+        <section class="remote-section remote-link-card">
+          <div class="remote-section-heading"><h2>Lumen Link</h2><span id="remote-link-state">OFFLINE</span></div>
+          <div class="remote-link-path">
+            <div><i></i><b>Lumen PC</b><small>Live authority</small></div>
+            <span id="remote-link-path"><i></i></span>
+            <div><i></i><b id="remote-link-node">Threadripper</b><small>Offline compute</small></div>
+          </div>
+          <div class="remote-link-facts">
+            <span><b id="remote-link-queued">0</b> queued</span>
+            <span><b id="remote-link-running">0</b> running</span>
+            <span><b id="remote-link-progress">—</b> current job</span>
+          </div>
+        </section>
+
         <section class="remote-section remote-engine-card">
           <div>
             <span>ENGINE</span>
@@ -1253,7 +1376,7 @@
       <div class="dialog-body">
         <p>Hotkeys work anywhere in the console unless you are typing into a field.</p>
         <div class="hotkey-grid compact">
-          <div><kbd>1—7</kbd><span>Switch workspaces</span></div>
+          <div><kbd>1—8</kbd><span>Switch workspaces</span></div>
           <div><kbd>B</kbd><span>Toggle blackout</span></div>
           <div><kbd>M</kbd><span>Monitor line-in</span></div>
           <div><kbd>L</kbd><span>Perform through DMX</span></div>

@@ -1,0 +1,41 @@
+{
+  "schema": "lumen_link_worker_config_v1",
+  "node_id": "threadripper-wsl",
+  "python": {
+    "core": "3.12.8",
+    "edmformer": "3.12.8",
+    "songformer": "3.10.20"
+  },
+  "listen": {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "allowed_clients": [
+      "192.168.50.2"
+    ]
+  },
+  "authentication": {
+    "scheme": "hmac-sha256",
+    "secret_file": "@@SECRET_FILE@@",
+    "maximum_clock_skew_seconds": 90
+  },
+  "storage": {
+    "root": "@@STATE_ROOT@@"
+  },
+  "execution": {
+    "cpu_threads": 24,
+    "maximum_memory_gib": 96,
+    "maximum_parallel_jobs": 1,
+    "job_types": [
+      "teacher.edmformer"
+    ],
+    "gated_job_types": [
+      "teacher.songformer",
+      "student.train",
+      "held_out_evaluation"
+    ]
+  },
+  "lumen": {
+    "project_root": "@@PROJECT_ROOT@@",
+    "research_root": "@@RESEARCH_ROOT@@"
+  }
+}

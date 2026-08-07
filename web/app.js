@@ -36,6 +36,9 @@ const app = {
   spotifyTransferDeviceId: "",
   spotifyHistory: [],
   spotifyHistoryIndex: -1,
+  link: null,
+  linkRefreshing: false,
+  linkFetchedAt: 0,
   calibrationActive: false,
   calibrationCaptures: {},
   rehearsalTimer: null,
@@ -153,6 +156,12 @@ function formatElapsed(unixMs) {
   if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m ago`;
   if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h ago`;
   return `${Math.floor(delta / 86_400_000)}d ago`;
+}
+
+function meterRatio(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return clamp(number > 1 ? number / 100 : number);
 }
 
 function label(value) {
@@ -301,7 +310,7 @@ function selectedFixture() {
 }
 
 function setPage(name) {
-  if (!["performance", "rehearsal", "rig", "audio", "memory", "music", "system"].includes(name)) return;
+  if (!["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system"].includes(name)) return;
   app.page = name;
   $$(".workspace-page").forEach((page) => page.classList.toggle("active", page.dataset.page === name));
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.nav === name));
@@ -317,6 +326,7 @@ function setPage(name) {
   }
   if (name === "system") renderDmx(app.status || {});
   if (name === "music") refreshSpotifyConsole(false);
+  if (name === "link") refreshLink(true);
 }
 
 function panelWorkspaceKey(panel, index) {
@@ -563,6 +573,7 @@ async function initialize() {
     app.status = app.bootstrap.status;
     app.system = app.bootstrap.system;
     app.memory = app.bootstrap.memory;
+    app.link = app.bootstrap.link || null;
     renderBootstrap();
     renderStatus();
     await refreshSongTeaching();
@@ -603,6 +614,10 @@ async function pollStatus() {
     app.pollCount += 1;
     if (app.pollCount % 600 === 0) void refreshSystemStatus();
     if (app.pollCount % 50 === 0) void refreshSongTeaching();
+    if (
+      (app.page === "link" && app.pollCount % 20 === 0)
+      || (app.remote && app.pollCount % 100 === 0)
+    ) void refreshLink(false);
     const researchRunning = Boolean(app.bootstrap?.research?.worker?.running);
     if (app.page === "audio" && app.pollCount % (researchRunning ? 50 : 300) === 0) void refreshResearch();
     const spotifyRefreshPolls = (app.page === "music" || app.remote) ? 50 : 100;
@@ -651,6 +666,7 @@ function renderBootstrap() {
   renderSystem(app.system);
   renderOperatorSettings(app.bootstrap.settings || {});
   renderResearch(app.bootstrap.research || {});
+  renderLink(app.link || {});
   renderMemory(app.memory);
   buildDmxHeatmap();
   renderServiceDetails();
@@ -1825,6 +1841,330 @@ function renderTrainingDataset(training = {}, engine = {}) {
   if (exportButton) exportButton.disabled = recording || !Number(history.sessions || 0);
   const settingsButton = $("save-training-settings-button");
   if (settingsButton) settingsButton.disabled = Boolean(engine.running);
+}
+
+function renderLink(link = {}) {
+  const connection = link.connection || {};
+  const local = link.local_node || link.local || {};
+  const remote = link.remote_node || link.remote || {};
+  const queue = link.queue || {};
+  const setup = link.setup || {};
+  const rawState = String(
+    connection.state || (link.configured ? "offline" : "not_configured"),
+  ).toLowerCase();
+  const state = rawState === "online" ? "ready" : rawState;
+  const stateClass = ["ready", "testing", "degraded", "error"].includes(state)
+    ? state
+    : "offline";
+  const authenticated = Boolean(connection.authenticated);
+  const latency = Number(connection.latency_ms);
+  const statusLabel = link.paused
+    ? "PAUSED"
+    : state === "ready" && authenticated
+      ? "LINK READY"
+      : label(state).toUpperCase();
+  const badge = $("link-state-badge");
+  if (badge) {
+    badge.className = `link-state-badge ${stateClass}`;
+    badge.innerHTML = `<i></i>${escapeHtml(statusLabel)}`;
+  }
+  setText("remote-link-state", statusLabel);
+  setText("remote-link-node", remote.name || remote.hostname || remote.host || "Threadripper");
+  const remotePath = $("remote-link-path");
+  remotePath?.classList.toggle("ready", stateClass === "ready");
+  const bridge = $("link-bridge");
+  if (bridge) bridge.className = `link-bridge ${stateClass}`;
+  setText("link-connection-label", statusLabel);
+  const connectionParts = [];
+  if (authenticated) connectionParts.push("authenticated");
+  if (Number.isFinite(latency)) connectionParts.push(`${Math.round(latency)} ms`);
+  if (connection.error) connectionParts.push(String(connection.error));
+  setText(
+    "link-connection-detail",
+    connectionParts.join(" · ") || (link.configured
+      ? "Waiting for the private compute link"
+      : "Configure the Threadripper node to begin"),
+  );
+  setText(
+    "link-last-seen",
+    connection.last_seen_unix_ms
+      ? `Last contact ${formatElapsed(connection.last_seen_unix_ms)}`
+      : "No remote contact yet",
+  );
+
+  setText("link-local-name", local.name || local.hostname || local.host || "Lumen PC");
+  setText(
+    "link-local-detail",
+    [local.platform, local.role || "Live authority"].filter(Boolean).join(" · ")
+      || "Audio · DMX · operator memory",
+  );
+  setText("link-local-address", local.address || "This computer");
+  setText("link-remote-name", remote.name || remote.hostname || remote.host || "Threadripper");
+  setText(
+    "link-remote-detail",
+    [remote.platform, remote.role || "Offline compute"].filter(Boolean).join(" · ")
+      || "Teacher analysis · training · validation",
+  );
+  setText(
+    "link-remote-address",
+    remote.address || setup.endpoint || "Awaiting WSL node",
+  );
+
+  for (const [id, value] of [
+    ["link-queued", queue.queued],
+    ["link-running", queue.running ?? queue.remote?.running],
+    ["link-completed", queue.completed ?? queue.remote?.complete],
+    ["link-failed", queue.failed ?? queue.remote?.failed],
+  ]) setText(id, Number(value || 0).toLocaleString());
+  setText("remote-link-queued", Number(queue.queued || 0).toLocaleString());
+  setText("remote-link-running", Number(queue.running ?? queue.remote?.running ?? 0).toLocaleString());
+  setText("link-transfer-total", formatBytes(queue.bytes_transferred));
+  setText("link-transfer-pending", formatBytes(queue.bytes_pending ?? queue.bytes));
+  setText("link-queue-state", link.paused ? "PAUSED" : Number(queue.running ?? queue.remote?.running ?? 0) ? "ACTIVE" : "IDLE");
+
+  const jobs = Array.isArray(link.jobs) ? [...link.jobs] : [];
+  jobs.sort((a, b) => Number(b.updated_unix_ms || b.job?.updated_unix_ms || b.submitted_unix_ms || 0) - Number(a.updated_unix_ms || a.job?.updated_unix_ms || a.submitted_unix_ms || 0));
+  const currentJob = jobs.find((job) => {
+    const stateName = String(job.state || job.status || job.job?.status || job.stage || "").toLowerCase();
+    return !["complete", "failed", "canceled"].includes(stateName);
+  });
+  const currentStage = String(currentJob?.stage || "").toLowerCase();
+  const currentProgress = meterRatio(currentJob?.progress);
+  const currentIndeterminate = Boolean(
+    currentJob && currentStage === "inference" && currentProgress <= 0.1,
+  );
+  setText(
+    "remote-link-progress",
+    currentIndeterminate
+      ? "ACTIVE"
+      : currentJob
+        ? `${Math.round(currentProgress * 100)}%`
+        : "—",
+  );
+  const jobsElement = $("link-jobs");
+  if (jobsElement) {
+    jobsElement.innerHTML = jobs.length ? jobs.slice(0, 100).map((job) => {
+      const jobRecord = job.job || job;
+      const jobPayload = jobRecord.payload || {};
+      const jobIdentity = job.manifest?.identity || {};
+      const progressValue = typeof job.progress === "object"
+        ? Number(job.progress.ratio ?? job.progress.value ?? 0)
+        : Number(job.progress || 0);
+      const progress = meterRatio(progressValue);
+      const transfer = job.transfer || {};
+      const bytesDone = Number(transfer.bytes_done ?? job.transferred_bytes ?? 0);
+      const bytesTotal = Number(transfer.bytes_total ?? job.manifest?.objects?.[0]?.bytes ?? 0);
+      const transferText = bytesTotal > 0
+        ? `${formatBytes(bytesDone)} / ${formatBytes(bytesTotal)}${Number(transfer.rate_bytes_s) > 0 ? ` · ${formatBytes(transfer.rate_bytes_s)}/s` : ""}`
+        : "";
+      const stageName = String(job.stage || "queued").toLowerCase();
+      const indeterminate = stageName === "inference" && progress <= 0.1;
+      const stateName = String(
+        job.state || job.status || jobRecord.status
+        || (["complete", "failed", "canceled"].includes(stageName) ? stageName : "running"),
+      ).toLowerCase();
+      const stage = job.stage || job.detail || "Waiting for worker status";
+      const jobType = job.type || job.job_type || jobRecord.job_type || "task";
+      const jobName = job.name || jobIdentity.title || jobPayload.title
+        || `${label(jobType)} · ${String(jobRecord.id || "job").slice(0, 12)}`;
+      const updatedAt = job.updated_unix_ms || jobRecord.updated_unix_ms;
+      return `<article class="link-job">
+        <div class="link-job-copy">
+          <strong>${escapeHtml(jobName)}</strong>
+          <span>${escapeHtml(label(jobType))} · ${escapeHtml(stage)}</span>
+          <small>${escapeHtml(job.id || jobRecord.id || "unassigned")}</small>
+        </div>
+        <div class="link-job-progress${indeterminate ? " indeterminate" : ""}">
+          <div><i style="width:${Math.round(progress * 100)}%"></i></div>
+          <span><b>${indeterminate ? "ACTIVE" : `${Math.round(progress * 100)}%`}</b><em>${escapeHtml(transferText || (updatedAt ? `updated ${formatElapsed(updatedAt)}` : "not started"))}</em></span>
+        </div>
+        <span class="link-job-state ${escapeHtml(stateName)}">${escapeHtml(label(stateName))}</span>
+      </article>`;
+    }).join("") : '<div class="link-empty">No offloaded work has been submitted.</div>';
+  }
+
+  const telemetry = remote.telemetry || remote;
+  const cpu = telemetry.cpu || {
+    cores: telemetry.cpu_logical,
+    usage: Number(telemetry.cpu_logical) > 0
+      ? Number(telemetry.load_1m || 0) / Number(telemetry.cpu_logical)
+      : 0,
+    model: Number.isFinite(Number(telemetry.load_1m))
+      ? `${Number(telemetry.load_1m).toFixed(1)} load · ${Number(telemetry.cpu_logical || 0)} threads`
+      : "Awaiting node",
+  };
+  const memory = telemetry.memory || {
+    total_bytes: telemetry.memory_total_bytes,
+    used_bytes: Math.max(0, Number(telemetry.memory_total_bytes || 0) - Number(telemetry.memory_available_bytes || 0)),
+  };
+  const disk = telemetry.disk || {
+    total_bytes: telemetry.disk_total_bytes,
+    used_bytes: Math.max(0, Number(telemetry.disk_total_bytes || 0) - Number(telemetry.disk_free_bytes || 0)),
+  };
+  const gpus = Array.isArray(telemetry.gpu) ? telemetry.gpu : telemetry.gpu ? [telemetry.gpu] : [];
+  const gpu = gpus[0] || {};
+  const memoryRatio = Number(memory.total_bytes) > 0 ? Number(memory.used_bytes) / Number(memory.total_bytes) : 0;
+  const diskRatio = Number(disk.total_bytes) > 0 ? Number(disk.used_bytes) / Number(disk.total_bytes) : 0;
+  const gpuMemory = Number(gpu.memory_total_bytes) > 0
+    ? `${formatBytes(gpu.memory_used_bytes)} / ${formatBytes(gpu.memory_total_bytes)}`
+    : (gpu.name || "Optional accelerator");
+  const resourceRows = [
+    ["cpu", meterRatio(cpu.usage_percent ?? cpu.usage), cpu.model || `${Number(cpu.cores || 0) || "—"} cores`],
+    ["memory", memoryRatio, Number(memory.total_bytes) > 0 ? `${formatBytes(memory.used_bytes)} / ${formatBytes(memory.total_bytes)}` : "Awaiting node"],
+    ["disk", diskRatio, Number(disk.total_bytes) > 0 ? `${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)}` : "Awaiting node"],
+    ["gpu", meterRatio(gpu.usage_percent ?? gpu.usage), gpuMemory],
+  ];
+  for (const [name, ratio, detail] of resourceRows) {
+    setWidth(`link-${name}-meter`, ratio);
+    setText(`link-${name}-value`, detail === "Awaiting node" || (name === "gpu" && !gpus.length) ? "—" : `${Math.round(ratio * 100)}%`);
+    setText(`link-${name}-detail`, detail);
+  }
+  setText("link-resource-state", remote.hostname || remote.name || remote.host ? "LIVE TELEMETRY" : "No telemetry");
+
+  const events = Array.isArray(link.events) ? link.events : [];
+  const eventElement = $("link-events");
+  if (eventElement) {
+    eventElement.innerHTML = events.length ? events.slice(0, 100).map((event) => {
+      const eventTime = Number(event.unix_ms || 0);
+      const eventKind = String(event.level || event.kind || "info").toLowerCase();
+      const kind = ["success", "warning", "error"].includes(eventKind) ? eventKind : "info";
+      return `<div class="link-event ${kind}">
+        <time>${escapeHtml(eventTime ? new Date(eventTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—")}</time>
+        <i></i>
+        <div><b>${escapeHtml(event.message || "Link event")}</b>${event.detail ? `<span>${escapeHtml(event.detail)}</span>` : ""}</div>
+      </div>`;
+    }).join("") : '<div class="link-empty">No link events yet.</div>';
+  }
+
+  setText("link-setup-state", label(setup.state || (link.configured ? "configured" : "not started")).toUpperCase());
+  setText("link-next-action", setup.next_action || "Install Lumen Link inside Ubuntu on the Threadripper PC.");
+  const commands = Array.isArray(setup.commands) ? setup.commands : [];
+  const commandElement = $("link-setup-commands");
+  if (commandElement) {
+    commandElement.innerHTML = commands.map((command, index) => {
+      const commandText = typeof command === "string" ? command : command.command || "";
+      const commandLabel = typeof command === "string" ? `Step ${index + 1}` : command.label || `Step ${index + 1}`;
+      return `<div class="link-command">
+      <span>${escapeHtml(commandLabel)}</span>
+      <code>${escapeHtml(commandText)}</code>
+      <button data-link-command="${index}">Copy</button>
+    </div>`;
+    }).join("");
+  }
+  const rawCapabilities = link.capabilities || remote.capabilities || link.job_types || {};
+  let capabilities = Array.isArray(rawCapabilities)
+    ? rawCapabilities.map((entry) => typeof entry === "string" ? { name: entry, available: true } : entry)
+    : Object.entries(rawCapabilities).map(([name, value]) => ({
+        name,
+        available: typeof value === "object" ? value.available ?? value.supported : Boolean(value),
+        detail: typeof value === "object" ? value.detail || value.reason : "",
+      }));
+  if (!Array.isArray(rawCapabilities) && Array.isArray(rawCapabilities.supported_job_types)) {
+    capabilities = [
+      ...rawCapabilities.supported_job_types.map((name) => ({ name, available: true })),
+      ...Object.entries(rawCapabilities.gated_job_types || {}).map(([name, reason]) => ({ name, available: false, detail: reason })),
+      { name: "Live timing", available: Boolean(rawCapabilities.live_timing), detail: "Live timing remains authoritative on the Lumen PC." },
+      { name: "DMX output", available: Boolean(rawCapabilities.dmx), detail: "The compute node cannot control the lighting output." },
+    ];
+  }
+  const capabilityElement = $("link-capabilities");
+  if (capabilityElement) {
+    capabilityElement.innerHTML = capabilities.map((capability) => {
+      const available = Boolean(capability.available ?? capability.supported);
+      const title = capability.detail ? ` title="${escapeHtml(capability.detail)}"` : "";
+      return `<span class="link-capability ${available ? "available" : "unavailable"}"${title}>${available ? "✓" : "×"} ${escapeHtml(label(capability.name || capability.type || "capability"))}</span>`;
+    }).join("");
+  }
+
+  const supportedJobTypes = Array.isArray(rawCapabilities.supported_job_types)
+    ? rawCapabilities.supported_job_types
+    : capabilities
+      .filter((capability) => Boolean(capability.available ?? capability.supported))
+      .map((capability) => capability.name || capability.type);
+  const workerCompatible = Boolean(
+    authenticated
+    && state === "ready"
+    && supportedJobTypes.includes("teacher.edmformer")
+    && setup.compatible !== false,
+  );
+
+  const testButton = $("link-test-button");
+  if (testButton) testButton.disabled = app.linkRefreshing || !link.configured || state === "testing";
+  const enableButton = $("link-enable-button");
+  if (enableButton) {
+    enableButton.disabled = app.linkRefreshing || (
+      !link.enabled && (!link.configured || !workerCompatible)
+    );
+    enableButton.textContent = link.enabled ? "Disable link" : "Enable link";
+    enableButton.classList.toggle("danger", Boolean(link.enabled));
+    enableButton.classList.toggle("primary", !link.enabled);
+    enableButton.title = link.enabled
+      ? "Return queued automatic EDMFormer work to local eligibility. An active remote process is allowed to finish."
+      : workerCompatible
+        ? "Enable automatic EDMFormer dispatch to this verified worker."
+        : "Test a provisioned, revision-compatible worker before enabling offload.";
+  }
+  const pauseButton = $("link-pause-button");
+  if (pauseButton) {
+    pauseButton.disabled = app.linkRefreshing || !link.enabled;
+    pauseButton.textContent = link.paused ? "Resume dispatch" : "Pause dispatch";
+    pauseButton.title = link.paused
+      ? "Allow new eligible jobs to be sent to the Threadripper."
+      : "Stop new dispatch. A process already running on the Threadripper continues to its verified result.";
+  }
+}
+
+async function refreshLink(showErrors = false) {
+  if (app.linkRefreshing) return;
+  app.linkRefreshing = true;
+  try {
+    const result = await api(
+      app.remote ? "/api/link/status?summary=1" : "/api/link/status",
+    );
+    app.link = result.link || result.status || result;
+    app.linkFetchedAt = Date.now();
+    renderLink(app.link);
+  } catch (error) {
+    if (showErrors) toast("Lumen Link status unavailable", error.message, "error");
+  } finally {
+    app.linkRefreshing = false;
+    renderLink(app.link || {});
+  }
+}
+
+async function runLinkAction(action, button) {
+  const titles = {
+    test: ["Testing Lumen Link", "Authenticating the compute node and measuring the private connection."],
+    enable: ["Enabling Lumen Link", "Opening the offline queue for eligible compute jobs."],
+    disable: ["Disabling Lumen Link", "Returning queued automatic EDMFormer work to local eligibility; an active remote process may finish."],
+    pause: ["Pausing remote dispatch", "New jobs stop dispatching; an active remote process continues to its verified result."],
+    resume: ["Resuming remote work", "The Threadripper queue may accept eligible jobs again."],
+  };
+  const [title, detail] = titles[action] || ["Updating Lumen Link", "Applying the requested link state."];
+  const task = beginOperatorTask(title, detail, button);
+  try {
+    const result = await api(`/api/link/${action}`, { method: "POST", body: {} });
+    app.link = result.link || result.status || result;
+    renderLink(app.link);
+    toast(title, result.message || "The link state was updated.", "success");
+  } catch (error) {
+    toast(`${title} failed`, error.message, "error");
+  } finally {
+    finishOperatorTask(task);
+    void refreshLink(false);
+  }
+}
+
+async function copyLinkCommand(index) {
+  const item = app.link?.setup?.commands?.[Number(index)];
+  const command = typeof item === "string" ? item : item?.command;
+  if (!command) return;
+  try {
+    await navigator.clipboard.writeText(command);
+    toast("Setup command copied", "Paste it into the Threadripper Ubuntu shell.", "success");
+  } catch {
+    toast("Could not copy command", "Select the command text and copy it manually.", "error");
+  }
 }
 
 function renderResearch(research = {}) {
@@ -4157,6 +4497,13 @@ function installHandlers() {
   $("research-run-button")?.addEventListener("click", runResearchJob);
   $("research-cancel-button")?.addEventListener("click", cancelResearch);
   $("research-train-button")?.addEventListener("click", trainStructureStudent);
+  $("link-test-button")?.addEventListener("click", () => runLinkAction("test", $("link-test-button")));
+  $("link-enable-button")?.addEventListener("click", () => runLinkAction(app.link?.enabled ? "disable" : "enable", $("link-enable-button")));
+  $("link-pause-button")?.addEventListener("click", () => runLinkAction(app.link?.paused ? "resume" : "pause", $("link-pause-button")));
+  $("link-setup-commands")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-link-command]");
+    if (button) void copyLinkCommand(button.dataset.linkCommand);
+  });
   $("spotify-connect-button")?.addEventListener("click", connectSpotify);
   $("spotify-refresh-button")?.addEventListener("click", () => refreshSpotifyConsole(true));
   $("remote-spotify-refresh")?.addEventListener("click", () => refreshSpotifyConsole(true));
@@ -4335,8 +4682,8 @@ async function requestFreshGesture() {
 
 function handleHotkey(event) {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName) || event.target?.isContentEditable) return;
-  if (/^[1-7]$/.test(event.key)) {
-    setPage(["performance", "rehearsal", "rig", "audio", "memory", "music", "system"][Number(event.key) - 1]);
+  if (/^[1-8]$/.test(event.key)) {
+    setPage(["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system"][Number(event.key) - 1]);
     event.preventDefault();
   } else if (event.key.toLowerCase() === "b") {
     toggleBlackout();

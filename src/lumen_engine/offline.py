@@ -913,6 +913,7 @@ class OfflineResearchWorker:
             tuple(job_types),
             worker_id=self.worker_id,
             worker_pid=self.worker_pid,
+            execution_targets=("automatic", "local"),
         )
         if job is None:
             return None

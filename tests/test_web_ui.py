@@ -149,6 +149,75 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("lumen.panel.${key}.v2", script)
         self.assertIn(".panel-floating {", stylesheet)
 
+    def test_lumen_link_has_a_complete_operator_dashboard(self) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-page="link"', html)
+        self.assertIn('data-nav="link"', html)
+        for element_id in (
+            "link-state-badge",
+            "link-bridge",
+            "link-jobs",
+            "link-cpu-meter",
+            "link-memory-meter",
+            "link-disk-meter",
+            "link-gpu-meter",
+            "link-events",
+            "link-capabilities",
+            "link-setup-commands",
+            "link-test-button",
+            "link-enable-button",
+            "link-pause-button",
+            "remote-link-state",
+            "remote-link-node",
+            "remote-link-progress",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn("function renderLink", script)
+        self.assertIn('"/api/link/status?summary=1"', script)
+        self.assertIn(': "/api/link/status"', script)
+        self.assertIn("api(`/api/link/${action}`", script)
+        self.assertIn('runLinkAction("test"', script)
+        self.assertIn('app.link?.enabled ? "disable" : "enable"', script)
+        self.assertIn('app.link?.paused ? "resume" : "pause"', script)
+        self.assertIn('enabled ? "Disable link" : "Enable link"', script)
+        self.assertIn('currentIndeterminate', script)
+        self.assertIn('"ACTIVE"', script)
+
+    def test_lumen_link_discloses_boundaries_and_capabilities(self) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("Live audio and DMX remain on this PC", html)
+        self.assertIn("never share a writable database", html)
+        self.assertIn(
+            "Pausing stops new dispatch; an active remote process continues",
+            html,
+        )
+        self.assertIn("Secrets are never shown", html)
+        self.assertIn("same private shared secret", html)
+        self.assertIn("without dispatching a job", html)
+        self.assertNotIn("identity fingerprints", html)
+        self.assertNotIn("Test a bundle", html)
+        self.assertIn("link.capabilities || remote.capabilities || link.job_types", script)
+        self.assertIn('available ? "available" : "unavailable"', script)
+
+    def test_lumen_link_is_responsive_and_has_keyboard_navigation(self) -> None:
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        stylesheet = (ROOT / "web" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(".link-layout {", stylesheet)
+        self.assertIn("@media (max-width: 1100px)", stylesheet)
+        self.assertIn(".link-setup-body { grid-template-columns: 1fr; }", stylesheet)
+        self.assertIn(".remote-link-path {", stylesheet)
+        self.assertIn('setText("remote-link-state", statusLabel)', script)
+        self.assertIn("app.remote && app.pollCount % 100 === 0", script)
+        self.assertIn('if (/^[1-8]$/.test(event.key))', script)
+        self.assertIn('"music", "link", "system"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

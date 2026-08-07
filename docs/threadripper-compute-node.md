@@ -7,6 +7,16 @@ and the refinements agreed after comparing it with Lumen 0.7.0.
 Discussion reference:
 <https://chatgpt.com/share/6a72ab1f-5cb4-83ea-a096-bf037105812f>
 
+Deployment package:
+
+- [Beginner WSL/Windows/Lumen setup](lumen-link-wsl-deployment.md)
+- [Codex handoff on the Threadripper](lumen-link-codex-handoff.md)
+
+Lumen Link v1 implements the authenticated transport and remote EDMFormer
+executor. SongFormer, student training and held-out evaluation remain explicit
+gated capabilities until their immutable result importers are implemented and
+validated.
+
 ## Purpose
 
 Connect the dedicated Ubuntu Lumen PC to the Windows Threadripper workstation

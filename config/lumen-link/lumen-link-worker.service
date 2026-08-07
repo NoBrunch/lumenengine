@@ -1,0 +1,21 @@
+[Unit]
+Description=Lumen Link Threadripper worker
+Documentation=@@PROJECT_ROOT@@/docs/lumen-link-wsl-deployment.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@PROJECT_ROOT@@
+ExecStart=@@PROJECT_ROOT@@/scripts/lumen-link-wsl run --config @@CONFIG_PATH@@
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

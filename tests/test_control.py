@@ -49,6 +49,21 @@ from lumen_engine.runtime import PerformanceRuntime
 
 
 class ControlApplicationTests(unittest.TestCase):
+    def test_remote_offline_lease_does_not_block_live_engine(self) -> None:
+        job_id = self.application.memory.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={"execution_target": "threadripper"},
+        )
+        claimed = self.application.memory.claim_analysis_job_by_id(
+            job_id,
+            worker_id="lumen-link:test",
+            worker_pid=os.getpid(),
+        )
+        self.assertIsNotNone(claimed)
+        snapshot = self.application.start("demo")
+        self.assertEqual(snapshot["engine"]["mode"], "demo")
+        self.application.stop()
+
     def test_same_track_seek_invalidates_causal_structure_context(self) -> None:
         first = MediaIdentity(
             provider="spotify",
@@ -1711,6 +1726,68 @@ class ControlApplicationTests(unittest.TestCase):
                 gate["reason_code"], "ccmusic_gated_metadata_not_ready"
             )
             self.assertFalse(gate["automatic_download_attempted"])
+        finally:
+            server.shutdown()
+            ThreadingHTTPServer.server_close(server)
+            thread.join(timeout=3)
+
+    def test_lumen_link_http_status_and_controls_are_exposed(self) -> None:
+        server = LumenHTTPServer(("127.0.0.1", 0), self.application)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urlopen(
+                "http://127.0.0.1:"
+                f"{server.server_address[1]}/api/link/status",
+                timeout=3,
+            ) as response:
+                status = json.load(response)
+                self.assertEqual(response.status, 200)
+            self.assertEqual(status["schema"], "lumen.link.v1")
+            with urlopen(
+                "http://127.0.0.1:"
+                f"{server.server_address[1]}/api/link/status?summary=1",
+                timeout=3,
+            ) as response:
+                summary = json.load(response)
+                self.assertEqual(response.status, 200)
+            self.assertTrue(summary["summary"])
+            self.assertEqual(summary["events"], [])
+            self.assertLessEqual(len(summary["jobs"]), 1)
+            with patch.object(
+                self.application.lumen_link,
+                "control",
+                return_value={"paused": True},
+            ) as control:
+                request = Request(
+                    "http://127.0.0.1:"
+                    f"{server.server_address[1]}/api/link/pause",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=3) as response:
+                    result = json.load(response)
+                    self.assertEqual(response.status, 200)
+                self.assertTrue(result["paused"])
+                control.assert_called_once_with("pause")
+            with patch.object(
+                self.application.lumen_link,
+                "control",
+                return_value={"enabled": False},
+            ) as control:
+                request = Request(
+                    "http://127.0.0.1:"
+                    f"{server.server_address[1]}/api/link/disable",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(request, timeout=3) as response:
+                    result = json.load(response)
+                    self.assertEqual(response.status, 200)
+                self.assertFalse(result["enabled"])
+                control.assert_called_once_with("disable")
         finally:
             server.shutdown()
             ThreadingHTTPServer.server_close(server)

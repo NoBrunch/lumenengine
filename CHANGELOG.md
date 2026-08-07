@@ -48,6 +48,20 @@ result. Git commit history remains the detailed engineering log.
 
 ### Added
 
+- Lumen Link v1: an HMAC-authenticated private-LAN coordinator and WSL compute
+  service for remote EDMFormer inference. Transfers are content-addressed,
+  checksummed, resumable, idempotent across retries, and recoverable across
+  either-machine restarts; canonical timeline import remains local and waits
+  until Live is stopped.
+- A KDE-inspired Lumen Link dashboard with topology animation, connection and
+  authentication state, queue/job progress, transfer volume, Threadripper
+  CPU/RAM/disk telemetry, activity history, capability gates, and compact
+  phone/tablet status.
+- Read-only-by-default deployment tooling for the Lumen Ethernet interface,
+  Windows mirrored/NAT WSL networking, mode-600 secret pairing, a persistent
+  WSL user service, and a step-by-step Codex handoff. The first release
+  explicitly gates remote SongFormer, student training, and held-out
+  evaluation rather than presenting unimplemented paths as available.
 - Axis-specific EDMFormer/SongFormer fusion: EDMFormer owns techno energy,
   SongFormer owns functional/content form, both contribute boundaries, and
   every merged target retains teacher/timeline provenance. Analyze, readiness,
@@ -75,7 +89,8 @@ result. Git commit history remains the detailed engineering log.
 ### Verification
 
 - `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`
-- 350 tests passed on 2026-08-06.
+- 375 tests passed on 2026-08-06; focused Link/deployment and interface checks
+  passed again after the final cross-review.
 - `node --check web/app.js` and `git diff --check` passed.
 - The installed 5-GiB database/corpus was smoke-tested locally: cold bootstrap
   fell from roughly 35 seconds to 0.19 seconds, status to 0.01 seconds, and

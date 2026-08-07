@@ -2545,6 +2545,21 @@ class SongMemoryStore:
             result["beats"].append(beat)
         return result
 
+    def structure_timeline_for_teacher_run(
+        self, teacher_run_id: str
+    ) -> dict[str, Any] | None:
+        """Return the durable timeline owned by one teacher attempt."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT id FROM structure_timelines
+                WHERE teacher_run_id=?
+                ORDER BY created_unix_ms DESC, id DESC LIMIT 1
+                """,
+                (teacher_run_id,),
+            ).fetchone()
+        return self.structure_timeline(str(row["id"])) if row else None
+
     def structure_timelines_for_recording(
         self, recording_id: str
     ) -> list[dict[str, Any]]:
@@ -3657,6 +3672,40 @@ class SongMemoryStore:
                 (int(priority), int(time.time() * 1000), job_id),
             )
 
+    def set_analysis_job_execution_target(
+        self, job_id: str, *, execution_target: str
+    ) -> bool:
+        """Route a queued job without changing its scientific payload."""
+        target = str(execution_target).casefold()
+        if target not in {"automatic", "local", "threadripper"}:
+            raise ValueError("invalid analysis execution target")
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload_json FROM analysis_jobs "
+                "WHERE id=? AND status='queued'",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return False
+            payload = json.loads(row["payload_json"])
+            payload["execution_target"] = target
+            cursor = connection.execute(
+                """
+                UPDATE analysis_jobs
+                SET payload_json=?, updated_unix_ms=?
+                WHERE id=? AND status='queued'
+                """,
+                (
+                    json.dumps(payload, sort_keys=True),
+                    int(time.time() * 1000),
+                    job_id,
+                ),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
     def list_analysis_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -3681,6 +3730,7 @@ class SongMemoryStore:
         *,
         worker_id: str | None = None,
         worker_pid: int | None = None,
+        execution_targets: tuple[str, ...] = (),
     ) -> dict[str, Any] | None:
         """Atomically claim the highest-priority queued offline job.
 
@@ -3696,6 +3746,14 @@ class SongMemoryStore:
                 placeholders = ", ".join("?" for _ in job_types)
                 where += f" AND job_type IN ({placeholders})"
                 parameters.extend(job_types)
+            if execution_targets:
+                placeholders = ", ".join("?" for _ in execution_targets)
+                where += (
+                    " AND COALESCE(json_extract(payload_json, "
+                    "'$.execution_target'), 'automatic') "
+                    f"IN ({placeholders})"
+                )
+                parameters.extend(execution_targets)
             row = connection.execute(
                 f"""
                 SELECT * FROM analysis_jobs
@@ -3724,6 +3782,50 @@ class SongMemoryStore:
                     now_ms,
                     row["id"],
                 ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return None
+            connection.commit()
+        item = dict(row)
+        item["status"] = "running"
+        item["attempts"] = int(item["attempts"]) + 1
+        item["payload"] = json.loads(item.pop("payload_json"))
+        result_json = item.pop("result_json")
+        item["result"] = json.loads(result_json) if result_json else None
+        item["worker_id"] = worker_id
+        item["worker_pid"] = worker_pid
+        item["heartbeat_unix_ms"] = now_ms
+        return item
+
+    def claim_analysis_job_by_id(
+        self,
+        job_id: str,
+        *,
+        worker_id: str,
+        worker_pid: int,
+    ) -> dict[str, Any] | None:
+        """Atomically reclaim one known queued job after a worker restart."""
+
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM analysis_jobs WHERE id=? AND status='queued'",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            now_ms = int(time.time() * 1000)
+            cursor = connection.execute(
+                """
+                UPDATE analysis_jobs
+                SET status='running', attempts=attempts + 1,
+                    updated_unix_ms=?, error=NULL, worker_id=?, worker_pid=?,
+                    heartbeat_unix_ms=?
+                WHERE id=? AND status='queued'
+                """,
+                (now_ms, worker_id, int(worker_pid), now_ms, job_id),
             )
             if cursor.rowcount != 1:
                 connection.rollback()

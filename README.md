@@ -69,6 +69,9 @@ The command-line tools below remain available for development and diagnostics.
 - Real PCM waveform, packet heartbeat, dBFS/RMS/peak/clipping proof, rhythm
   lock, expression meters, event log, and DMX heatmap
 - One-click desktop launcher
+- **Lumen Link** private-LAN offload for full-song EDMFormer work on the
+  Threadripper WSL node, with authenticated resumable transfers, deterministic
+  result import, resource telemetry, and a desktop/phone status dashboard
 
 ## Neural training collection
 
@@ -112,6 +115,20 @@ the active Live model. Maintenance commands are
 
 The `live-demo` and `dmx-blackout` commands write directly to the FT232R cable.
 The plain `demo` command remains virtual.
+
+## Lumen Link
+
+The standalone **Lumen Link** console page connects this computer to the
+Threadripper over the dedicated `192.168.50.0/24` Ethernet link. Lumen keeps
+the canonical database, line-in clock, feedback, Live engine, and DMX output;
+the WSL node receives only immutable checksummed offline job objects. Link v1
+offloads EDMFormer. SongFormer, student training, and held-out evaluation are
+shown as gated until their remote artifact importers are implemented.
+
+The complete beginner-oriented Windows, WSL, network, pairing, and recovery
+procedure is in [Lumen Link deployment](docs/lumen-link-wsl-deployment.md).
+The Windows-side Codex handoff is in
+[Lumen Link Codex handoff](docs/lumen-link-codex-handoff.md).
 
 ## Run it without installing anything
 

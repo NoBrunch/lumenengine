@@ -23,6 +23,7 @@ from lumen_engine.media import (
     SpotifyTokenCache,
 )
 from lumen_engine.memory import SongMemoryStore
+from lumen_engine.link import serve_link_node
 from lumen_engine.models import Feedback, MediaIdentity, MusicalObservation, Vec3
 from lumen_engine.offline import (
     EDMFORMER_JOB,
@@ -302,6 +303,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     research_train.add_argument("--epochs", type=int, default=30)
     research_train.set_defaults(handler=_research_train_student)
+
+    link_node = subparsers.add_parser(
+        "link-node",
+        help="run the authenticated Lumen Link compute service in WSL",
+    )
+    link_node.add_argument("--host", default="0.0.0.0")
+    link_node.add_argument("--port", type=int, default=8765)
+    link_node.add_argument(
+        "--secret-file",
+        type=Path,
+        default=Path.home() / ".config" / "lumen-link" / "secret",
+    )
+    link_node.add_argument(
+        "--spool",
+        type=Path,
+        default=Path.home() / ".local" / "state" / "lumen-link",
+    )
+    link_node.add_argument(
+        "--root", type=Path, default=DEFAULT_RESEARCH_ROOT
+    )
+    link_node.add_argument("--max-threads", type=int, default=24)
+    link_node.add_argument("--max-memory-gib", type=float, default=96.0)
+    link_node.set_defaults(handler=_link_node)
 
     ui = subparsers.add_parser(
         "ui", help="start the desktop console and phone/tablet remote"
@@ -879,6 +903,38 @@ def _research_train_student(args: argparse.Namespace) -> int:
         )
     )
     return 0 if result and result["status"] == "complete" else 1
+
+
+def _link_node(args: argparse.Namespace) -> int:
+    if not 1 <= args.port <= 65535:
+        raise ValueError("--port must be in [1, 65535]")
+    try:
+        secret = args.secret_file.read_text(encoding="utf-8").strip().encode()
+    except OSError as error:
+        raise RuntimeError(
+            f"Lumen Link secret is unavailable at {args.secret_file}"
+        ) from error
+    if len(secret) < 32:
+        raise ValueError("Lumen Link secret must contain at least 32 bytes")
+    if args.max_threads < 1:
+        raise ValueError("--max-threads must be at least 1")
+    if args.max_memory_gib < 1:
+        raise ValueError("--max-memory-gib must be at least 1")
+    print(
+        f"Lumen Link compute node: http://{args.host}:{args.port} "
+        f"(spool {args.spool})"
+    )
+    serve_link_node(
+        host=args.host,
+        port=args.port,
+        secret=secret,
+        spool_root=args.spool,
+        research_root=args.root,
+        project_root=PROJECT_DIR,
+        max_threads=args.max_threads,
+        max_memory_gib=args.max_memory_gib,
+    )
+    return 0
 
 
 def _ui(args: argparse.Namespace) -> int:
