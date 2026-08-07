@@ -1014,32 +1014,40 @@ enough**, **Too dim**, and faster/slower side-arm requests.
 
 ## Threadripper compute node
 
-**Lumen Link v1** keeps this Ubuntu PC responsible for line-in timing, the
+**Lumen Link** keeps this Ubuntu PC responsible for line-in timing, the
 operator interface, feedback, canonical song memory, choreography, spatial
-resolution, and DMX. A direct Gigabit Ethernet connection sends eligible
-full-song EDMFormer jobs to the 3970X/128 GiB Threadripper WSL node.
+resolution, model activation, and DMX. A direct Gigabit Ethernet connection
+sends eligible full-song EDMFormer and SongFormer jobs plus student training
+and held-out evaluation to the 3970X/128 GiB Threadripper WSL node.
 
 The transfer protocol uses a shared mode-600 secret for timestamped,
 nonce-bound HMAC authentication. Audio objects are immutable and addressed by
 SHA-256; uploads resume by byte offset. The worker accepts only fixed job types
-and verifies the Lumen revision, EDMFormer source revision, model checksum,
-normalization version, and preprocessing version. Results are signed in
-transit, identity-checked, normalized, and imported into the canonical local
-database only while Lumen is in standby. A disconnect leaves Live, feedback,
-Spotify, audio timing, and DMX independent.
+and verifies the Lumen/model/source revisions, checksums, normalization,
+feature, preprocessing, and student-format contracts appropriate to each job.
+Results are signed in transit, identity-checked, and imported into canonical
+local state only while Lumen is in standby. Teacher jobs return normalized
+timelines; `student.train` returns a candidate model and held-out evaluation.
+The compute node cannot activate that model. A disconnect leaves Live,
+feedback, Spotify, audio timing, and DMX independent.
 
 The standalone **Lumen Link** page shows the local/remote topology, connection
 latency, queue, active job stage, transfer volume, worker resources, event
 history, and supported versus gated capabilities. The phone/tablet interface
-has a compact status card. **Test connection**, **Enable link**, **Pause jobs**,
-and **Resume jobs** change only the offline coordinator.
+has a compact status card. **Test connection**, **Enable link**, **Pause
+dispatch**, **Resume dispatch**, and **Disable link** change only the offline
+coordinator. It routes one eligible automatic job at a time. Disabling returns
+unstarted jobs to local eligibility while an active remote job drains to its
+verified result.
 
-Version 1 executes remote EDMFormer only. SongFormer, student training,
-held-out evaluation, and simulation remain explicit capability gates until
-their immutable result/model import paths pass the same recovery and parity
-checks. The deployment procedure is `docs/lumen-link-wsl-deployment.md`; the
-Threadripper-side Codex handoff is `docs/lumen-link-codex-handoff.md`; the full
-authority boundary is `docs/threadripper-compute-node.md`.
+The worker advertises `teacher.edmformer`, `teacher.songformer`, and
+`student.train`; held-out evaluation is part of the training job rather than a
+separate job type. The deployment procedure is
+`docs/lumen-link-wsl-deployment.md`; the Threadripper-side Codex handoff is
+`docs/lumen-link-codex-handoff.md`; the full authority boundary is
+`docs/threadripper-compute-node.md`. Physical two-PC cable, restart, resume,
+and local/remote comparison checks remain to be run after deployment and must
+not be represented as already proven.
 
 ## Calibration
 
@@ -1318,8 +1326,10 @@ runbook before treating any Git checkout as operational.
   analysis or training jobs and returns checksummed artifacts. It is not the
   live lighting authority and does not drive DMX.
 - **Lumen Link**: The authenticated, resumable private-LAN coordinator between
-  the Lumen PC and the Threadripper WSL compute node. Version 1 offloads
-  EDMFormer while leaving all live authority and canonical memory local.
+  the Lumen PC and the Threadripper WSL compute node. It offloads EDMFormer,
+  SongFormer, student training, and held-out evaluation/artifact generation
+  while leaving all live authority, model activation, and canonical memory
+  local.
 - **Choreography sequence**: An ordered set of semantic fixture actions with
   group scope, beat start times, durations, intensity, palette, strobe, and
   entry/exit behavior.

@@ -26,13 +26,11 @@
     "maximum_memory_gib": 96,
     "maximum_parallel_jobs": 1,
     "job_types": [
-      "teacher.edmformer"
-    ],
-    "gated_job_types": [
+      "teacher.edmformer",
       "teacher.songformer",
-      "student.train",
-      "held_out_evaluation"
-    ]
+      "student.train"
+    ],
+    "gated_job_types": []
   },
   "lumen": {
     "project_root": "@@PROJECT_ROOT@@",

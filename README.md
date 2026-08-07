@@ -69,9 +69,10 @@ The command-line tools below remain available for development and diagnostics.
 - Real PCM waveform, packet heartbeat, dBFS/RMS/peak/clipping proof, rhythm
   lock, expression meters, event log, and DMX heatmap
 - One-click desktop launcher
-- **Lumen Link** private-LAN offload for full-song EDMFormer work on the
-  Threadripper WSL node, with authenticated resumable transfers, deterministic
-  result import, resource telemetry, and a desktop/phone status dashboard
+- **Lumen Link** private-LAN offload for full-song EDMFormer and SongFormer
+  work, student training, and held-out evaluation on the Threadripper WSL
+  node, with authenticated resumable transfers, deterministic artifact import,
+  resource telemetry, and a desktop/phone status dashboard
 
 ## Neural training collection
 
@@ -121,9 +122,18 @@ The plain `demo` command remains virtual.
 The standalone **Lumen Link** console page connects this computer to the
 Threadripper over the dedicated `192.168.50.0/24` Ethernet link. Lumen keeps
 the canonical database, line-in clock, feedback, Live engine, and DMX output;
-the WSL node receives only immutable checksummed offline job objects. Link v1
-offloads EDMFormer. SongFormer, student training, and held-out evaluation are
-shown as gated until their remote artifact importers are implemented.
+the WSL node receives only immutable checksummed offline job objects. It runs
+EDMFormer, SongFormer, and `student.train`; the training result includes a
+candidate model and held-out evaluation report. Lumen verifies and imports
+every returned artifact locally. Remote completion never activates a model or
+grants the Threadripper access to the writable database, Live timing, or DMX.
+
+The dashboard authenticates and checks the worker contract before routing one
+eligible automatic job at a time. **Disable link** returns unstarted work to
+local eligibility while allowing an already-active job to finish safely. The
+two-PC physical acceptance test still needs to be performed after deployment;
+the repository test suite does not claim cable, restart, or local/remote
+inference parity by itself.
 
 The complete beginner-oriented Windows, WSL, network, pairing, and recovery
 procedure is in [Lumen Link deployment](docs/lumen-link-wsl-deployment.md).

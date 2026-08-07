@@ -1484,7 +1484,11 @@ class OfflineResearchWorker:
             )
             raise
 
-    def _train_student(self, job: dict[str, Any]) -> dict[str, Any]:
+    def _train_student(
+        self,
+        job: dict[str, Any],
+        progress_callback: Any = None,
+    ) -> dict[str, Any]:
         payload = job["payload"]
         examples_path = Path(str(payload["examples_path"])).resolve()
         expected_examples_sha256 = payload.get("examples_sha256")
@@ -1542,6 +1546,8 @@ class OfflineResearchWorker:
         feature_preprocessing: dict[str, Any] = {
             "version": "stored_semantic_frames"
         }
+        if progress_callback is not None:
+            progress_callback("student_feature_preparation")
         if bool(payload.get("refresh_audio_features", False)):
             feature_preprocessing = _refresh_student_audio_features(
                 examples,
@@ -1550,6 +1556,8 @@ class OfflineResearchWorker:
                 cancel_check=cancel_check,
             )
         heartbeat_stage = "student_training"
+        if progress_callback is not None:
+            progress_callback("student_training")
         model = StreamingStructureStudent(
             hidden_size=int(payload.get("hidden_size", 32))
         )
@@ -1561,6 +1569,9 @@ class OfflineResearchWorker:
             cancel_check=cancel_check,
         )
         cancel_check()
+        heartbeat_stage = "student_validation"
+        if progress_callback is not None:
+            progress_callback("student_validation")
         evaluation = {
             split: model.evaluate(
                 [row for row in examples if row.get("split", "train") == split]
@@ -1757,6 +1768,9 @@ class OfflineResearchWorker:
             )
         activated = not gated or bool(approved_axes)
         model.approved_axes = approved_axes if gated else set(all_axes)
+        heartbeat_stage = "student_artifacts"
+        if progress_callback is not None:
+            progress_callback("student_artifacts")
         model.save(candidate_path)
         cancel_check()
         report = {

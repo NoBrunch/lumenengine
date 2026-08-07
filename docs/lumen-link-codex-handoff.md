@@ -38,7 +38,10 @@ Give Codex this prompt:
 > and all model/job data in the Linux filesystem under `~/lumenengine`, never
 > `/mnt/c`. Use the pinned research dependencies and verify every asset. Do
 > not alter the Lumen PC's live database and do not make the compute node a
-> live/DMX authority.
+> live/DMX authority. The worker must support `teacher.edmformer`,
+> `teacher.songformer`, and `student.train`; student training includes
+> held-out evaluation and candidate-artifact return. Stop if the authenticated
+> capability check gates any of those jobs.
 
 ## Checkpoint 1: read-only discovery
 
@@ -118,22 +121,28 @@ Codex may run:
 
 ```bash
 ./scripts/lumen-link-wsl start
+./scripts/lumen-link-wsl capabilities
 ./scripts/lumen-link-wsl status
 ./scripts/lumen-link-wsl logs
 ```
 
 After the Lumen dashboard reports **Ready**, use **Test connection** before
-sending work. The first release supports remote `teacher.edmformer`;
-SongFormer, student training and held-out evaluation must remain shown as
-gated.
+sending work. The running worker must advertise `teacher.edmformer`,
+`teacher.songformer`, and `student.train`; the latter includes held-out
+evaluation and candidate-artifact return. Codex must stop if any is gated.
 
 For the canary, press **Enable link**, wait until its automatically chosen
-single EDMFormer job is active, then press **Disable link**. The active job is
+single supported job is active, then press **Disable link**. The active job is
 allowed to finish and import; other queued automatic jobs return to local
 eligibility. Inspect its verified result. If accepted, press **Enable link**
-again for sequential bulk processing. There is no per-song selector in v1.
+again for sequential bulk processing. There is no per-song selector.
 Codex should inspect status, progress, result checksums and service logs
 without opening, copying or summarizing song audio.
+
+Teacher WAVs, student examples, candidate models, and evaluation reports are
+private runtime data even though they cross the dedicated cable. Codex may
+verify their paths, sizes, schemas and hashes, but must never add them to Git,
+upload them, or quote their contents.
 
 ## Ready for the owner's physical acceptance test
 
@@ -143,6 +152,8 @@ The software-side deployment is ready for physical acceptance only when:
 - the Lumen dashboard authenticates over the direct cable;
 - the first result passes schema, revision and checksum checks and imports
   exactly once;
+- a returned student candidate remains inactive until Lumen imports its
+  held-out report and applies the local activation gates;
 - no private artifact appears in `git status` or the Git history.
 
 Local/remote inference parity, Windows/WSL restart recovery, interrupted

@@ -8,6 +8,8 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import shutil
+import wave
 
 from lumen_engine.link import (
     LINK_SCHEMA,
@@ -16,6 +18,7 @@ from lumen_engine.link import (
     LinkAuthenticator,
     LinkAuthenticationError,
     LinkClient,
+    LinkNodeExecutor,
     LinkNodeRuntime,
     LinkNodeServer,
     LinkProtocolError,
@@ -24,10 +27,19 @@ from lumen_engine.link import (
 )
 from lumen_engine.memory import (
     EDMFORMER_PREPROCESSING_VERSION,
+    SONGFORMER_PREPROCESSING_PREFIX,
     SongMemoryStore,
     TEACHER_NORMALIZATION_VERSION,
 )
-from lumen_engine.offline import EDMFORMER_JOB
+from lumen_engine.offline import (
+    EDMFORMER_JOB,
+    SONGFORMER_JOB,
+    STUDENT_ACTIVATION_GATE_VERSION,
+    STUDENT_AUDIO_FEATURE_VERSION,
+    STUDENT_TRAIN_JOB,
+    TEACHER_FUSION_VERSION,
+)
+from lumen_engine.student import StreamingStructureStudent
 
 
 SECRET = b"0123456789abcdef0123456789abcdef"
@@ -45,6 +57,32 @@ TEST_CONTRACT = {
     "teacher_normalization_version": TEACHER_NORMALIZATION_VERSION,
     "edmformer_preprocessing_version": EDMFORMER_PREPROCESSING_VERSION,
 }
+SONG_TEST_CONTRACT = {
+    "code_revision": "code-test",
+    "code_clean": True,
+    "songformer_revision": "songformer-test",
+    "songformer_clean": True,
+    "musicfm_source_revision": "musicfm-test",
+    "musicfm_source_clean": True,
+    "songformer_head_sha256": "e" * 64,
+    "musicfm_stats_sha256": "b" * 64,
+    "musicfm_model_sha256": "c" * 64,
+    "muq_assets_sha256": "d" * 64,
+    "teacher_normalization_version": TEACHER_NORMALIZATION_VERSION,
+    "songformer_preprocessing_version": (
+        f"{SONGFORMER_PREPROCESSING_PREFIX}60s:"
+        f"{TEACHER_NORMALIZATION_VERSION}"
+    ),
+}
+STUDENT_TEST_CONTRACT = {
+    "code_revision": "code-test",
+    "code_clean": True,
+    "student_format_version": StreamingStructureStudent.format_version,
+    "student_audio_feature_version": STUDENT_AUDIO_FEATURE_VERSION,
+    "student_activation_gate_version": STUDENT_ACTIVATION_GATE_VERSION,
+    "teacher_fusion_version": TEACHER_FUSION_VERSION,
+    "teacher_normalization_version": TEACHER_NORMALIZATION_VERSION,
+}
 
 
 class FakeExecutor:
@@ -53,12 +91,18 @@ class FakeExecutor:
             "protocol_schema": LINK_SCHEMA,
             "manifest_schema": MANIFEST_SCHEMA,
             "result_schema": RESULT_SCHEMA,
-            **TEST_CONTRACT,
-            "supported_job_types": [EDMFORMER_JOB],
-            "gated_job_types": {
-                "teacher.songformer": "not implemented",
-                "student.train": "not implemented",
+            "job_contracts": {
+                EDMFORMER_JOB: TEST_CONTRACT,
+                SONGFORMER_JOB: SONG_TEST_CONTRACT,
+                STUDENT_TRAIN_JOB: STUDENT_TEST_CONTRACT,
             },
+            **TEST_CONTRACT,
+            "supported_job_types": [
+                EDMFORMER_JOB,
+                SONGFORMER_JOB,
+                STUDENT_TRAIN_JOB,
+            ],
+            "gated_job_types": {},
             "max_threads": 24,
             "max_memory_bytes": 96 * 1024**3,
             "gpu": False,
@@ -71,6 +115,9 @@ class FakeExecutor:
             progress_callback({"elapsed_s": 0.005, "rss_bytes": 1024})
         manifest = state["manifest"]
         audio = manifest["objects"][0]
+        contract = self.capabilities()["job_contracts"][
+            manifest["job_type"]
+        ]
         return {
             "schema": RESULT_SCHEMA,
             "job_id": manifest["job_id"],
@@ -78,17 +125,28 @@ class FakeExecutor:
             "manifest_sha256": state["manifest_sha256"],
             "input_sha256": audio["sha256"],
             "duration_ms": manifest["identity"]["duration_ms"],
-            **TEST_CONTRACT,
+            **contract,
             "segments": [{"start": 0, "end": 1, "label": "drop"}],
             "resources": {"elapsed_s": 0.01},
         }
 
 
-def manifest(job_id: str, digest: str, byte_count: int):
+def manifest(
+    job_id: str,
+    digest: str,
+    byte_count: int,
+    *,
+    job_type: str = EDMFORMER_JOB,
+):
+    contract = (
+        TEST_CONTRACT
+        if job_type == EDMFORMER_JOB
+        else SONG_TEST_CONTRACT
+    )
     return {
         "schema": MANIFEST_SCHEMA,
         "job_id": job_id,
-        "job_type": EDMFORMER_JOB,
+        "job_type": job_type,
         "identity": {
             "recording_id": "recording:test",
             "capture_session_id": "session:test",
@@ -104,7 +162,7 @@ def manifest(job_id: str, digest: str, byte_count: int):
             }
         ],
         "contract": {
-            **TEST_CONTRACT,
+            **contract,
             "result_schema": RESULT_SCHEMA,
         },
         "resources": {"threads": 99},
@@ -144,9 +202,9 @@ class LinkTests(unittest.TestCase):
         self.assertTrue(health["authenticated"])
         self.assertEqual(
             health["capabilities"]["supported_job_types"],
-            [EDMFORMER_JOB],
+            [EDMFORMER_JOB, SONGFORMER_JOB, STUDENT_TRAIN_JOB],
         )
-        self.assertIn("student.train", health["capabilities"]["gated_job_types"])
+        self.assertNotIn("student.train", health["capabilities"]["gated_job_types"])
         with self.assertRaises(LinkProtocolError):
             LinkClient(self.client.endpoint, b"x" * 32).health()
         authenticator = LinkAuthenticator(SECRET)
@@ -190,6 +248,44 @@ class LinkTests(unittest.TestCase):
             )
         self.assertFalse(self.spool.object_path(bad_digest).exists())
 
+        produced = self.root / "candidate.npz"
+        produced.write_bytes(b"immutable-result")
+        descriptor = self.spool.publish_file(produced)
+        downloaded = self.client.download(
+            descriptor["sha256"],
+            descriptor["bytes"],
+            self.root / "downloaded.npz",
+        )
+        self.assertEqual(downloaded.read_bytes(), produced.read_bytes())
+        resumed_target = self.root / "resumed.npz"
+        resumed_partial = resumed_target.with_suffix(".npz.partial")
+        resumed_partial.write_bytes(produced.read_bytes()[:5])
+        resumed = self.client.download(
+            descriptor["sha256"],
+            descriptor["bytes"],
+            resumed_target,
+        )
+        self.assertEqual(resumed.read_bytes(), produced.read_bytes())
+        with self.assertRaises(LinkProtocolError):
+            self.client.download(
+                descriptor["sha256"],
+                descriptor["bytes"] + 1,
+                self.root / "bad-download.npz",
+            )
+
+        large = self.root / "large.wav"
+        large.write_bytes(b"x" * (9 * 1024 * 1024))
+        large_progress = []
+        self.client.upload(
+            large,
+            progress_callback=lambda current, total: large_progress.append(
+                (current, total)
+            ),
+        )
+        self.assertGreaterEqual(len(large_progress), 2)
+        self.assertLess(large_progress[0][0], large_progress[-1][0])
+        self.assertEqual(large_progress[-1], (large.stat().st_size,) * 2)
+
     def test_submit_is_idempotent_and_result_survives_polling(self):
         source = self.root / "audio.wav"
         source.write_bytes(b"RIFF-test")
@@ -209,6 +305,30 @@ class LinkTests(unittest.TestCase):
         result = self.client.request("GET", "/v1/jobs/job:test/result")
         self.assertEqual(result["input_sha256"], digest)
         self.assertEqual(result["code_revision"], "code-test")
+
+    def test_songformer_uses_its_own_contract_end_to_end(self):
+        source = self.root / "song.wav"
+        source.write_bytes(b"RIFF-song")
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.client.upload(source, digest)
+        value = manifest(
+            "job:song", digest, source.stat().st_size,
+            job_type=SONGFORMER_JOB,
+        )
+        self.client.submit(value)
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            state = self.client.request("GET", "/v1/jobs/job:song")
+            if state["status"] == "complete":
+                break
+            time.sleep(0.02)
+        self.assertEqual(state["status"], "complete")
+        result = self.client.request("GET", "/v1/jobs/job:song/result")
+        self.assertEqual(result["job_type"], SONGFORMER_JOB)
+        self.assertEqual(
+            result["songformer_revision"], "songformer-test"
+        )
+        self.assertNotIn("teacher_revision", result)
 
     def test_node_restart_requeues_running_job(self):
         self.runtime.stop()
@@ -260,6 +380,102 @@ class LinkTests(unittest.TestCase):
         with self.assertRaises(LinkProtocolError):
             self.client.submit(value)
 
+    def test_executor_rejects_contract_cached_before_source_change(self):
+        executor = LinkNodeExecutor(
+            self.spool,
+            research_root=self.root / "research",
+            project_root=self.root / "project",
+        )
+        executor._capabilities_cache = {
+            "supported_job_types": [STUDENT_TRAIN_JOB],
+            "job_contracts": {
+                STUDENT_TRAIN_JOB: dict(STUDENT_TEST_CONTRACT)
+            },
+            "gated_job_types": {},
+        }
+        executor._capability_signatures = {
+            STUDENT_TRAIN_JOB: {"runner": [1, 1]}
+        }
+        changed_contract = {
+            **STUDENT_TEST_CONTRACT,
+            "code_clean": False,
+        }
+        with patch(
+            "lumen_engine.link._job_asset_signature",
+            return_value={"runner": [2, 2]},
+        ), patch(
+            "lumen_engine.link._job_asset_contract",
+            return_value=changed_contract,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "committed"):
+                executor.validate_contract(
+                    STUDENT_TRAIN_JOB, STUDENT_TEST_CONTRACT
+                )
+
+    def test_edmformer_executor_clamps_threads_to_runner_limit(self):
+        research = self.root / "thread-limit-research"
+        project = self.root / "thread-limit-project"
+        checkpoint = research / "sources" / "edm98" / "data" / "checkpoints"
+        for path in (
+            research / "environments" / "edmformer" / "bin" / "python",
+            project / "scripts" / "edmformer-cpu-runner.py",
+            checkpoint / "model.pt",
+            checkpoint / "msd_stats.json",
+            checkpoint / "pretrained_msd.pt",
+            research / "sources" / "edm98" / "configs" / "edmformer.yaml",
+            research / "sources" / "musicfm" / "model" / "musicfm_25hz.py",
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"test")
+        audio_content = b"RIFF-thread-limit"
+        digest = hashlib.sha256(audio_content).hexdigest()
+        audio = self.spool.object_path(digest)
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(audio_content)
+        executor = LinkNodeExecutor(
+            self.spool,
+            research_root=research,
+            project_root=project,
+            max_threads=24,
+        )
+        executor._capabilities_cache = {
+            "job_contracts": {EDMFORMER_JOB: dict(TEST_CONTRACT)}
+        }
+        state = {
+            "manifest_sha256": "manifest",
+            "manifest": {
+                "job_id": "job:thread-limit",
+                "job_type": EDMFORMER_JOB,
+                "identity": {"duration_ms": 1_000},
+                "objects": [{"role": "audio", "sha256": digest}],
+                "resources": {"threads": 24},
+            },
+        }
+        commands = []
+
+        class CompletedProcess:
+            returncode = 0
+
+            def communicate(self, timeout=None):
+                del timeout
+                return "", ""
+
+        def start_process(command, **kwargs):
+            del kwargs
+            commands.append(command)
+            output = Path(command[command.index("--output") + 1])
+            output.write_text(
+                json.dumps([{"label": "drop", "start": 0, "end": 1}]),
+                encoding="utf-8",
+            )
+            return CompletedProcess()
+
+        with patch("lumen_engine.link.subprocess.Popen", side_effect=start_process):
+            result = executor._execute_teacher(state, None)
+        command = commands[0]
+        self.assertEqual(command[command.index("--threads") + 1], "8")
+        self.assertEqual(result["resources"]["threads"], 8)
+
     def test_completed_remote_result_waits_for_live_to_stop_before_import(self):
         store = SongMemoryStore(self.root / "memory.sqlite3")
         audio = self.root / "deferred.wav"
@@ -306,6 +522,161 @@ class LinkTests(unittest.TestCase):
             item for item in store.list_analysis_jobs() if item["id"] == job_id
         )
         self.assertEqual(canonical["status"], "running")
+
+    def test_live_remote_poll_is_memory_only_and_heavy_work_is_parked(self):
+        store = SongMemoryStore(self.root / "live-poll.sqlite3")
+        audio = self.root / "live-poll.wav"
+        audio.write_bytes(b"remote")
+        job_id = store.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={
+                "audio_path": str(audio),
+                "duration_ms": 1_000,
+                "recording_id": "recording:live-poll",
+                "execution_target": "threadripper",
+            },
+        )
+        job = store.claim_analysis_job_by_id(
+            job_id, worker_id="lumen-link:live", worker_pid=1
+        )
+        assert job is not None
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "live-poll-research",
+            state_root=self.root / "live-poll-state",
+            config_path=self.root / "live-poll-state" / "config.json",
+            can_import=lambda: False,
+        )
+        coordinator.active = {
+            "job": job,
+            "manifest": {"objects": [{"sha256": "0" * 64}]},
+            "stage": "remote",
+            "progress": None,
+        }
+
+        class RunningClient:
+            def request(self, method, path):
+                del method, path
+                return {
+                    "status": "running",
+                    "stage": "inference",
+                    "progress": None,
+                }
+
+        with patch.object(coordinator, "_client", return_value=RunningClient()), patch.object(
+            store, "heartbeat_analysis_job"
+        ) as heartbeat, patch.object(coordinator, "_persist") as persist, patch.object(
+            store, "list_analysis_jobs", wraps=store.list_analysis_jobs
+        ) as scans:
+            coordinator._advance()
+            self.assertEqual(coordinator.route_queued_jobs(), 0)
+            coordinator.status()
+        heartbeat.assert_not_called()
+        persist.assert_not_called()
+        scans.assert_not_called()
+        self.assertEqual(coordinator.active["stage"], "inference")
+
+    def test_live_transition_waits_for_link_io_checkpoint(self):
+        coordinator = LumenLinkCoordinator(
+            SongMemoryStore(self.root / "guard.sqlite3"),
+            research_root=self.root / "guard-research",
+            state_root=self.root / "guard-state",
+            config_path=self.root / "guard-state" / "config.json",
+        )
+        entered = threading.Event()
+        release = threading.Event()
+        live_entered = threading.Event()
+
+        def heavy_work():
+            with coordinator._standby_guard():
+                entered.set()
+                release.wait(2.0)
+
+        worker = threading.Thread(target=heavy_work)
+        worker.start()
+        self.assertTrue(entered.wait(1.0))
+
+        def start_live():
+            with coordinator.live_transition_guard():
+                live_entered.set()
+
+        starter = threading.Thread(target=start_live)
+        starter.start()
+        self.assertFalse(live_entered.wait(0.05))
+        release.set()
+        self.assertTrue(live_entered.wait(1.0))
+        worker.join(1.0)
+        starter.join(1.0)
+
+    def test_completed_job_reports_returning_then_importing(self):
+        store = SongMemoryStore(self.root / "return-stages.sqlite3")
+        audio = self.root / "return.wav"
+        audio.write_bytes(b"return")
+        job_id = store.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={
+                "audio_path": str(audio),
+                "content_sha256": hashlib.sha256(
+                    audio.read_bytes()
+                ).hexdigest(),
+                "duration_ms": 1_000,
+                "recording_id": "recording:return",
+                "execution_target": "threadripper",
+            },
+        )
+        job = store.claim_analysis_job_by_id(
+            job_id, worker_id="lumen-link:stage", worker_pid=1
+        )
+        assert job is not None
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "return-research",
+            state_root=self.root / "return-state",
+            config_path=self.root / "return-state" / "config.json",
+        )
+        coordinator.active = {
+            "job": job,
+            "manifest": {"objects": [{"sha256": "0" * 64}]},
+            "stage": "remote",
+            "progress": None,
+        }
+
+        class CompletedClient:
+            def request(self, method, path):
+                del method
+                if path.endswith("/result"):
+                    return {"result": True}
+                return {
+                    "status": "complete",
+                    "stage": "complete",
+                    "progress": 1.0,
+                }
+
+        stages = []
+        original_persist = coordinator._persist
+
+        def capture_persist():
+            if coordinator.active:
+                stages.append(coordinator.active.get("stage"))
+            original_persist()
+
+        with patch.object(coordinator, "_client", return_value=CompletedClient()), patch.object(
+            coordinator, "_persist", side_effect=capture_persist
+        ), patch.object(
+            coordinator, "_import_teacher", return_value={"imported": True}
+        ):
+            coordinator._advance()
+        self.assertIn("returning", stages)
+        self.assertIn("importing", stages)
+        self.assertLess(stages.index("returning"), stages.index("importing"))
+        status = coordinator.status()
+        self.assertEqual(status["queue"]["locally_imported"], 1)
+        self.assertEqual(status["recent_imports"][0]["job_id"], job_id)
+        imported_job = next(
+            item for item in status["jobs"] if item.get("job_id") == job_id
+        )
+        self.assertTrue(imported_job["locally_imported"])
+        self.assertEqual(imported_job["local_import_state"], "imported")
 
     def test_coordinator_reclaims_its_persisted_job_after_restart(self):
         store = SongMemoryStore(self.root / "restart-memory.sqlite3")
@@ -415,6 +786,532 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(coordinator.route_queued_jobs(), 0)
         job = next(item for item in store.list_analysis_jobs() if item["id"] == job_id)
         self.assertNotIn("execution_target", job["payload"])
+
+    def test_coordinator_routes_mixed_teachers_one_at_a_time(self):
+        store = SongMemoryStore(self.root / "mixed-route.sqlite3")
+        edm_id = store.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={"recording_id": "edm"},
+            priority=20,
+        )
+        song_id = store.enqueue_analysis_job(
+            job_type=SONGFORMER_JOB,
+            payload={"recording_id": "song"},
+            priority=10,
+        )
+        state_root = self.root / "mixed-route"
+        state_root.mkdir(parents=True)
+        (state_root / "secret").write_bytes(SECRET)
+        (state_root / "config.json").write_text(
+            json.dumps(
+                {
+                    "endpoint": "http://127.0.0.1:1",
+                    "secret_file": "secret",
+                    "enabled": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "mixed-research",
+            state_root=state_root,
+            config_path=state_root / "config.json",
+        )
+        coordinator.remote_status = {
+            "authenticated": True,
+            "capabilities": {
+                "supported_job_types": [EDMFORMER_JOB, SONGFORMER_JOB],
+                "job_contracts": {
+                    EDMFORMER_JOB: TEST_CONTRACT,
+                    SONGFORMER_JOB: SONG_TEST_CONTRACT,
+                },
+            },
+        }
+        coordinator._local_contract_cache = {
+            EDMFORMER_JOB: dict(TEST_CONTRACT),
+            SONGFORMER_JOB: dict(SONG_TEST_CONTRACT),
+        }
+        self.assertEqual(coordinator.route_queued_jobs(), 1)
+        jobs = {item["id"]: item for item in store.list_analysis_jobs()}
+        self.assertEqual(
+            jobs[edm_id]["payload"]["execution_target"], "threadripper"
+        )
+        self.assertNotIn("execution_target", jobs[song_id]["payload"])
+        self.assertEqual(coordinator.route_queued_jobs(), 0)
+        store.update_analysis_job(edm_id, status="complete")
+        self.assertEqual(coordinator.route_queued_jobs(), 1)
+        jobs = {item["id"]: item for item in store.list_analysis_jobs()}
+        self.assertEqual(
+            jobs[song_id]["payload"]["execution_target"], "threadripper"
+        )
+
+    def test_student_manifest_contains_every_coherent_recording_wav(self):
+        store = SongMemoryStore(self.root / "student-manifest.sqlite3")
+        recording_ids = ("recording:one", "recording:two")
+        for index, recording_id in enumerate(recording_ids):
+            audio = self.root / f"student-{index}.wav"
+            audio.write_bytes(f"RIFF-{index}".encode())
+            store.enqueue_analysis_job(
+                job_type=EDMFORMER_JOB,
+                payload={
+                    "recording_id": recording_id,
+                    "audio_path": str(audio),
+                    "content_sha256": hashlib.sha256(
+                        audio.read_bytes()
+                    ).hexdigest(),
+                },
+            )
+        examples = self.root / "student.jsonl"
+        examples.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "recording_id": recording_id,
+                        "split_group_id": recording_id,
+                        "split": "train",
+                    }
+                )
+                + "\n"
+                for recording_id in recording_ids
+            ),
+            encoding="utf-8",
+        )
+        job_id = store.enqueue_analysis_job(
+            job_type=STUDENT_TRAIN_JOB,
+            payload={
+                "examples_path": str(examples),
+                "examples_sha256": hashlib.sha256(
+                    examples.read_bytes()
+                ).hexdigest(),
+                "output_path": str(self.root / "student.npz"),
+                "epochs": 1,
+            },
+        )
+        job = next(
+            item for item in store.list_analysis_jobs() if item["id"] == job_id
+        )
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "student-research",
+            state_root=self.root / "student-state",
+            config_path=self.root / "student-state" / "config.json",
+        )
+        coordinator._local_contract_cache = {
+            STUDENT_TRAIN_JOB: dict(STUDENT_TEST_CONTRACT)
+        }
+        coordinator._local_contract_signatures[STUDENT_TRAIN_JOB] = {
+            "test": True
+        }
+        with patch(
+            "lumen_engine.link._job_asset_signature",
+            return_value={"test": True},
+        ):
+            value = coordinator._student_manifest(job)
+            coordinator._refresh_job_snapshot(
+                force=True, precompute_students=True
+            )
+        audio_objects = [
+            item
+            for item in value["objects"]
+            if item["role"] == "recording_audio"
+        ]
+        self.assertEqual(
+            {item["recording_id"] for item in audio_objects},
+            set(recording_ids),
+        )
+        self.assertEqual(len(value["objects"]), 3)
+        expected_unique_bytes = examples.stat().st_size + sum(
+            (self.root / f"student-{index}.wav").stat().st_size
+            for index in range(2)
+        )
+        self.assertEqual(
+            coordinator.status()["queue"]["bytes_pending"],
+            expected_unique_bytes,
+        )
+
+    def test_student_executor_runs_fixed_child_and_publishes_artifacts(self):
+        """Exercise the real Link runner boundary without a model mock."""
+        spool = LinkSpool(self.root / "student-executor-spool")
+        recordings = []
+        rows = []
+        for split in ("train", "test"):
+            recording_id = f"recording:{split}"
+            audio = self.root / f"student-executor-{split}.wav"
+            with wave.open(str(audio), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(8_000)
+                output.writeframes(b"\0\0" * 8_000)
+            descriptor = spool.publish_file(audio)
+            recordings.append(
+                {
+                    "role": "recording_audio",
+                    "recording_id": recording_id,
+                    "sha256": descriptor["sha256"],
+                    "bytes": descriptor["bytes"],
+                    "format": "wav-pcm",
+                }
+            )
+            for index in range(10):
+                rows.append(
+                    {
+                        "recording_id": recording_id,
+                        "recording_offset_ms": index * 100,
+                        "audio_frame_index": index,
+                        "split_group_id": f"group:{split}",
+                        "split": split,
+                        "features": [0.0] * 15,
+                        "functional": "unknown",
+                        "energy": "groove" if index < 5 else "build",
+                        "content": "unknown",
+                        "boundary": 0,
+                    }
+                )
+        examples = self.root / "student-executor.jsonl"
+        examples.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        example_descriptor = spool.publish_file(examples)
+        job_manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "job_id": "job:student-executor",
+            "job_type": STUDENT_TRAIN_JOB,
+            "identity": {
+                "recording_ids": ["recording:test", "recording:train"]
+            },
+            "objects": [
+                {
+                    "role": "student_examples",
+                    "sha256": example_descriptor["sha256"],
+                    "bytes": example_descriptor["bytes"],
+                    "format": "jsonl",
+                },
+                *recordings,
+            ],
+            "contract": {
+                **STUDENT_TEST_CONTRACT,
+                "result_schema": RESULT_SCHEMA,
+            },
+            "training": {
+                "epochs": 1,
+                "hidden_size": 8,
+                "applicable_axes": ["energy"],
+            },
+            "resources": {"threads": 1},
+            "created_unix_ms": 1,
+        }
+        state = {
+            "manifest": job_manifest,
+            "manifest_sha256": hashlib.sha256(
+                json.dumps(
+                    job_manifest, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+        }
+        executor = LinkNodeExecutor(
+            spool,
+            research_root=self.root / "student-executor-research",
+            project_root=Path(__file__).resolve().parents[1],
+            max_threads=1,
+            max_memory_gib=2,
+        )
+        stages = []
+        with patch.object(
+            executor,
+            "capabilities",
+            return_value={
+                "job_contracts": {
+                    STUDENT_TRAIN_JOB: STUDENT_TEST_CONTRACT
+                }
+            },
+        ):
+            result = executor._execute_student(
+                state,
+                lambda progress: stages.append(progress.get("stage")),
+            )
+        self.assertEqual(result["job_type"], STUDENT_TRAIN_JOB)
+        self.assertEqual(
+            set(result["artifacts"]),
+            {"candidate_model", "evaluation", "prepared_examples"},
+        )
+        for descriptor in result["artifacts"].values():
+            artifact = spool.object_path(descriptor["sha256"])
+            self.assertTrue(artifact.is_file())
+            self.assertEqual(artifact.stat().st_size, descriptor["bytes"])
+        self.assertIn("student_feature_preparation", stages)
+        self.assertIn("student_training", stages)
+        self.assertIn("student_validation", stages)
+
+    def test_student_import_revalidates_activates_and_is_idempotent(self):
+        store = SongMemoryStore(self.root / "student-import.sqlite3")
+        examples = self.root / "original.jsonl"
+        original_row = {
+            "recording_id": "recording:student",
+            "recording_offset_ms": 0,
+            "split_group_id": "group:student",
+            "split": "test",
+            "features": [0.0] * 15,
+            "functional": "intro",
+            "energy": "groove",
+            "content": "instrumental",
+            "boundary": 0,
+        }
+        examples.write_text(json.dumps(original_row) + "\n", encoding="utf-8")
+        output = self.root / "models" / "student.npz"
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"previous-model")
+        output.with_name("student.evaluation.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        job = {
+            "id": "job:student-import",
+            "job_type": STUDENT_TRAIN_JOB,
+            "payload": {
+                "examples_path": str(examples),
+                "output_path": str(output),
+                "applicable_axes": ["energy"],
+            },
+        }
+        example_digest = hashlib.sha256(examples.read_bytes()).hexdigest()
+        job_manifest = {
+            "schema": MANIFEST_SCHEMA,
+            "job_id": job["id"],
+            "job_type": STUDENT_TRAIN_JOB,
+            "identity": {"recording_ids": ["recording:student"]},
+            "objects": [
+                {
+                    "role": "student_examples",
+                    "sha256": example_digest,
+                    "bytes": examples.stat().st_size,
+                    "format": "jsonl",
+                }
+            ],
+            "contract": {
+                **STUDENT_TEST_CONTRACT,
+                "result_schema": RESULT_SCHEMA,
+            },
+        }
+        candidate = self.root / "remote-candidate.npz"
+        candidate.write_bytes(b"verified-candidate")
+        prepared = self.root / "remote-prepared.jsonl"
+        prepared_row = {
+            **original_row,
+            "features": [0.25] * 15,
+            "feature_preprocessing_version": STUDENT_AUDIO_FEATURE_VERSION,
+        }
+        prepared.write_text(json.dumps(prepared_row) + "\n", encoding="utf-8")
+        local_gate = {
+            "activated": True,
+            "approved_axes": ["energy"],
+            "inactive_axes": [],
+            "not_applicable_axes": ["boundary", "content", "functional"],
+            "held_out_split": "test",
+            "evaluation": {"test": {"energy": {"accuracy": 1.0}}},
+            "axis_gate_reasons": {},
+            "gate_reasons": [],
+            "test_population_reliable": True,
+            "split_counts": {"train": 0, "validation": 0, "test": 1},
+            "split_group_counts": {"train": 0, "validation": 0, "test": 5},
+            "label_balance": {},
+        }
+        remote_report = {
+            "activated": True,
+            "approved_axes": ["energy"],
+            "evaluation": local_gate["evaluation"],
+        }
+        evaluation = self.root / "remote-evaluation.json"
+        evaluation.write_text(
+            json.dumps(remote_report, sort_keys=True), encoding="utf-8"
+        )
+
+        def descriptor(path):
+            return {
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "bytes": path.stat().st_size,
+            }
+
+        source_by_digest = {
+            descriptor(candidate)["sha256"]: candidate,
+            descriptor(prepared)["sha256"]: prepared,
+            descriptor(evaluation)["sha256"]: evaluation,
+        }
+
+        class ArtifactClient:
+            def __init__(self):
+                self.downloads = 0
+
+            def download(self, digest, byte_count, target):
+                self.downloads += 1
+                source = source_by_digest[digest]
+                if source.stat().st_size != byte_count:
+                    raise AssertionError("test descriptor mismatch")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                return target
+
+        result = {
+            "schema": RESULT_SCHEMA,
+            "job_id": job["id"],
+            "job_type": STUDENT_TRAIN_JOB,
+            "manifest_sha256": hashlib.sha256(
+                json.dumps(
+                    job_manifest, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+            "input_sha256": example_digest,
+            **STUDENT_TEST_CONTRACT,
+            "artifacts": {
+                "candidate_model": {
+                    **descriptor(candidate),
+                    "format": "numpy-npz",
+                },
+                "evaluation": {
+                    **descriptor(evaluation),
+                    "format": "json",
+                },
+                "prepared_examples": {
+                    **descriptor(prepared),
+                    "format": "jsonl",
+                },
+            },
+            "report": remote_report,
+            "resources": {"elapsed_s": 1.0},
+        }
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "student-import-research",
+            state_root=self.root / "student-import-state",
+            config_path=self.root / "student-import-state" / "config.json",
+        )
+
+        class FakeModel:
+            approved_axes = {"energy"}
+
+        client = ArtifactClient()
+        rejected_gate = {
+            **local_gate,
+            "activated": False,
+            "approved_axes": [],
+            "inactive_axes": ["energy"],
+        }
+
+        class RejectedModel:
+            approved_axes = set()
+
+        with patch(
+            "lumen_engine.student.StreamingStructureStudent.load",
+            return_value=RejectedModel(),
+        ), patch(
+            "lumen_engine.link._student_gate_assessment",
+            return_value=rejected_gate,
+        ):
+            with self.assertRaisesRegex(
+                LinkProtocolError,
+                "does not reproduce",
+            ):
+                coordinator._import_student(
+                    client, job, job_manifest, result
+                )
+        with patch(
+            "lumen_engine.student.StreamingStructureStudent.load",
+            return_value=FakeModel(),
+        ), patch(
+            "lumen_engine.link._student_gate_assessment",
+            return_value=local_gate,
+        ):
+            imported = coordinator._import_student(
+                client, job, job_manifest, result
+            )
+            reused = coordinator._import_student(
+                client, job, job_manifest, result
+            )
+        self.assertTrue(imported["activated"])
+        self.assertTrue(imported["local_revalidated"])
+        self.assertTrue(reused["import_reused"])
+        self.assertEqual(client.downloads, 6)
+        self.assertEqual(output.read_bytes(), candidate.read_bytes())
+        self.assertEqual(
+            output.with_name("student.previous.npz").read_bytes(),
+            b"previous-model",
+        )
+
+        rejected_output = self.root / "models" / "rejected.npz"
+        rejected_output.write_bytes(b"still-active")
+        rejected_job = {
+            **job,
+            "id": "job:student-rejected",
+            "payload": {**job["payload"], "output_path": str(rejected_output)},
+        }
+        rejected_manifest = {
+            **job_manifest,
+            "job_id": rejected_job["id"],
+        }
+        rejected_report = {
+            "activated": False,
+            "approved_axes": [],
+            "evaluation": local_gate["evaluation"],
+        }
+        rejected_evaluation = self.root / "remote-rejected-evaluation.json"
+        rejected_evaluation.write_text(
+            json.dumps(rejected_report, sort_keys=True), encoding="utf-8"
+        )
+        source_by_digest[descriptor(rejected_evaluation)["sha256"]] = (
+            rejected_evaluation
+        )
+        rejected_result = {
+            **result,
+            "job_id": rejected_job["id"],
+            "manifest_sha256": hashlib.sha256(
+                json.dumps(
+                    rejected_manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "report": rejected_report,
+            "artifacts": {
+                **result["artifacts"],
+                "evaluation": {
+                    **descriptor(rejected_evaluation),
+                    "format": "json",
+                },
+            },
+        }
+        with patch(
+            "lumen_engine.student.StreamingStructureStudent.load",
+            return_value=RejectedModel(),
+        ), patch(
+            "lumen_engine.link._student_gate_assessment",
+            return_value=rejected_gate,
+        ):
+            rejected = coordinator._import_student(
+                client,
+                rejected_job,
+                rejected_manifest,
+                rejected_result,
+            )
+        self.assertFalse(rejected["activated"])
+        self.assertEqual(rejected_output.read_bytes(), b"still-active")
+        self.assertTrue(Path(rejected["candidate_model_path"]).is_file())
+
+        # A missing rejected/accepted candidate invalidates the receipt and
+        # forces artifact recovery rather than claiming a phantom success.
+        Path(imported["candidate_model_path"]).unlink()
+        with patch(
+            "lumen_engine.student.StreamingStructureStudent.load",
+            return_value=FakeModel(),
+        ), patch(
+            "lumen_engine.link._student_gate_assessment",
+            return_value=local_gate,
+        ):
+            coordinator._import_student(client, job, job_manifest, result)
+        self.assertEqual(client.downloads, 12)
+        self.assertEqual(
+            output.with_name("student.previous.npz").read_bytes(),
+            b"previous-model",
+        )
 
     def test_disable_restores_queued_jobs_and_restart_still_drains_active(self):
         store = SongMemoryStore(self.root / "disable.sqlite3")
@@ -554,6 +1451,45 @@ class LinkTests(unittest.TestCase):
             store.structure_timeline_for_teacher_run(str(runs[0]["id"]))
         )
 
+    def test_teacher_import_rejects_cross_teacher_result_envelope(self):
+        store = SongMemoryStore(self.root / "cross-teacher.sqlite3")
+        audio = self.root / "cross.wav"
+        audio.write_bytes(b"cross")
+        digest = hashlib.sha256(audio.read_bytes()).hexdigest()
+        job_id = store.enqueue_analysis_job(
+            job_type=SONGFORMER_JOB,
+            payload={
+                "audio_path": str(audio),
+                "content_sha256": digest,
+                "duration_ms": 1_000,
+                "recording_id": "recording:cross",
+            },
+        )
+        job = next(
+            item for item in store.list_analysis_jobs() if item["id"] == job_id
+        )
+        job_manifest = manifest(
+            job_id,
+            digest,
+            audio.stat().st_size,
+            job_type=SONGFORMER_JOB,
+        )
+        result = {
+            "schema": RESULT_SCHEMA,
+            "job_id": job_id,
+            "job_type": EDMFORMER_JOB,
+        }
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "cross-research",
+            state_root=self.root / "cross-state",
+            config_path=self.root / "cross-state" / "config.json",
+        )
+        with self.assertRaises(LinkProtocolError):
+            coordinator._import_teacher(
+                job, job_manifest, result, teacher="SongFormer"
+            )
+
     def test_status_is_cached_across_desktop_and_phone_polls(self):
         store = SongMemoryStore(self.root / "status-cache.sqlite3")
         coordinator = LumenLinkCoordinator(
@@ -570,7 +1506,9 @@ class LinkTests(unittest.TestCase):
             first = coordinator.status()
             second = coordinator.status()
         self.assertEqual(first, second)
-        self.assertEqual(jobs.call_count, 1)
+        # UI polling consumes the standby-prepared snapshot; it never starts
+        # a database scan of its own, including while Live is active.
+        self.assertEqual(jobs.call_count, 0)
         self.assertEqual(first["capabilities"]["supported_job_types"], [])
 
 

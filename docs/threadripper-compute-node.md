@@ -12,10 +12,10 @@ Deployment package:
 - [Beginner WSL/Windows/Lumen setup](lumen-link-wsl-deployment.md)
 - [Codex handoff on the Threadripper](lumen-link-codex-handoff.md)
 
-Lumen Link v1 implements the authenticated transport and remote EDMFormer
-executor. SongFormer, student training and held-out evaluation remain explicit
-gated capabilities until their immutable result importers are implemented and
-validated.
+Lumen Link implements authenticated, immutable remote jobs for EDMFormer,
+SongFormer, student training, and held-out evaluation/artifact return. Lumen
+still validates every result locally and remains the only machine allowed to
+activate a candidate model.
 
 ## Purpose
 
@@ -81,7 +81,7 @@ and documentation.
 ## Job contract
 
 The existing durable `analysis_jobs` queue remains authoritative. A remote job
-bundle will identify at least:
+bundle identifies at least:
 
 - schema, job type, and job ID
 - recording and capture-session identity
@@ -91,28 +91,33 @@ bundle will identify at least:
 - expected result schema
 - training split identity when applicable
 
-The returned bundle will include the input identity, normalized timeline or
+The returned bundle includes the input identity, normalized timeline or
 candidate model, evaluation metrics, code revision, resource measurements, and
 artifact checksums. Import is idempotent: retrying a transfer or result cannot
 create duplicate teacher authority.
 
-## Implementation stages
+## Implementation status
 
-1. Configure and verify the point-to-point link without changing either
-   machine's normal internet route.
-2. Install a headless Ubuntu environment on the Threadripper, initially using
-   WSL2 unless its networking or lifetime proves unsuitable. Keep Windows as
-   the workstation environment.
-3. Split the current offline worker into a pure job executor and a local result
-   importer. Remote code must not open Lumen's canonical database.
-4. Add a versioned, job-oriented compute service with health, submit, object
-   transfer, progress, result, and cancellation operations.
-5. Add `local`, `threadripper`, and `automatic` execution targets to the
-   existing research queue and show node/job status in Audio Laboratory.
-6. Move full-song EDMFormer processing first, then student training and held-out
-   evaluation. Keep the validated causal student and exact-song timelines on
-   Lumen for network-independent Live operation.
-7. Add offline show simulation only after teacher and training parity is proven.
+The software package now provides:
+
+1. Point-to-point network tooling that leaves both computers' normal internet
+   routes unchanged.
+2. A pinned, headless Ubuntu WSL2 installation for the Threadripper while
+   Windows remains its workstation environment.
+3. A pure remote executor and a local result importer; the remote code cannot
+   open Lumen's canonical database.
+4. A versioned compute service with authenticated health, submit, resumable
+   object transfer, progress, immutable result, and queued-cancellation
+   operations.
+5. `local`, `threadripper`, and `automatic` targets in the durable research
+   queue, plus the Lumen Link status dashboard.
+6. Remote full-song EDMFormer and SongFormer processing, student training, and
+   held-out evaluation. Validated causal students and exact-song timelines
+   remain on Lumen for network-independent Live operation.
+
+Offline show simulation remains a later capability. The two-PC cable,
+restart/resume, and local-versus-remote parity checks remain physical
+acceptance work and are not represented as already completed.
 
 The RX 5700 XT is not required for the first implementation. The initial node
 uses the Threadripper 3970X and 128 GB RAM for CPU analysis. GPU acceleration

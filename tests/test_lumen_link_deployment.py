@@ -22,11 +22,10 @@ class LumenLinkDeploymentTests(unittest.TestCase):
             template["listen"]["allowed_clients"], ["192.168.50.2"]
         )
         self.assertEqual(
-            template["execution"]["job_types"], ["teacher.edmformer"]
+            template["execution"]["job_types"],
+            ["teacher.edmformer", "teacher.songformer", "student.train"],
         )
-        self.assertIn(
-            "teacher.songformer", template["execution"]["gated_job_types"]
-        )
+        self.assertEqual(template["execution"]["gated_job_types"], [])
         self.assertEqual(
             template["authentication"]["scheme"], "hmac-sha256"
         )
@@ -67,6 +66,13 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn("DRY-RUN:", pairing.stdout)
         self.assertIn("value never displayed", pairing.stdout)
 
+        script = (ROOT / "scripts/lumen-link").read_text(encoding="utf-8")
+        self.assertIn(
+            'expected = ["teacher.edmformer", "teacher.songformer", "student.train"]',
+            script,
+        )
+        self.assertIn("not ready for every Lumen Link job", script)
+
     def test_wsl_service_invokes_actual_cli_contract(self) -> None:
         script = (ROOT / "scripts/lumen-link-wsl").read_text(encoding="utf-8")
         self.assertIn('link-node "${worker_arguments[@]}"', script)
@@ -77,6 +83,14 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn("PYENV_REVISION=v2.6.27", script)
         self.assertIn(".local/share/lumen-link/pyenv", script)
         self.assertIn('"$pinned_python" -m venv', script)
+        self.assertIn("verify_running_capabilities", script)
+        self.assertIn(
+            'expected = ["teacher.edmformer", "teacher.songformer", "student.train"]',
+            script,
+        )
+        self.assertNotIn(
+            'job_types") != ["teacher.edmformer"]', script
+        )
         service = (
             ROOT / "config/lumen-link/lumen-link-worker.service"
         ).read_text(encoding="utf-8")
@@ -101,12 +115,15 @@ class LumenLinkDeploymentTests(unittest.TestCase):
             "Pause before Windows administrator or Linux",
             "Never request, print, commit",
             "teacher.edmformer",
+            "teacher.songformer",
+            "student.train",
             "~/lumenengine",
             "mode `600`",
         ):
             self.assertIn(expected, handoff)
-        self.assertIn("There is no per-song selector in v1", handoff)
+        self.assertIn("There is no per-song selector", handoff)
         self.assertIn("press **Disable link**", handoff)
+        self.assertIn("candidate remains inactive", handoff)
 
         guide = (ROOT / "docs/lumen-link-wsl-deployment.md").read_text(
             encoding="utf-8"
@@ -115,6 +132,10 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn("Other queued", guide)
         self.assertNotIn("select one completed EDM recording", guide)
         self.assertIn("physical acceptance work", guide)
+        self.assertIn("all three job types as `READY`", guide)
+        self.assertIn("not the writable Lumen database", guide)
+        self.assertIn("candidate model and evaluation report", guide)
+        self.assertNotIn("remain clearly gated", guide)
 
 
 if __name__ == "__main__":

@@ -1156,12 +1156,31 @@
                 </div>
               </section>
 
+              <section class="panel link-engines-panel">
+                <div class="panel-titlebar"><h3>Compute engines &amp; authority</h3><span id="link-pipeline-freshness" class="panel-note">Awaiting verified pipeline state</span></div>
+                <div id="link-engine-grid" class="link-engine-grid">
+                  <article class="link-engine-card unavailable"><span>ENERGY TEACHER</span><strong>EDMFormer</strong><b>UNKNOWN</b><p>Energy sections and EDM boundaries</p></article>
+                  <article class="link-engine-card unavailable"><span>FORM TEACHER</span><strong>SongFormer</strong><b>UNKNOWN</b><p>Functional form, content role and boundaries</p></article>
+                  <article class="link-engine-card unavailable"><span>STREAMING STUDENT</span><strong>Neural student</strong><b>UNKNOWN</b><p>Training and held-out validation</p></article>
+                </div>
+                <div class="link-axis-authority"><span>LIVE AXIS AUTHORITY</span><div id="link-axis-authority">Energy — · Functional — · Content — · Boundary —</div></div>
+                <div class="link-artifact-flow" id="link-artifact-flow" aria-label="Current immutable artifact path">
+                  <div id="link-flow-dispatch"><i>1</i><b>Dispatch</b><small>waiting</small></div>
+                  <span></span>
+                  <div id="link-flow-compute"><i>2</i><b>Compute</b><small>waiting</small></div>
+                  <span></span>
+                  <div id="link-flow-return"><i>3</i><b>Return</b><small>waiting</small></div>
+                  <span></span>
+                  <div id="link-flow-import"><i>4</i><b>Local import</b><small>waiting</small></div>
+                </div>
+              </section>
+
               <section class="panel link-summary-panel">
                 <div class="panel-titlebar"><h3>Workload</h3><span id="link-queue-state" class="panel-badge">IDLE</span></div>
                 <div class="link-summary-grid">
                   <div><span>QUEUED</span><b id="link-queued">0</b><small>waiting locally</small></div>
                   <div><span>RUNNING</span><b id="link-running">0</b><small>on compute node</small></div>
-                  <div><span>COMPLETE</span><b id="link-completed">0</b><small>verified results</small></div>
+                  <div><span>COMPLETE</span><b id="link-completed">0</b><small id="link-completed-detail">remote finished</small></div>
                   <div><span>FAILED</span><b id="link-failed">0</b><small>need attention</small></div>
                 </div>
                 <div class="link-transfer-summary">
@@ -1185,6 +1204,17 @@
                 </div>
               </section>
 
+              <section class="panel link-model-panel">
+                <div class="panel-titlebar"><h3>Student candidate &amp; activation</h3><span id="link-model-state" class="panel-badge">NO CANDIDATE</span></div>
+                <div class="link-model-grid">
+                  <div><span>CANDIDATE ARTIFACT</span><b id="link-candidate-state">NONE</b><small id="link-candidate-detail">Train a student after teacher collection is ready.</small></div>
+                  <div><span>HELD-OUT VALIDATION</span><b id="link-validation-state">NOT RUN</b><small id="link-validation-detail">No candidate evaluation is available.</small></div>
+                  <div><span>APPROVED AXES</span><b id="link-approved-axes">—</b><small id="link-inactive-axes">No axis decision yet.</small></div>
+                  <div><span>LIVE ACTIVATION</span><b id="link-activation-state">INACTIVE</b><small id="link-activation-detail">Live continues using its current structural source.</small></div>
+                </div>
+                <div class="link-model-blockers" id="link-model-blockers">No verified candidate state has been reported.</div>
+              </section>
+
               <section class="panel link-events-panel">
                 <div class="panel-titlebar"><h3>Link activity</h3><span class="panel-note">Connection, transfer, execution, verification</span></div>
                 <div id="link-events" class="link-events"><div class="link-empty">No link events yet.</div></div>
@@ -1202,7 +1232,7 @@
                     <li><b>Prepare WSL</b><span>Install the compute-node package and dependencies.</span></li>
                     <li><b>Pair the nodes</b><span>Run the setup scripts to install the same private shared secret on both computers.</span></li>
                     <li><b>Test the contract</b><span>Authenticate the worker and verify its code and model assets without dispatching a job.</span></li>
-                    <li><b>Enable offload</b><span>Future offline analysis and training can enter the remote queue.</span></li>
+                    <li><b>Enable offload</b><span>Only job types reported available by the verified worker can enter its queue.</span></li>
                   </ol>
                   <div id="link-capabilities" class="link-capabilities"></div>
                   <div id="link-setup-commands" class="link-setup-commands"></div>
@@ -1347,6 +1377,7 @@
             <span><b id="remote-link-queued">0</b> queued</span>
             <span><b id="remote-link-running">0</b> running</span>
             <span><b id="remote-link-progress">—</b> current job</span>
+            <span><b id="remote-link-model">—</b> student</span>
           </div>
         </section>
 

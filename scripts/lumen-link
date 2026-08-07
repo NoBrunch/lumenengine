@@ -196,9 +196,19 @@ if not configuration.secret:
 health = LinkClient(configuration.endpoint, configuration.secret).health()
 node = health.get("node") or {}
 capabilities = health.get("capabilities") or {}
+expected = ["teacher.edmformer", "teacher.songformer", "student.train"]
+supported = capabilities.get("supported_job_types") or []
+gated = capabilities.get("gated_job_types") or {}
 print("Authenticated Lumen Link connection succeeded.")
 print(f"  node: {node.get('hostname') or node.get('name') or 'threadripper-wsl'}")
-print(f"  supported jobs: {', '.join(capabilities.get('supported_job_types') or [])}")
+print(f"  supported jobs: {', '.join(supported) or 'none'}")
+missing = [name for name in expected if name not in supported]
+for name in missing:
+    print(f"  gated: {name}: {gated.get(name) or 'not advertised'}")
+if missing:
+    raise SystemExit(
+        "The worker authenticated but is not ready for every Lumen Link job"
+    )
 PY
 }
 

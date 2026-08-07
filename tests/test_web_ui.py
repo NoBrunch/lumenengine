@@ -169,9 +169,18 @@ class OperatorInterfaceContractTests(unittest.TestCase):
             "link-test-button",
             "link-enable-button",
             "link-pause-button",
+            "link-engine-grid",
+            "link-axis-authority",
+            "link-artifact-flow",
+            "link-candidate-state",
+            "link-validation-state",
+            "link-approved-axes",
+            "link-activation-state",
+            "link-model-blockers",
             "remote-link-state",
             "remote-link-node",
             "remote-link-progress",
+            "remote-link-model",
         ):
             self.assertIn(f'id="{element_id}"', html)
         self.assertIn("function renderLink", script)
@@ -184,6 +193,29 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn('enabled ? "Disable link" : "Enable link"', script)
         self.assertIn('currentIndeterminate', script)
         self.assertIn('"ACTIVE"', script)
+        self.assertIn("function linkJobPhase", script)
+        self.assertIn("function renderLinkArtifactFlow", script)
+        self.assertIn("function renderLinkPipeline", script)
+        self.assertIn("Training and held-out validation", script)
+        self.assertIn("Artifact verified · awaiting Standby import", script)
+        self.assertIn('candidate_only: "CANDIDATE ONLY"', script)
+        for stage in (
+            "student_feature_preparation",
+            "student_training",
+            "student_validation",
+            "student_artifacts",
+        ):
+            self.assertIn(f'"{stage}"', script)
+        self.assertIn("function linkJobIsIndeterminate", script)
+        self.assertIn('progressKind === "indeterminate"', script)
+        self.assertIn("function linkJobImportState", script)
+        self.assertIn("link.recent_imports", script)
+        self.assertIn('local_import_state: "imported"', script)
+        self.assertIn("queue.locally_imported", script)
+        self.assertIn("Locally verified and imported into Lumen", script)
+        self.assertIn("Remote result complete · local import not confirmed", script)
+        self.assertIn('id="link-completed-detail"', html)
+        self.assertIn("remote finished · import unconfirmed", script)
 
     def test_lumen_link_discloses_boundaries_and_capabilities(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
@@ -217,6 +249,21 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("app.remote && app.pollCount % 100 === 0", script)
         self.assertIn('if (/^[1-8]$/.test(event.key))', script)
         self.assertIn('"music", "link", "system"', script)
+        self.assertIn("workspacePages.includes(requestedWorkspacePage)", script)
+        self.assertIn(
+            'grid-template-rows: 51px 27px 72px auto minmax(0, 1fr) 25px',
+            stylesheet,
+        )
+        self.assertIn('.workspace-page[data-page="link"] .panel-note,', stylesheet)
+        self.assertIn("font-size: .8rem;", stylesheet)
+        self.assertIn(
+            ".link-model-blockers { max-height: 5.2rem; overflow: auto;",
+            stylesheet,
+        )
+        self.assertIn(
+            ".remote-link-facts { display: grid; grid-template-columns: repeat(4, 1fr);",
+            stylesheet,
+        )
 
 
 if __name__ == "__main__":

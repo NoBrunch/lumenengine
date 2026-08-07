@@ -1,11 +1,11 @@
 # Lumen Link: Threadripper/WSL deployment
 
-Lumen Link v1 moves **offline EDMFormer song analysis** from the dedicated
-Lumen PC to the 128 GiB Threadripper. Its contract is ready to add other
-offline work after each result importer is implemented and validated. Lumen
-remains the authority for line-in timing, feedback, song memory, choreography
-and DMX. If the cable is unplugged or Windows restarts, Live continues and
-remote jobs remain queued.
+Lumen Link moves the heavy offline research pipeline from the dedicated Lumen
+PC to the 128 GiB Threadripper: full-song EDMFormer and SongFormer analysis,
+student-model training, held-out evaluation, and return of verified result
+artifacts. Lumen remains the sole authority for line-in timing, feedback, song
+memory, model activation, choreography and DMX. If the cable is unplugged or
+Windows restarts, Live continues and remote jobs remain durable.
 
 The operator dashboard stays in Lumen's KDE-inspired interface. It shows the
 node connection, CPU, memory and disk telemetry, current song/job, stage,
@@ -17,13 +17,22 @@ Lumen PC                                      Windows + WSL Threadripper
 192.168.50.2/24                               192.168.50.1/24
 
 canonical DB ── immutable HMAC job bundle ──> content-addressed job store
-Live + DMX    <── checksummed result bundle ── EDMFormer (first capability)
+Live + DMX    <── checksummed result bundle ── teachers / train / evaluation
 dashboard    <──────── status/progress ─────── dependency-free HTTP :8765
 ```
 
 Neither machine shares a writable SQLite database. Git contains source,
 schemas and examples only. It must never contain recordings, job bundles,
 tokens, the HMAC secret, runtime databases, models or learned preferences.
+
+The private link does transfer the minimum immutable inputs required by each
+job. Teacher jobs transfer their captured song WAV plus a versioned manifest.
+Student training transfers selected, checksummed training examples and their
+required local audio objects—not the writable Lumen database. Returned teacher
+timelines, candidate models, and held-out evaluation reports are also private
+runtime artifacts. They stay under ignored `state/` trees on both computers
+and must never be staged with Git, attached to an issue, or pasted into a
+Codex conversation.
 
 ## Before beginning
 
@@ -171,9 +180,9 @@ Enter the Linux password when `sudo` asks. Provisioning installs:
   to put on `PATH`.
 - Python 3.10.20 through pyenv for the isolated SongFormer environment.
 - The exact frozen CPU PyTorch 2.4, MuQ, MusicFM, EDMFormer and SongFormer
-  dependencies already pinned in `config/research/`. The first Lumen Link
-  release executes EDMFormer remotely. SongFormer and student training are
-  provisioned but visibly gated until their immutable result importers exist.
+  dependencies already pinned in `config/research/`.
+- Lumen's dependency-light core environment for student training, held-out
+  validation, artifact packaging, and the authenticated compute service.
 - Verified model assets and source revisions from `research-lock.json`.
 - A local 256-bit HMAC secret with mode `600`.
 - A user service at `~/.config/systemd/user/lumen-link-worker.service`.
@@ -197,6 +206,7 @@ Keep the worker alive across WSL sessions:
 sudo loginctl enable-linger "$USER"
 ./scripts/lumen-link-wsl verify
 ./scripts/lumen-link-wsl start
+./scripts/lumen-link-wsl capabilities
 ./scripts/lumen-link-wsl status
 ```
 
@@ -211,7 +221,30 @@ Normal controls are:
 ```
 
 `verify` is intentionally thorough and loads the model heads. `status` is the
-quick, non-mutating everyday check.
+quick, non-mutating everyday check. `capabilities` authenticates to the
+running local worker and must report all three job types as `READY`:
+
+```text
+teacher.edmformer
+teacher.songformer
+student.train
+```
+
+`logs` follows new service messages continuously. Press `Ctrl+C` when you are
+finished reading them; that stops only the log viewer, not the worker.
+
+`student.train` includes held-out validation. Its return bundle contains the
+candidate model and evaluation report; the Threadripper cannot activate that
+model. Lumen verifies and imports the artifacts locally, and its existing
+held-out activation rules remain authoritative.
+
+The worker processes one heavy job at a time. This keeps the authenticated
+status service responsive while EDMFormer, SongFormer, and student training
+use their appropriate isolated environments. The default worker ceiling is
+96 GiB on this 128 GiB computer. Exceeding it fails the disposable job instead
+of exhausting Windows and WSL. The general worker ceiling is 24 CPU threads;
+EDMFormer is automatically limited to its validated eight-thread runner
+maximum, while SongFormer and student training may use the wider ceiling.
 
 ## 4. Configure the dedicated Windows Ethernet port
 
@@ -367,20 +400,24 @@ Disconnected → Authenticating → Ready → Uploading → Analyzing
 
 Before sending a real song, use **Test connection**. You can perform the same
 authenticated health check at the Lumen terminal with
-`./scripts/lumen-link test`. A successful test authenticates the worker and
-compares its code, teacher, model, preprocessing and ontology contract with
-the Lumen PC.
+`./scripts/lumen-link test`. That terminal check authenticates the worker and
+requires all three job capabilities. The dashboard additionally compares each
+job's code, teacher/model, preprocessing and ontology contract with the Lumen
+PC before allowing it to be routed.
 
-There is intentionally no per-song offload selector in v1. The coordinator
-chooses the next eligible automatic EDMFormer job and routes only one job at a
-time. Use that behavior for the first canary:
+There is intentionally no per-song offload selector. The coordinator chooses
+the next eligible automatic supported job and routes only one job at a time.
+Teacher work naturally precedes the student-training job that consumes its
+examples. Use that behavior for the first canary:
 
 1. Press **Enable link**. Wait for the first job to appear as uploading or
    running.
 2. Press **Disable link** while that first job is active. Other queued
    automatic jobs return to local eligibility; the already-active remote job
    is allowed to finish and import its verified result.
-3. Inspect that job's result, event history and imported timeline.
+3. Inspect that job's result and event history. For a teacher job, inspect the
+   imported timeline. For `student.train`, inspect the candidate and held-out
+   evaluation; activation remains a separate local decision.
 4. If the canary is correct, press **Enable link** again for sequential bulk
    processing. **Pause dispatch** temporarily stops new routing; **Disable
    link** returns unstarted queued work to automatic/local eligibility. An
@@ -392,10 +429,12 @@ During the canary, confirm:
 - unplugging Ethernet leaves the job queued and does not affect Live;
 - reconnecting resumes without creating a duplicate job;
 - the result checksum and code/model revisions verify before import;
-- only `teacher.edmformer` is shown as available; SongFormer and student
-  training remain clearly gated;
-- a future remote candidate cannot become active until held-out validation
-  passes.
+- `teacher.edmformer`, `teacher.songformer`, and `student.train` are all shown
+  as available;
+- returned teacher timelines, candidate models and evaluation reports verify
+  their immutable object hashes and job contract before local import;
+- a remote candidate cannot become active merely because the remote job
+  completed; Lumen's held-out validation and activation rules still apply.
 
 Those cable/restart cases are physical acceptance work, not claims that this
 deployment package has already exercised the two computers.

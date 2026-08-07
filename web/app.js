@@ -1,5 +1,8 @@
 "use strict";
 
+const workspacePages = ["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system"];
+const requestedWorkspacePage = new URLSearchParams(window.location.search).get("page");
+
 const app = {
   remote: window.location.pathname === "/remote",
   bootstrap: null,
@@ -7,7 +10,7 @@ const app = {
   system: null,
   memory: null,
   spotify: null,
-  page: "performance",
+  page: workspacePages.includes(requestedWorkspacePage) ? requestedWorkspacePage : "performance",
   selectedFixtureId: null,
   roomView: "plan",
   rigView: "plan",
@@ -310,7 +313,7 @@ function selectedFixture() {
 }
 
 function setPage(name) {
-  if (!["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system"].includes(name)) return;
+  if (!workspacePages.includes(name)) return;
   app.page = name;
   $$(".workspace-page").forEach((page) => page.classList.toggle("active", page.dataset.page === name));
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.nav === name));
@@ -574,6 +577,7 @@ async function initialize() {
     app.system = app.bootstrap.system;
     app.memory = app.bootstrap.memory;
     app.link = app.bootstrap.link || null;
+    setPage(app.page);
     renderBootstrap();
     renderStatus();
     await refreshSongTeaching();
@@ -1843,6 +1847,258 @@ function renderTrainingDataset(training = {}, engine = {}) {
   if (settingsButton) settingsButton.disabled = Boolean(engine.running);
 }
 
+function linkJobTypeLabel(jobType) {
+  return {
+    "teacher.edmformer": "EDMFormer teacher",
+    "teacher.songformer": "SongFormer teacher",
+    "student.train": "Neural student",
+  }[String(jobType || "").toLowerCase()] || label(jobType || "task");
+}
+
+const linkStudentComputeStages = new Set([
+  "student_feature_preparation",
+  "student_training",
+  "student_validation",
+  "student_artifacts",
+]);
+
+function linkJobImportState(job) {
+  const jobRecord = job?.job || job || {};
+  const local = job?.local_import || job?.canonical || {};
+  const result = job?.local_result || job?.result || jobRecord.result || {};
+  const explicit = String(
+    job?.local_import_state || job?.import_state || local.state
+    || job?.canonical_status || result.local_import_state || "",
+  ).toLowerCase();
+  const locallyImported = Boolean(
+    job?.locally_imported ?? job?.local_verified ?? local.imported
+    ?? result.locally_imported ?? result.local_revalidated
+    ?? (["imported", "verified", "complete"].includes(explicit) || undefined),
+  );
+  const awaitingImport = ["awaiting_local_import", "awaiting_import", "pending"].includes(explicit)
+    || String(job?.stage || "").toLowerCase() === "awaiting_local_import";
+  return { locallyImported, awaitingImport, explicit };
+}
+
+function linkJobIsIndeterminate(job, stageName) {
+  const stage = String(stageName || "").toLowerCase();
+  const progressKind = String(
+    job?.progress_kind || job?.remote?.progress_kind
+    || job?.progress?.kind || "",
+  ).toLowerCase();
+  return progressKind === "indeterminate"
+    || stage === "inference"
+    || linkStudentComputeStages.has(stage);
+}
+
+function linkJobPhase(job, jobType, stateName, stageName) {
+  const stage = String(stageName || "").toLowerCase();
+  const state = String(stateName || "").toLowerCase();
+  const importState = linkJobImportState(job);
+  if (stage === "awaiting_local_import") return "Artifact verified · awaiting Standby import";
+  if (["return", "returning", "result", "download"].includes(stage)) return "Returning immutable artifact";
+  if (["import", "importing", "verification", "verifying"].includes(stage)) return "Verifying and importing locally";
+  if (stage === "transfer" || stage === "upload") return "Sending immutable input";
+  if (stage === "student_feature_preparation") return "Preparing synchronized audio features";
+  if (stage === "student_training") return "Training the causal student";
+  if (stage === "student_validation") return "Running held-out validation";
+  if (stage === "student_artifacts") return "Publishing candidate artifacts";
+  if (stage === "inference") {
+    return jobType === "student.train"
+      ? "Training and held-out validation"
+      : "Full-song teacher inference";
+  }
+  if (["remote", "submitted"].includes(stage)) return "Accepted by compute node";
+  if (state === "complete" || stage === "complete") {
+    return importState.locallyImported
+      ? "Locally verified and imported into Lumen"
+      : "Remote result complete · local import not confirmed";
+  }
+  if (state === "failed" || stage === "failed") return "Stopped with an error";
+  if (state === "queued" || stage === "queued") return "Awaiting eligible dispatch";
+  return job?.detail || stageName || "Waiting for worker status";
+}
+
+function renderLinkArtifactFlow(currentJob) {
+  const jobRecord = currentJob?.job || currentJob || {};
+  const jobType = currentJob
+    ? String(currentJob.type || currentJob.job_type || jobRecord.job_type || "task")
+    : "";
+  const stage = String(currentJob?.stage || "").toLowerCase();
+  const state = String(
+    currentJob?.state || currentJob?.status || jobRecord.status || stage,
+  ).toLowerCase();
+  const remoteComplete = state === "complete" || stage === "complete";
+  const importState = linkJobImportState(currentJob);
+  const complete = importState.locallyImported;
+  const failed = state === "failed" || stage === "failed";
+  const computeStages = ["remote", "submitted", "queued_remote", "inference", "running", ...linkStudentComputeStages];
+  const returnStages = ["return", "returning", "result", "download"];
+  const importStages = ["awaiting_local_import", "import", "importing", "verification", "verifying"];
+  const steps = [
+    {
+      id: "link-flow-dispatch",
+      active: Boolean(currentJob) && ["queued", "transfer", "upload"].includes(stage || state),
+      done: Boolean(currentJob) && !["queued", "transfer", "upload"].includes(stage || state),
+      detail: !currentJob ? "waiting" : ["transfer", "upload"].includes(stage) ? "uploading input" : "claimed",
+    },
+    {
+      id: "link-flow-compute",
+      active: computeStages.includes(stage),
+      done: remoteComplete || returnStages.includes(stage) || importStages.includes(stage),
+      detail: !currentJob ? "waiting" : linkStudentComputeStages.has(stage) ? linkJobPhase(currentJob, jobType, state, stage) : stage === "inference" ? linkJobTypeLabel(jobType) : "worker execution",
+    },
+    {
+      id: "link-flow-return",
+      active: returnStages.includes(stage) || (remoteComplete && !complete),
+      done: complete || importStages.includes(stage),
+      detail: !currentJob ? "waiting" : remoteComplete && !complete ? "result ready on worker" : importStages.includes(stage) ? "artifact verified" : "immutable result",
+    },
+    {
+      id: "link-flow-import",
+      active: importStages.includes(stage),
+      done: complete,
+      detail: !currentJob ? "waiting" : complete ? "locally verified" : stage === "awaiting_local_import" ? "waiting for Standby" : "canonical memory",
+    },
+  ];
+  for (const step of steps) {
+    const element = $(step.id);
+    if (!element) continue;
+    element.className = failed ? "failed" : step.active ? "active" : step.done ? "complete" : "";
+    const detail = element.querySelector("small");
+    if (detail) detail.textContent = failed && step.active ? "failed" : step.detail;
+  }
+}
+
+function renderLinkPipeline(link, rawCapabilities, currentJob) {
+  const pipeline = link.pipeline || {};
+  const engines = Array.isArray(pipeline.engine_capabilities)
+    ? pipeline.engine_capabilities
+    : [
+        ["teacher.edmformer", "Energy sections and EDM boundaries"],
+        ["teacher.songformer", "Functional form, content role and boundaries"],
+        ["student.train", "Causal student training and held-out validation"],
+      ].map(([jobType, role]) => {
+        const reason = rawCapabilities.gated_job_types?.[jobType];
+        return {
+          job_type: jobType,
+          role,
+          state: reason ? "gated" : rawCapabilities.supported_job_types?.includes(jobType) ? "available" : "unavailable",
+          reason: reason || "The worker has not reported this capability.",
+        };
+      });
+  const engineGrid = $("link-engine-grid");
+  if (engineGrid) {
+    engineGrid.innerHTML = engines.map((engine) => {
+      const jobType = String(engine.job_type || "");
+      const state = String(engine.state || "unavailable").toLowerCase();
+      const engineName = jobType === "teacher.edmformer"
+        ? "EDMFormer"
+        : jobType === "teacher.songformer"
+          ? "SongFormer"
+          : jobType === "student.train"
+            ? "Neural student"
+            : linkJobTypeLabel(jobType);
+      const engineRole = jobType === "teacher.edmformer"
+        ? "ENERGY TEACHER"
+        : jobType === "teacher.songformer"
+          ? "FORM TEACHER"
+          : "STREAMING STUDENT";
+      const reason = engine.reason || (state === "available" ? "Verified worker contract" : "Not reported by worker");
+      return `<article class="link-engine-card ${escapeHtml(state)}" title="${escapeHtml(reason)}">
+        <span>${escapeHtml(engineRole)}</span><strong>${escapeHtml(engineName)}</strong>
+        <b>${escapeHtml(state === "available" ? "AVAILABLE" : state === "gated" ? "GATED" : "UNAVAILABLE")}</b>
+        <p>${escapeHtml(engine.role || reason)}</p><small>${escapeHtml(reason)}</small>
+      </article>`;
+    }).join("");
+  }
+  const axisTeachers = pipeline.axis_teachers || {};
+  setText(
+    "link-axis-authority",
+    ["energy", "functional", "content", "boundary"]
+      .map((axis) => `${label(axis)} ${axisTeachers[axis] || "—"}`)
+      .join(" · "),
+  );
+  setText(
+    "link-pipeline-freshness",
+    pipeline.readiness_created_unix_ms
+      ? `${pipeline.readiness_refreshing ? "Refreshing · " : "Verified · "}${formatElapsed(pipeline.readiness_created_unix_ms)}`
+      : "Awaiting verified pipeline state",
+  );
+
+  const student = pipeline.student || {};
+  const validation = student.validation || {};
+  const activation = student.activation || {};
+  const candidateState = !student.candidate_present
+    ? "NONE"
+    : student.candidate_current
+      ? "CURRENT"
+      : "STALE";
+  setText("link-candidate-state", candidateState);
+  setText(
+    "link-candidate-detail",
+    student.candidate_present
+      ? student.candidate_current
+        ? "Artifact matches the currently trusted teacher runs and operator consensus."
+        : "Artifact exists, but its teacher or operator provenance is no longer current."
+      : student.train_ready
+        ? "Teacher examples are ready for a new student candidate."
+        : "Teacher collection or dataset requirements are not ready yet.",
+  );
+  const validationLabels = {
+    not_run: "NOT RUN", stale: "STALE", failed: "FAILED", partial: "PARTIAL PASS", passed: "PASSED", error: "ERROR",
+  };
+  const validationState = String(validation.state || "not_run").toLowerCase();
+  setText("link-validation-state", validationLabels[validationState] || label(validationState).toUpperCase());
+  const splitCounts = validation.split_group_counts || {};
+  const splitDetail = validation.held_out_split
+    ? `${label(validation.held_out_split)} held-out split · ${Number(splitCounts[validation.held_out_split] || 0)} independent song groups`
+    : "No held-out candidate evaluation is available.";
+  setText("link-validation-detail", splitDetail);
+  const approvedAxes = Array.isArray(validation.approved_axes) ? validation.approved_axes : [];
+  const inactiveAxes = Array.isArray(validation.inactive_axes) ? validation.inactive_axes : [];
+  setText("link-approved-axes", approvedAxes.length ? approvedAxes.map(label).join(" · ") : "—");
+  setText(
+    "link-inactive-axes",
+    inactiveAxes.length ? `Not approved: ${inactiveAxes.map(label).join(", ")}` : approvedAxes.length ? "No evaluated axis is inactive." : "No axis decision yet.",
+  );
+  const activationState = String(activation.state || "inactive").toLowerCase();
+  const activationLabels = { active: "ACTIVE", authorized: "AUTHORIZED", stale: "STALE", candidate_only: "CANDIDATE ONLY", inactive: "INACTIVE" };
+  setText("link-activation-state", activationLabels[activationState] || label(activationState).toUpperCase());
+  setText(
+    "link-activation-detail",
+    activationState === "active"
+      ? `Loaded by Live · ${label(activation.runtime_state || "ready")}`
+      : activationState === "authorized"
+        ? `Current approved artifact is not loaded · runtime ${label(activation.runtime_state || "idle")}`
+      : activationState === "candidate_only"
+        ? "Candidate remains separate until its held-out gate authorizes one or more axes."
+        : activationState === "stale"
+          ? "An older artifact exists but is not current for this dataset."
+          : "Live continues using its current structural source.",
+  );
+  const blockers = [
+    ...(student.training_blockers || []),
+    ...(validation.gate_reasons || []),
+    ...Object.entries(validation.axis_gate_reasons || {}).flatMap(([axis, reasons]) =>
+      (reasons || []).map((reason) => `${label(axis)}: ${reason}`)),
+    ...(activation.blockers || []),
+  ];
+  const uniqueBlockers = [...new Set(blockers.filter(Boolean))];
+  setText(
+    "link-model-blockers",
+    uniqueBlockers.length ? uniqueBlockers.join(" · ") : "No reported training, validation or activation blocker.",
+  );
+  const modelBadge = $("link-model-state");
+  if (modelBadge) {
+    const stateClass = activationState === "active" ? "complete" : ["failed", "error", "stale"].includes(validationState) ? "failed" : validationState === "partial" ? "paused" : "";
+    modelBadge.className = `panel-badge ${stateClass}`;
+    modelBadge.textContent = activationState === "active" ? "LIVE ACTIVE" : candidateState === "NONE" ? "NO CANDIDATE" : `${candidateState} CANDIDATE`;
+  }
+  setText("remote-link-model", activationState === "active" ? "ACTIVE" : validationLabels[validationState] || "—");
+  renderLinkArtifactFlow(currentJob);
+}
+
 function renderLink(link = {}) {
   const connection = link.connection || {};
   const local = link.local_node || link.local || {};
@@ -1910,20 +2166,54 @@ function renderLink(link = {}) {
     remote.address || setup.endpoint || "Awaiting WSL node",
   );
 
+  const hasLocalCompletionCount = queue.completed !== undefined
+    || queue.imported !== undefined || queue.locally_imported !== undefined;
+  const completedCount = queue.completed ?? queue.imported
+    ?? queue.locally_imported ?? queue.remote?.complete;
   for (const [id, value] of [
     ["link-queued", queue.queued],
     ["link-running", queue.running ?? queue.remote?.running],
-    ["link-completed", queue.completed ?? queue.remote?.complete],
+    ["link-completed", completedCount],
     ["link-failed", queue.failed ?? queue.remote?.failed],
   ]) setText(id, Number(value || 0).toLocaleString());
+  setText(
+    "link-completed-detail",
+    hasLocalCompletionCount ? "locally verified and imported" : "remote finished · import unconfirmed",
+  );
   setText("remote-link-queued", Number(queue.queued || 0).toLocaleString());
   setText("remote-link-running", Number(queue.running ?? queue.remote?.running ?? 0).toLocaleString());
   setText("link-transfer-total", formatBytes(queue.bytes_transferred));
   setText("link-transfer-pending", formatBytes(queue.bytes_pending ?? queue.bytes));
   setText("link-queue-state", link.paused ? "PAUSED" : Number(queue.running ?? queue.remote?.running ?? 0) ? "ACTIVE" : "IDLE");
 
-  const jobs = Array.isArray(link.jobs) ? [...link.jobs] : [];
-  jobs.sort((a, b) => Number(b.updated_unix_ms || b.job?.updated_unix_ms || b.submitted_unix_ms || 0) - Number(a.updated_unix_ms || a.job?.updated_unix_ms || a.submitted_unix_ms || 0));
+  const recentImports = Array.isArray(link.recent_imports) ? link.recent_imports : [];
+  const importedByJob = new Map(
+    recentImports.map((receipt) => [String(receipt.job_id || ""), receipt]),
+  );
+  const jobs = (Array.isArray(link.jobs) ? link.jobs : []).map((job) => {
+    const jobRecord = job.job || job;
+    const receipt = importedByJob.get(String(jobRecord.id || jobRecord.job_id || ""));
+    return receipt && job.locally_imported === undefined
+      ? { ...job, locally_imported: true, local_import_state: "imported", import_receipt: receipt }
+      : { ...job };
+  });
+  const knownJobIds = new Set(
+    jobs.map((job) => String((job.job || job).id || (job.job || job).job_id || "")),
+  );
+  for (const receipt of recentImports) {
+    if (!receipt.job_id || knownJobIds.has(String(receipt.job_id))) continue;
+    jobs.push({
+      job_id: receipt.job_id,
+      job_type: receipt.job_type,
+      status: "complete",
+      stage: "complete",
+      locally_imported: true,
+      local_import_state: "imported",
+      imported_unix_ms: receipt.imported_unix_ms,
+      import_receipt: receipt,
+    });
+  }
+  jobs.sort((a, b) => Number(b.updated_unix_ms || b.job?.updated_unix_ms || b.imported_unix_ms || b.submitted_unix_ms || 0) - Number(a.updated_unix_ms || a.job?.updated_unix_ms || a.imported_unix_ms || a.submitted_unix_ms || 0));
   const currentJob = jobs.find((job) => {
     const stateName = String(job.state || job.status || job.job?.status || job.stage || "").toLowerCase();
     return !["complete", "failed", "canceled"].includes(stateName);
@@ -1931,7 +2221,7 @@ function renderLink(link = {}) {
   const currentStage = String(currentJob?.stage || "").toLowerCase();
   const currentProgress = meterRatio(currentJob?.progress);
   const currentIndeterminate = Boolean(
-    currentJob && currentStage === "inference" && currentProgress <= 0.1,
+    currentJob && linkJobIsIndeterminate(currentJob, currentStage),
   );
   setText(
     "remote-link-progress",
@@ -1958,21 +2248,22 @@ function renderLink(link = {}) {
         ? `${formatBytes(bytesDone)} / ${formatBytes(bytesTotal)}${Number(transfer.rate_bytes_s) > 0 ? ` · ${formatBytes(transfer.rate_bytes_s)}/s` : ""}`
         : "";
       const stageName = String(job.stage || "queued").toLowerCase();
-      const indeterminate = stageName === "inference" && progress <= 0.1;
       const stateName = String(
         job.state || job.status || jobRecord.status
         || (["complete", "failed", "canceled"].includes(stageName) ? stageName : "running"),
       ).toLowerCase();
-      const stage = job.stage || job.detail || "Waiting for worker status";
+      const indeterminate = !["complete", "failed", "canceled"].includes(stateName)
+        && linkJobIsIndeterminate(job, stageName);
       const jobType = job.type || job.job_type || jobRecord.job_type || "task";
+      const phase = linkJobPhase(job, jobType, stateName, stageName);
       const jobName = job.name || jobIdentity.title || jobPayload.title
-        || `${label(jobType)} · ${String(jobRecord.id || "job").slice(0, 12)}`;
-      const updatedAt = job.updated_unix_ms || jobRecord.updated_unix_ms;
+        || `${linkJobTypeLabel(jobType)} · ${String(jobRecord.id || jobRecord.job_id || "job").slice(0, 12)}`;
+      const updatedAt = job.updated_unix_ms || jobRecord.updated_unix_ms || job.imported_unix_ms;
       return `<article class="link-job">
         <div class="link-job-copy">
           <strong>${escapeHtml(jobName)}</strong>
-          <span>${escapeHtml(label(jobType))} · ${escapeHtml(stage)}</span>
-          <small>${escapeHtml(job.id || jobRecord.id || "unassigned")}</small>
+          <span>${escapeHtml(linkJobTypeLabel(jobType))} · ${escapeHtml(phase)}</span>
+          <small>${escapeHtml(job.id || jobRecord.id || jobRecord.job_id || "unassigned")}</small>
         </div>
         <div class="link-job-progress${indeterminate ? " indeterminate" : ""}">
           <div><i style="width:${Math.round(progress * 100)}%"></i></div>
@@ -2081,6 +2372,7 @@ function renderLink(link = {}) {
     : capabilities
       .filter((capability) => Boolean(capability.available ?? capability.supported))
       .map((capability) => capability.name || capability.type);
+  renderLinkPipeline(link, rawCapabilities, currentJob || jobs[0]);
   const workerCompatible = Boolean(
     authenticated
     && state === "ready"

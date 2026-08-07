@@ -30,6 +30,7 @@ from lumen_engine.choreography import (
 )
 from lumen_engine.dmx import VirtualDMXOutput
 from lumen_engine.expression import ExpressionPolicy
+from lumen_engine.link import STUDENT_TRAIN_JOB
 from lumen_engine.models import MediaIdentity, MusicalObservation
 from lumen_engine.memory import (
     EDMFORMER_PREPROCESSING_VERSION,
@@ -60,7 +61,13 @@ class ControlApplicationTests(unittest.TestCase):
             worker_pid=os.getpid(),
         )
         self.assertIsNotNone(claimed)
-        snapshot = self.application.start("demo")
+        with patch.object(
+            self.application.lumen_link,
+            "live_transition_guard",
+            wraps=self.application.lumen_link.live_transition_guard,
+        ) as guard:
+            snapshot = self.application.start("demo")
+        guard.assert_called_once_with()
         self.assertEqual(snapshot["engine"]["mode"], "demo")
         self.application.stop()
 
@@ -1744,6 +1751,13 @@ class ControlApplicationTests(unittest.TestCase):
                 status = json.load(response)
                 self.assertEqual(response.status, 200)
             self.assertEqual(status["schema"], "lumen.link.v1")
+            self.assertEqual(
+                status["pipeline"]["source"],
+                "cached_verified_research_readiness",
+            )
+            self.assertEqual(
+                len(status["pipeline"]["engine_capabilities"]), 3
+            )
             with urlopen(
                 "http://127.0.0.1:"
                 f"{server.server_address[1]}/api/link/status?summary=1",
@@ -1792,6 +1806,119 @@ class ControlApplicationTests(unittest.TestCase):
             server.shutdown()
             ThreadingHTTPServer.server_close(server)
             thread.join(timeout=3)
+
+    def test_remote_student_import_hot_loads_without_restart(self) -> None:
+        loaded = threading.Event()
+        refreshed = threading.Event()
+        sentinel = object()
+
+        def load_model():
+            self.application._student_model = sentinel
+            loaded.set()
+
+        with patch.object(
+            self.application,
+            "_load_student_model",
+            side_effect=load_model,
+        ), patch.object(
+            self.application,
+            "_refresh_research_readiness_cache",
+            side_effect=lambda: refreshed.set(),
+        ):
+            self.application._on_lumen_link_import(
+                {"id": "job:remote-student", "job_type": STUDENT_TRAIN_JOB},
+                {"activated": True, "approved_axes": ["energy"]},
+            )
+            self.assertTrue(loaded.wait(1.0))
+            self.assertTrue(refreshed.wait(1.0))
+        self.assertIs(self.application._student_model, sentinel)
+        self.assertIsNone(self.application._research_readiness_cache)
+        self.assertTrue(any(
+            "Imported Threadripper student.train result" in event["message"]
+            for event in self.application.events
+        ))
+
+    def test_link_status_projects_cached_student_gate_without_a_new_audit(
+        self,
+    ) -> None:
+        class RejectDeepCopy:
+            def __deepcopy__(self, memo):
+                del memo
+                raise AssertionError("unrelated readiness data was copied")
+
+        self.application._research_readiness_cache = {
+            "schema": "lumen_operator_readiness_cache_v1",
+            "created_unix_ms": 123456,
+            "training": {
+                "unused_large_payload": RejectDeepCopy(),
+                "train_ready": True,
+                "activation_blockers": ["one more independent test song"],
+                "progress": 0.75,
+                "teacher_jobs_complete": 6,
+                "teacher_jobs_remaining": 2,
+                "usable_examples": 400,
+                "ontology": {
+                    "axis_teachers": {
+                        "energy": "EDMFormer",
+                        "functional": "SongFormer",
+                        "content": "SongFormer",
+                        "boundary": "EDMFormer + SongFormer",
+                    }
+                },
+                "model": {
+                    "candidate": True,
+                    "candidate_provenance_current": True,
+                    "active": False,
+                    "active_artifact_exists": False,
+                    "evaluation": {
+                        "unused_per_song_detail": RejectDeepCopy(),
+                        "activated": True,
+                        "held_out_split": "test",
+                        "approved_axes": ["energy", "boundary"],
+                        "inactive_axes": ["functional"],
+                        "axis_gate_reasons": {
+                            "functional": ["below held-out baseline"]
+                        },
+                        "split_group_counts": {"test": 2},
+                    },
+                },
+            },
+        }
+        remote = {
+            "schema": "lumen.link.v1",
+            "capabilities": {
+                "supported_job_types": [
+                    "teacher.edmformer",
+                    "teacher.songformer",
+                    "student.train",
+                ],
+                "gated_job_types": {
+                    "teacher.songformer": "result importer unavailable"
+                },
+            },
+        }
+        with patch.object(
+            self.application.lumen_link, "status", return_value=remote
+        ), patch.object(
+            self.application, "research_status"
+        ) as full_audit:
+            status = self.application.lumen_link_status()
+
+        full_audit.assert_not_called()
+        engines = {
+            item["job_type"]: item
+            for item in status["pipeline"]["engine_capabilities"]
+        }
+        self.assertEqual(engines["teacher.edmformer"]["state"], "available")
+        self.assertEqual(engines["teacher.songformer"]["state"], "gated")
+        self.assertEqual(engines["student.train"]["state"], "available")
+        student = status["pipeline"]["student"]
+        self.assertEqual(student["validation"]["state"], "partial")
+        self.assertEqual(
+            student["validation"]["approved_axes"], ["energy", "boundary"]
+        )
+        self.assertEqual(student["activation"]["state"], "candidate_only")
+        self.assertNotIn("unused_large_payload", status["pipeline"])
 
     def test_http_status_body_is_shared_across_concurrent_ui_reads(
         self,

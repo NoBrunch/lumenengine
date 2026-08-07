@@ -61,7 +61,7 @@ from lumen_engine.memory import (
     SongMemoryStore,
     TEACHER_NORMALIZATION_VERSION,
 )
-from lumen_engine.link import LumenLinkCoordinator
+from lumen_engine.link import LinkStandbyRequired, LumenLinkCoordinator
 from lumen_engine.models import (
     Feedback,
     MediaIdentity,
@@ -468,6 +468,7 @@ class LumenApplication:
                 self.engine_mode == "standby"
                 and not (self._thread and self._thread.is_alive())
             ),
+            on_import=self._on_lumen_link_import,
         )
         # The exact readiness audit verifies checksums and parses every trusted
         # teacher-example file.  On the installed library that is roughly a
@@ -724,6 +725,45 @@ class LumenApplication:
             self._student_model_signature = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             self._student_model_signature = None
+
+    def _on_lumen_link_import(
+        self, job: dict[str, Any], imported: dict[str, Any]
+    ) -> None:
+        """Publish remote offline results through the local standby path."""
+
+        def refresh() -> None:
+            try:
+                # Keep model loading and the database-heavy readiness rebuild
+                # inside the same standby lease used by Link imports.  Starting
+                # Live either waits for this bounded handoff or wins the lease
+                # first; these operations can never overlap the DMX loop.
+                with self.lumen_link.standby_task_guard():
+                    with self._research_readiness_lock:
+                        self._research_readiness_cache = None
+                        self._research_readiness_error = None
+                    if (
+                        job.get("job_type") == STUDENT_TRAIN_JOB
+                        and bool(imported.get("activated"))
+                    ):
+                        with self._lock:
+                            self._load_student_model()
+                    self._refresh_research_readiness_cache()
+                    with self._lock:
+                        self._add_event(
+                            "memory",
+                            f"Imported Threadripper {job.get('job_type')} result",
+                        )
+                        self._status_sequence += 1
+            except LinkStandbyRequired:
+                # A later standby status/readiness request will rebuild the
+                # cache; never make a Live transition wait on newly queued work.
+                return
+
+        threading.Thread(
+            target=refresh,
+            name="lumen-link-post-import",
+            daemon=True,
+        ).start()
 
     def _reset_student_stream(
         self, *, reset_physical_silence: bool = True
@@ -2335,7 +2375,7 @@ class LumenApplication:
             )
             for job in self.memory.list_analysis_jobs(limit=100_000)
         )
-        with self._lock:
+        with self.lumen_link.live_transition_guard(), self._lock:
             if self._thread is not None and self._thread.is_alive():
                 if self.engine_mode == normalized:
                     return self.snapshot()
@@ -4289,6 +4329,266 @@ class LumenApplication:
         result["training"] = training
         return result
 
+    def lumen_link_status(self) -> dict[str, Any]:
+        """Compose Link telemetry with the last verified model-pipeline state.
+
+        Link polling must remain harmless while Live is running.  In particular,
+        it must not perform the full readiness audit, parse teacher examples, or
+        load a model artifact.  The research cache already contains the last
+        verified answer, so this method projects only the small fields needed by
+        the operator dashboard.
+        """
+
+        status = self.lumen_link.status()
+        with self._research_readiness_lock:
+            cached = self._research_readiness_cache
+            readiness_error = self._research_readiness_error
+            readiness_thread = self._research_readiness_thread
+            readiness_created_unix_ms = (
+                cached.get("created_unix_ms")
+                if isinstance(cached, dict)
+                else None
+            )
+            training_source = (
+                cached.get("training") or {}
+                if isinstance(cached, dict)
+                else {}
+            )
+            ontology_source = training_source.get("ontology") or {}
+            model_source = training_source.get("model") or {}
+            evaluation_source = (
+                model_source.get("evaluation")
+                if isinstance(model_source.get("evaluation"), dict)
+                else {}
+            )
+            # Do not copy the full readiness record here. Mature libraries can
+            # carry large label-balance, exclusion and per-song evaluation
+            # structures. Link polling needs only this bounded projection.
+            training = {
+                "train_ready": bool(training_source.get("train_ready")),
+                "blockers": list(training_source.get("blockers") or []),
+                "activation_blockers": list(
+                    training_source.get("activation_blockers") or []
+                ),
+                "teacher_jobs_complete": int(
+                    training_source.get("teacher_jobs_complete") or 0
+                ),
+                "teacher_jobs_remaining": int(
+                    training_source.get("teacher_jobs_remaining") or 0
+                ),
+                "usable_examples": int(
+                    training_source.get("usable_examples") or 0
+                ),
+                "progress": float(training_source.get("progress") or 0.0),
+                "split_group_counts": dict(
+                    training_source.get("split_group_counts") or {}
+                ),
+                "ontology": {
+                    "axis_teachers": dict(
+                        ontology_source.get("axis_teachers") or {}
+                    )
+                },
+                "model": {
+                    "candidate": bool(model_source.get("candidate")),
+                    "candidate_provenance_current": bool(
+                        model_source.get("candidate_provenance_current")
+                    ),
+                    "candidate_path": model_source.get("candidate_path"),
+                    "active_artifact_exists": bool(
+                        model_source.get("active_artifact_exists")
+                    ),
+                    "artifact_present": bool(
+                        model_source.get("artifact_present")
+                    ),
+                    "active_provenance_current": bool(
+                        model_source.get("active_provenance_current")
+                    ),
+                    "evaluation": {
+                        "error": evaluation_source.get("error"),
+                        "activated": bool(
+                            evaluation_source.get("activated")
+                        ),
+                        "held_out_split": evaluation_source.get(
+                            "held_out_split"
+                        ),
+                        "approved_axes": list(
+                            evaluation_source.get("approved_axes") or []
+                        ),
+                        "inactive_axes": list(
+                            evaluation_source.get("inactive_axes") or []
+                        ),
+                        "not_applicable_axes": list(
+                            evaluation_source.get("not_applicable_axes") or []
+                        ),
+                        "gate_reasons": list(
+                            evaluation_source.get("gate_reasons")
+                            or evaluation_source.get(
+                                "activation_gate_reasons"
+                            )
+                            or []
+                        ),
+                        "axis_gate_reasons": {
+                            str(axis): list(reasons or [])
+                            for axis, reasons in (
+                                evaluation_source.get(
+                                    "axis_gate_reasons"
+                                ) or {}
+                            ).items()
+                        },
+                        "test_population_reliable": evaluation_source.get(
+                            "test_population_reliable"
+                        ),
+                        "split_group_counts": dict(
+                            evaluation_source.get("split_group_counts") or {}
+                        ),
+                    },
+                },
+            }
+        with self._lock:
+            runtime_state = (
+                "error"
+                if self._student_model_error
+                else self._student_model_state
+            )
+            runtime_error = self._student_model_error
+            runtime_notice = self._student_model_notice
+            runtime_gate_reasons = list(self._student_model_gate_reasons)
+            runtime_active = self._student_model is not None
+            worker_progress = deepcopy(self._research_worker_progress)
+
+        capabilities = status.get("capabilities") or {}
+        supported = set(capabilities.get("supported_job_types") or [])
+        gated = capabilities.get("gated_job_types") or {}
+        engine_roles = {
+            "teacher.edmformer": "Energy sections and EDM boundaries",
+            "teacher.songformer": "Functional form, content role and boundaries",
+            "student.train": "Causal student training and held-out validation",
+        }
+        engine_capabilities = []
+        for job_type, role in engine_roles.items():
+            reason = gated.get(job_type)
+            state = (
+                "gated"
+                if reason
+                else "available"
+                if job_type in supported
+                else "unavailable"
+            )
+            engine_capabilities.append(
+                {
+                    "job_type": job_type,
+                    "role": role,
+                    "state": state,
+                    "reason": str(reason or ""),
+                }
+            )
+
+        model = training.get("model") or {}
+        evaluation = (
+            model.get("evaluation")
+            if isinstance(model.get("evaluation"), dict)
+            else {}
+        )
+        approved_axes = list(evaluation.get("approved_axes") or [])
+        inactive_axes = list(evaluation.get("inactive_axes") or [])
+        gate_reasons = list(
+            evaluation.get("gate_reasons")
+            or evaluation.get("activation_gate_reasons")
+            or []
+        )
+        if evaluation.get("error"):
+            validation_state = "error"
+        elif not model.get("candidate"):
+            validation_state = "not_run"
+        elif not model.get("candidate_provenance_current", False):
+            validation_state = "stale"
+        elif not evaluation.get("activated", False):
+            validation_state = "failed"
+        elif inactive_axes:
+            validation_state = "partial"
+        else:
+            validation_state = "passed"
+
+        if runtime_active and model.get("active_provenance_current"):
+            activation_state = "active"
+        elif model.get("active_provenance_current"):
+            activation_state = "authorized"
+        elif model.get("active_artifact_exists"):
+            activation_state = "stale"
+        elif model.get("candidate"):
+            activation_state = "candidate_only"
+        else:
+            activation_state = "inactive"
+
+        ontology = training.get("ontology") or {}
+        status["pipeline"] = {
+            "source": "cached_verified_research_readiness",
+            "readiness_created_unix_ms": readiness_created_unix_ms,
+            "readiness_refreshing": bool(
+                readiness_thread is not None and readiness_thread.is_alive()
+            ),
+            "readiness_error": readiness_error,
+            "engine_capabilities": engine_capabilities,
+            "axis_teachers": ontology.get("axis_teachers") or {
+                "energy": "EDMFormer",
+                "functional": "SongFormer",
+                "content": "SongFormer",
+                "boundary": "EDMFormer + SongFormer",
+            },
+            "teacher_collection": {
+                "complete": int(training.get("teacher_jobs_complete") or 0),
+                "remaining": int(training.get("teacher_jobs_remaining") or 0),
+                "usable_examples": int(training.get("usable_examples") or 0),
+                "progress": float(training.get("progress") or 0.0),
+            },
+            "student": {
+                "train_ready": bool(training.get("train_ready")),
+                "training_blockers": list(training.get("blockers") or []),
+                "worker_progress": worker_progress,
+                "candidate_present": bool(model.get("candidate")),
+                "candidate_current": bool(
+                    model.get("candidate_provenance_current")
+                ),
+                "candidate_path": model.get("candidate_path"),
+                "validation": {
+                    "state": validation_state,
+                    "held_out_split": evaluation.get("held_out_split"),
+                    "approved_axes": approved_axes,
+                    "inactive_axes": inactive_axes,
+                    "not_applicable_axes": list(
+                        evaluation.get("not_applicable_axes") or []
+                    ),
+                    "gate_reasons": gate_reasons,
+                    "axis_gate_reasons": evaluation.get(
+                        "axis_gate_reasons"
+                    ) or {},
+                    "test_population_reliable": evaluation.get(
+                        "test_population_reliable"
+                    ),
+                    "split_group_counts": evaluation.get(
+                        "split_group_counts"
+                    ) or training.get("split_group_counts") or {},
+                },
+                "activation": {
+                    "state": activation_state,
+                    "active": runtime_active,
+                    "artifact_present": bool(
+                        model.get("active_artifact_exists")
+                        or model.get("artifact_present")
+                    ),
+                    "provenance_current": bool(
+                        model.get("active_provenance_current")
+                    ),
+                    "runtime_state": runtime_state,
+                    "runtime_error": runtime_error,
+                    "runtime_notice": runtime_notice,
+                    "blockers": list(training.get("activation_blockers") or [])
+                    + runtime_gate_reasons,
+                },
+            },
+        }
+        return status
+
     def _recover_abandoned_research_jobs(self) -> list[dict[str, Any]]:
         """Make interrupted durable jobs resumable before queue inspection."""
         recovered = self.memory.recover_abandoned_analysis_jobs()
@@ -4384,8 +4684,12 @@ class LumenApplication:
             job_type
             for job_type in (EDMFORMER_JOB, SONGFORMER_JOB)
             if not (
-                job_type == EDMFORMER_JOB
-                and self.lumen_link.ready_for_offload()
+                job_type in {
+                    EDMFORMER_JOB,
+                    SONGFORMER_JOB,
+                    STUDENT_TRAIN_JOB,
+                }
+                and self.lumen_link.ready_for_offload(job_type)
             )
             if any(
                 job["status"] == "queued"
@@ -4603,9 +4907,14 @@ class LumenApplication:
             research_root=self.training_root / "research",
             epochs=epochs,
         )
-        status = self.start_research_worker(
-            {"job_types": [STUDENT_TRAIN_JOB], "maximum_jobs": 1}
-        )
+        self.lumen_link.route_queued_jobs()
+        if self.lumen_link.ready_for_offload(STUDENT_TRAIN_JOB):
+            self.lumen_link.start()
+            status = self.research_status(wait_for_readiness=False)
+        else:
+            status = self.start_research_worker(
+                {"job_types": [STUDENT_TRAIN_JOB], "maximum_jobs": 1}
+            )
         return {"queued": queued, "research": status}
 
     def _run_research_batch(
@@ -7040,7 +7349,7 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 "true",
                 "yes",
             }
-            status = self.server.application.lumen_link.status()
+            status = self.server.application.lumen_link_status()
             if summary_only:
                 # The phone remote needs only enough information to show
                 # connection and active-work state. Keep the detailed event

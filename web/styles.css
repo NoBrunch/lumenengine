@@ -4525,11 +4525,16 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
 }
 
 .link-topology-panel,
+.link-engines-panel,
 .link-setup-panel { grid-column: 1 / 3; }
-.link-summary-panel { grid-column: 2; grid-row: 2; }
-.link-jobs-panel { grid-column: 1; grid-row: 2 / 4; min-height: 25rem; }
-.link-resources-panel { grid-column: 2; grid-row: 3; }
-.link-events-panel { grid-column: 1 / 3; }
+.link-topology-panel { grid-row: 1; }
+.link-engines-panel { grid-row: 2; }
+.link-summary-panel { grid-column: 2; grid-row: 3; }
+.link-jobs-panel { grid-column: 1; grid-row: 3 / 6; min-height: 25rem; }
+.link-resources-panel { grid-column: 2; grid-row: 4; }
+.link-model-panel { grid-column: 2; grid-row: 5; }
+.link-events-panel { grid-column: 1 / 3; grid-row: 6; }
+.link-setup-panel { grid-row: 7; }
 
 .link-topology {
   min-height: 15rem;
@@ -4622,6 +4627,41 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
 }
 .link-contract-note span::before { content: "✓"; margin-right: .4rem; color: var(--green); }
 
+.link-engine-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: .65rem; padding: .8rem; }
+.link-engine-card { position: relative; display: grid; grid-template-columns: 1fr auto; gap: .18rem .55rem; min-width: 0; border: 1px solid #34484b; padding: .7rem .75rem; background: linear-gradient(145deg, #101a1c, #0a1113); }
+.link-engine-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: #5a6261; }
+.link-engine-card > span { grid-column: 1 / 3; color: #758b88; font: .68rem var(--font-mono); letter-spacing: .1em; }
+.link-engine-card strong { min-width: 0; overflow: hidden; color: #c6d9d5; font-size: .9rem; text-overflow: ellipsis; white-space: nowrap; }
+.link-engine-card b { align-self: center; border: 1px solid #525f5e; padding: .15rem .3rem; color: #9aa3a1; font: .68rem var(--font-mono); }
+.link-engine-card p,
+.link-engine-card small { grid-column: 1 / 3; margin: 0; }
+.link-engine-card p { color: #91a7a3; font-size: .69rem; }
+.link-engine-card small { color: var(--faint); font-size: .8rem; line-height: 1.35; overflow-wrap: anywhere; }
+.link-engine-card.available { border-color: #376c66; }
+.link-engine-card.available::before { background: var(--green); box-shadow: 0 0 7px rgba(87, 196, 151, .55); }
+.link-engine-card.available b { border-color: #3f746d; color: var(--green); }
+.link-engine-card.gated { border-color: #685b3c; }
+.link-engine-card.gated::before { background: var(--amber); }
+.link-engine-card.gated b { border-color: #75653e; color: var(--amber); }
+.link-engine-card.unavailable::before { background: #725255; }
+.link-axis-authority { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .7rem; align-items: center; border-block: 1px solid #26383b; padding: .55rem .8rem; background: rgba(6, 12, 14, .58); }
+.link-axis-authority > span { color: #718682; font: .68rem var(--font-mono); letter-spacing: .09em; }
+.link-axis-authority > div { color: #aac2bd; font: .8rem/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.link-artifact-flow { display: grid; grid-template-columns: minmax(7rem, 1fr) 1.2rem minmax(7rem, 1fr) 1.2rem minmax(7rem, 1fr) 1.2rem minmax(7rem, 1fr); align-items: center; gap: .3rem; padding: .75rem .8rem .85rem; }
+.link-artifact-flow > span { height: 1px; background: #31474a; }
+.link-artifact-flow > div { display: grid; grid-template-columns: auto 1fr; gap: .08rem .42rem; align-items: center; min-width: 0; border: 1px solid #304346; padding: .45rem .5rem; background: #0b1416; }
+.link-artifact-flow i { grid-row: 1 / 3; display: grid; place-items: center; width: 1.35rem; height: 1.35rem; border: 1px solid #41595b; border-radius: 50%; color: #748b88; font: .62rem var(--font-mono); font-style: normal; }
+.link-artifact-flow b,
+.link-artifact-flow small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link-artifact-flow b { color: #aebfbc; font-size: .72rem; }
+.link-artifact-flow small { color: var(--faint); font-size: .68rem; }
+.link-artifact-flow > div.active { border-color: #477974; box-shadow: inset 0 0 12px rgba(76, 164, 156, .09); }
+.link-artifact-flow > div.active i { border-color: var(--cyan); color: var(--cyan-bright); box-shadow: 0 0 7px rgba(94, 203, 195, .35); }
+.link-artifact-flow > div.complete { border-color: #3d5e4c; }
+.link-artifact-flow > div.complete i { border-color: var(--green); background: rgba(72, 142, 108, .24); color: var(--green); }
+.link-artifact-flow > div.failed { border-color: #75484b; }
+.link-artifact-flow > div.failed i { border-color: var(--red); color: #e39b9e; }
+
 .link-summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #070c0e; }
 .link-summary-grid > div { display: grid; padding: .8rem; background: #10191c; }
 .link-summary-grid span { color: #718582; font: .68rem var(--font-mono); letter-spacing: .08em; }
@@ -4671,6 +4711,58 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
 .link-resource > b { color: #bcd1cd; font: .72rem var(--font-mono); text-align: right; }
 .link-resource > small { grid-column: 2 / 4; margin-top: -.3rem; color: var(--faint); font-size: .65rem; }
 
+.link-model-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #071012; }
+.link-model-grid > div { min-width: 0; padding: .68rem .72rem; background: #10191c; }
+.link-model-grid span,
+.link-model-grid b,
+.link-model-grid small { display: block; }
+.link-model-grid span { color: #718582; font: .68rem var(--font-mono); letter-spacing: .07em; }
+.link-model-grid b { margin-top: .22rem; overflow: hidden; color: #bed1cd; font: .76rem var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.link-model-grid small { margin-top: .18rem; color: var(--faint); font-size: .68rem; line-height: 1.35; }
+.link-model-blockers { max-height: 5.2rem; overflow: auto; border-top: 1px solid #27383b; padding: .55rem .72rem; color: #a79779; font-size: .69rem; line-height: 1.45; }
+
+/* This is an operator console, not microprint. Keep Link dense by wrapping and
+   scrolling its panels while preserving readable labels on the garage PC. */
+.workspace-page[data-page="link"] .panel-note,
+.workspace-page[data-page="link"] .link-node-role,
+.workspace-page[data-page="link"] .link-node p,
+.workspace-page[data-page="link"] .link-node code,
+.workspace-page[data-page="link"] .link-bridge strong,
+.workspace-page[data-page="link"] .link-bridge small,
+.workspace-page[data-page="link"] .link-contract-note,
+.workspace-page[data-page="link"] .link-summary-grid span,
+.workspace-page[data-page="link"] .link-summary-grid small,
+.workspace-page[data-page="link"] .link-transfer-summary,
+.workspace-page[data-page="link"] .link-engine-card > span,
+.workspace-page[data-page="link"] .link-engine-card b,
+.workspace-page[data-page="link"] .link-engine-card p,
+.workspace-page[data-page="link"] .link-axis-authority > span,
+.workspace-page[data-page="link"] .link-artifact-flow b,
+.workspace-page[data-page="link"] .link-artifact-flow small,
+.workspace-page[data-page="link"] .link-job-copy span,
+.workspace-page[data-page="link"] .link-job-copy small,
+.workspace-page[data-page="link"] .link-job-progress span,
+.workspace-page[data-page="link"] .link-job-state,
+.workspace-page[data-page="link"] .link-resource > span,
+.workspace-page[data-page="link"] .link-resource > b,
+.workspace-page[data-page="link"] .link-resource > small,
+.workspace-page[data-page="link"] .link-event time,
+.workspace-page[data-page="link"] .link-event span,
+.workspace-page[data-page="link"] .link-model-grid span,
+.workspace-page[data-page="link"] .link-model-grid small,
+.workspace-page[data-page="link"] .link-model-blockers,
+.workspace-page[data-page="link"] .link-setup-copy span,
+.workspace-page[data-page="link"] .link-setup-copy p,
+.workspace-page[data-page="link"] .link-setup-steps b,
+.workspace-page[data-page="link"] .link-setup-steps span,
+.workspace-page[data-page="link"] .link-capability,
+.workspace-page[data-page="link"] .link-command span,
+.workspace-page[data-page="link"] .link-command code,
+.workspace-page[data-page="link"] .link-command button { font-size: .8rem; }
+.workspace-page[data-page="link"] .link-job-copy strong,
+.workspace-page[data-page="link"] .link-event b,
+.workspace-page[data-page="link"] .link-model-grid b { font-size: .86rem; }
+
 .link-event { display: grid; grid-template-columns: 5.2rem auto minmax(0, 1fr); gap: .65rem; align-items: start; border-bottom: 1px solid #202d30; padding: .55rem .75rem; background: rgba(7, 13, 15, .65); }
 .link-event time { color: var(--faint); font: .68rem var(--font-mono); }
 .link-event i { width: .55rem; height: .55rem; margin-top: .18rem; border-radius: 50%; background: #69827f; }
@@ -4716,16 +4808,16 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
 .remote-link-path > div > i { width: 1.5rem; height: 1.5rem; border: 1px solid #4f7272; border-radius: 50%; background: radial-gradient(circle, var(--cyan) 0 12%, #101b1d 14%); box-shadow: inset 0 0 8px rgba(100, 213, 207, .18); }
 .remote-link-path b,
 .remote-link-path small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.remote-link-path b { font-size: .76rem; }
-.remote-link-path small { color: var(--muted); font-size: .65rem; }
+.remote-link-path b { font-size: .84rem; }
+.remote-link-path small { color: var(--muted); font-size: .76rem; }
 .remote-link-path > span { position: relative; height: 1px; background: #344d50; }
 .remote-link-path > span i { position: absolute; inset: -2px auto -2px 0; width: 24%; background: var(--cyan); opacity: 0; }
 .remote-link-path > span.ready i { opacity: 1; animation: link-mobile-flow 1.5s linear infinite; }
 @keyframes link-mobile-flow { to { left: 76%; } }
-.remote-link-facts { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid #26373a; }
-.remote-link-facts span { padding: .65rem .35rem; color: var(--muted); font-size: .66rem; text-align: center; }
+.remote-link-facts { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid #26373a; }
+.remote-link-facts span { padding: .65rem .25rem; color: var(--muted); font-size: .76rem; text-align: center; }
 .remote-link-facts span + span { border-left: 1px solid #26373a; }
-.remote-link-facts b { display: block; color: #bad0cc; font: .88rem var(--font-mono); }
+.remote-link-facts b { display: block; color: #bad0cc; font: .94rem var(--font-mono); }
 
 @media (max-width: 1260px) {
   .link-layout { grid-template-columns: minmax(30rem, 1.25fr) minmax(21rem, .75fr); }
@@ -4735,12 +4827,17 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
 @media (max-width: 1100px) {
   .link-layout { grid-template-columns: 1fr; }
   .link-topology-panel,
+  .link-engines-panel,
   .link-summary-panel,
   .link-jobs-panel,
   .link-resources-panel,
+  .link-model-panel,
   .link-events-panel,
   .link-setup-panel { grid-column: 1; grid-row: auto; }
   .link-setup-body { grid-template-columns: 1fr; }
   .link-capabilities,
   .link-setup-commands { grid-column: 1; }
+  .link-engine-grid { grid-template-columns: 1fr; }
+  .link-artifact-flow { grid-template-columns: 1fr 1fr; }
+  .link-artifact-flow > span { display: none; }
 }

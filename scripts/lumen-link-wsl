@@ -40,6 +40,7 @@ Commands:
   install-ssh --apply --lumen-public-key-file PATH
                        Install the Lumen PC public key for bootstrap SSH
   verify               Run non-mutating deployment and research verification
+  capabilities         Authenticate the running worker and verify job support
   start                 Start the already-installed user service
   stop                  Stop the user service
   restart               Restart the user service
@@ -132,6 +133,16 @@ status() {
     printf '  processors               %s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 'unknown')"
     printf '  memory                   %s GiB\n' "$(awk '/MemTotal/ {printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || printf 'unknown')"
     printf '  worker config            %s\n' "$([[ -f "$WORKER_CONFIG" ]] && printf 'ready' || printf 'missing')"
+    if [[ -f "$WORKER_CONFIG" && -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+        printf '  configured job types     %s\n' "$("${PROJECT_ROOT}/.venv/bin/python" - "$WORKER_CONFIG" <<'PY'
+import json
+from pathlib import Path
+import sys
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(", ".join(value.get("execution", {}).get("job_types") or []))
+PY
+)"
+    fi
     if [[ -f "$SECRET_FILE" ]]; then
         printf '  shared secret            ready (mode %s; value not displayed)\n' "$(stat -c '%a' "$SECRET_FILE")"
     else
@@ -255,12 +266,17 @@ provision_research() {
 
 render_configuration() {
     local threads="$1"
+    local configuration_python="${PYENV_ROOT}/versions/${CORE_PYTHON_VERSION}/bin/python"
     if [[ "$APPLY" == "0" ]]; then
         shell_join mkdir -p "$LINK_CONFIG_ROOT" "$LINK_STATE_ROOT" "$USER_SERVICE_ROOT"
         printf 'DRY-RUN: generate a private 256-bit secret at %q (mode 600)\n' "$SECRET_FILE"
         printf 'DRY-RUN: render %q and %q\n' "$WORKER_CONFIG" "$USER_SERVICE"
         return
     fi
+    [[ -x "$configuration_python" ]] || {
+        printf 'Pinned Python %s is required before configure; run install --apply first.\n' "$CORE_PYTHON_VERSION" >&2
+        return 1
+    }
     mkdir -p "$LINK_CONFIG_ROOT" "$LINK_STATE_ROOT" "$USER_SERVICE_ROOT"
     chmod 700 "$LINK_CONFIG_ROOT" "$LINK_STATE_ROOT"
     if [[ ! -f "$SECRET_FILE" ]]; then
@@ -268,7 +284,7 @@ render_configuration() {
         openssl rand -hex 32 > "$SECRET_FILE"
     fi
     chmod 600 "$SECRET_FILE"
-    python3 - "$PROJECT_ROOT" "$LINK_STATE_ROOT" "$SECRET_FILE" "$threads" "$WORKER_CONFIG" <<'PY'
+    "$configuration_python" - "$PROJECT_ROOT" "$LINK_STATE_ROOT" "$SECRET_FILE" "$threads" "$WORKER_CONFIG" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -345,25 +361,81 @@ verify() {
         printf 'FAIL: HMAC secret is missing or not mode 600.\n' >&2
         return 1
     }
-    python3 -m json.tool "$WORKER_CONFIG" >/dev/null
+    "${PROJECT_ROOT}/.venv/bin/python" - "$WORKER_CONFIG" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = ["teacher.edmformer", "teacher.songformer", "student.train"]
+if value.get("execution", {}).get("job_types") != expected:
+    raise SystemExit(
+        "worker config must enable EDMFormer, SongFormer, and student "
+        "training; rerun configure --apply"
+    )
+if value.get("execution", {}).get("gated_job_types"):
+    raise SystemExit(
+        "worker config still marks an expanded Lumen Link capability as "
+        "gated; rerun configure --apply"
+    )
+PY
     "${PROJECT_ROOT}/scripts/setup-research" verify
     printf 'Lumen Link WSL deployment verified.\n'
+}
+
+verify_running_capabilities() {
+    [[ -r "$WORKER_CONFIG" && -r "$SECRET_FILE" ]] || {
+        printf 'Configure Lumen Link before checking capabilities.\n' >&2
+        return 1
+    }
+    "${PROJECT_ROOT}/.venv/bin/python" - "$WORKER_CONFIG" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from lumen_engine.link import LinkClient
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = config.get("execution", {}).get("job_types") or []
+secret_path = Path(config["authentication"]["secret_file"])
+secret = secret_path.read_text(encoding="utf-8").strip().encode()
+port = int(config["listen"]["port"])
+health = LinkClient(f"http://127.0.0.1:{port}", secret).health()
+capabilities = health.get("capabilities") or {}
+supported = capabilities.get("supported_job_types") or []
+gated = capabilities.get("gated_job_types") or {}
+print("Authenticated running-worker capabilities")
+for name in expected:
+    if name in supported:
+        print(f"  READY  {name}")
+    else:
+        print(f"  GATED  {name}: {gated.get(name) or 'not advertised'}")
+missing = [name for name in expected if name not in supported]
+if missing:
+    raise SystemExit(
+        "Running worker is not ready for every configured job type: "
+        + ", ".join(missing)
+    )
+print("  RESULT teacher timelines: checksummed immutable JSON")
+print("  RESULT student model: candidate artifact plus held-out evaluation")
+PY
 }
 
 run_worker() {
     [[ -r "$WORKER_CONFIG" ]] || { printf 'Worker config is not readable: %s\n' "$WORKER_CONFIG" >&2; return 1; }
     local -a worker_arguments=()
-    mapfile -t worker_arguments < <(python3 - "$WORKER_CONFIG" <<'PY'
+    mapfile -t worker_arguments < <("${PROJECT_ROOT}/.venv/bin/python" - "$WORKER_CONFIG" <<'PY'
 import json
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
 value = json.loads(path.read_text(encoding="utf-8"))
-if value.get("execution", {}).get("job_types") != ["teacher.edmformer"]:
+expected = ["teacher.edmformer", "teacher.songformer", "student.train"]
+if value.get("execution", {}).get("job_types") != expected:
     raise SystemExit(
-        "worker config must enable only the currently supported "
-        "teacher.edmformer job type"
+        "worker config must enable EDMFormer, SongFormer, and student "
+        "training; rerun configure --apply"
     )
 fields = [
     "--host", str(value["listen"]["host"]),
@@ -416,6 +488,7 @@ case "$COMMAND" in
         ;;
     install-ssh) install_ssh_key "$PUBLIC_KEY_FILE" ;;
     verify) verify ;;
+    capabilities) verify_running_capabilities ;;
     start) systemctl --user start lumen-link-worker.service ;;
     stop) systemctl --user stop lumen-link-worker.service ;;
     restart) systemctl --user restart lumen-link-worker.service ;;
