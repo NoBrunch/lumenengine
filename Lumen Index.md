@@ -881,7 +881,8 @@ than changing live audio/DMX timing.
 
 On this dedicated Lumen PC, `scripts/configure-lumen-appliance` provides a
 reviewed, reversible workstation profile. Running the script's `apply` command
-with `sudo` disables unrelated printing, modem, remote-desktop, AnyDesk, search,
+with `sudo` disables unrelated printing, modem, remote-desktop, AnyDesk, OLA,
+search,
 Evolution, update-notification, backup-notification, and virtual-machine guest
 helpers; retains the browser, GNOME, networking, Bluetooth, audio, USB/DMX,
 Avahi/Chromecast discovery, and development tools; adds an 8 GiB emergency
@@ -893,6 +894,9 @@ headroom while making the disposable teacher process the preferred kernel OOM
 victim. Use `status` to inspect the profile and `sudo
 ./scripts/configure-lumen-appliance rollback` to restore the saved settings.
 Apply and rollback require a reboot to complete the user-session policy change.
+OLA is disabled because Lumen writes its FT232R/Open-DMX adapter directly with
+native libftdi. OLA's USB detector is not part of the Lumen output path and can
+otherwise repeatedly probe the same serial adapter and consume a full CPU core.
 
 Offline jobs carry a worker identity, process ID, and heartbeat. If Lumen or the
 desktop session ends during analysis, the next Lumen start—and every subsequent
@@ -1118,6 +1122,13 @@ input for timing.
 The built-in Spotify page includes Back and Forward controls for the Lumen
 playlist/search browsing history, plus Refresh player.
 
+During Live, current-track identity is polled independently from the audio path
+at a two-second cadence. The active Spotify/remote page refreshes playback at a
+five-second cadence; profile, device, and library results are reused for up to
+one minute while playback alone is refreshed. Concurrent browsers share the
+same serialized result. This keeps phone sessions responsive without allowing
+Spotify network latency or rate limits into the line-in/DMX timing path.
+
 ## 3D room interaction
 
 In the rig's 3D view:
@@ -1204,7 +1215,9 @@ runbook before treating any Git checkout as operational.
 - **Frequency band**: A portion of the spectrum, such as low, mid, or high.
 - **High energy**: Treble-weighted spectral activity.
 - **Low energy**: Bass-weighted spectral activity.
-- **Loudness**: Normalized perceived signal level.
+- **Loudness**: Perceptually log-mapped physical RMS level. The mapping reserves
+  1.0 for full-scale RMS instead of clipping ordinary mastered passages at
+  1.0, preserving contrast between loud and exceptionally intense audio.
 - **Mid energy**: Mid-frequency spectral activity.
 - **Novelty**: How different the current audio frame is from recent frames;
   useful for transitions and changes.
@@ -1216,7 +1229,11 @@ runbook before treating any Git checkout as operational.
   build, drop, or outro. Instantaneous changes use separate transition events.
 - **Spectral analysis**: Measuring how audio energy is distributed across
   frequencies.
-- **Tempo tracker**: Component estimating BPM and beat/bar phase.
+- **Tempo tracker**: Component estimating BPM and beat/bar phase. Lumen combines
+  spectral-onset autocorrelation with a transient-interval clock. A broad
+  log-tempo prior resolves supported half-time and 3:2 ambiguities; it chooses
+  a metrical family while the strongest physical-audio correlation chooses the
+  exact BPM. Confirmed clocks hand off without repeatedly switching sources.
 - **Tension**: Expressive value representing pressure, contrast, or urgency.
 - **Waveform**: Signal amplitude plotted over time.
 
@@ -1494,6 +1511,18 @@ runbook before treating any Git checkout as operational.
   event, and DMX cells are not rebuilt. The clock header reports live display
   latency and explicitly marks stale data instead of disguising a delayed UI
   as an audio interruption.
+- The exact neural-readiness audit verifies and parses the trusted teacher
+  corpus only from an offline operation or one background refresh. Its last
+  verified result is cached under `state/training/research/cache`, so browser
+  startup and Audio Laboratory polling do not repeatedly scan the growing
+  example library. The interface shows when that background refresh is active;
+  mature-library refreshes run in a low-CPU/low-I/O-priority local subprocess,
+  preventing Python interpreter-lock contention and temporary audit memory from
+  entering the long-lived console. Analyze and Train retain their exact
+  server-side provenance checks.
+- Only Audio Laboratory requests the rolling 240-point analysis history. Other
+  desktop and mobile pages retain the same 10-Hz live cadence without decoding
+  and transferring that unused scope payload on every poll.
 - Multiple browsers share one serialized technical-status generation at up to
   30 Hz. A room full of phones therefore does not rebuild the 3D solution,
   analysis history, DMX heatmap, and training state once per network request.

@@ -157,6 +157,29 @@ class BeatTrackerTests(unittest.TestCase):
         self.assertAlmostEqual(tracker._bpm, 176.0)
         self.assertAlmostEqual(tracker._confidence, 0.45)
 
+    def test_prior_supported_three_to_two_family_repairs_early_lock(self):
+        tracker = SpectralTempoTracker(48_000 / 2_048)
+        tracker._bpm = 88.0
+        tracker._confidence = 0.90
+        tracker._latest_prior_selected = True
+        for _ in range(11):
+            tracker._consider_tempo_candidate(
+                candidate_bpm=129.0,
+                candidate_score=0.30,
+                candidate_confidence=0.55,
+                locked_score=0.35,
+                locked_confidence=0.62,
+            )
+            self.assertAlmostEqual(tracker._bpm, 88.0)
+        tracker._consider_tempo_candidate(
+            candidate_bpm=129.0,
+            candidate_score=0.30,
+            candidate_confidence=0.55,
+            locked_score=0.35,
+            locked_confidence=0.62,
+        )
+        self.assertAlmostEqual(tracker._bpm, 129.0)
+
     def test_challenger_confidence_does_not_inflate_published_lock(self) -> None:
         tracker = SpectralTempoTracker(24.0)
         tracker._bpm = 116.6
@@ -227,6 +250,34 @@ class BeatTrackerTests(unittest.TestCase):
         self.assertEqual(arbiter.source, "fallback")
         self.assertEqual(selected.bpm, 116.6)
 
+    def test_fallback_relative_requires_confirmation_from_spectral_envelope(self):
+        arbiter = TempoSourceArbiter()
+        spectral = BeatState(82.75, False, 4, 0.25, 0.96)
+        fallback = BeatState(126.5, False, 4, 0.25, 0.94)
+        arbiter.select(
+            spectral=spectral,
+            fallback=BeatState(0.0, False, 0, 0.0, 0.0),
+            now=1.0,
+        )
+        for index in range(1, 36):
+            selected = arbiter.select(
+                spectral=spectral,
+                fallback=fallback,
+                now=1.0 + index / 24.0,
+                spectral_support_for_fallback=0.51,
+                spectral_peak_score=0.70,
+            )
+            self.assertAlmostEqual(selected.bpm, spectral.bpm)
+        selected = arbiter.select(
+            spectral=spectral,
+            fallback=fallback,
+            now=2.5,
+            spectral_support_for_fallback=0.51,
+            spectral_peak_score=0.70,
+        )
+        self.assertEqual(arbiter.source, "fallback")
+        self.assertAlmostEqual(selected.bpm, fallback.bpm)
+
     def test_nonclose_fallback_cannot_displace_healthy_spectral_lock(self):
         arbiter = TempoSourceArbiter()
         spectral = BeatState(175.8, False, 4, 0.25, 0.45)
@@ -262,6 +313,16 @@ class BeatTrackerTests(unittest.TestCase):
             )
             self.assertEqual(selected.bpm, fallback.bpm)
         selected = arbiter.select(spectral=spectral, fallback=fallback)
+        self.assertEqual(arbiter.source, "spectral")
+        self.assertEqual(selected.bpm, spectral.bpm)
+
+        # A matching fallback may be more confident later, but cannot create
+        # close-family source chatter once spectral owns the clock.
+        for _ in range(40):
+            selected = arbiter.select(
+                spectral=spectral,
+                fallback=BeatState(119.0, False, 8, 0.7, 1.0),
+            )
         self.assertEqual(arbiter.source, "spectral")
         self.assertEqual(selected.bpm, spectral.bpm)
 

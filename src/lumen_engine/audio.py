@@ -190,8 +190,12 @@ class RealtimeAudioAnalyzer:
             )
         signal_present = rms >= max(0.001, self._noise_floor * 2.2)
         if signal_present:
-            # A gentle logarithmic mapping makes normal line levels readable.
-            loudness = clamp(math.log10(1.0 + 24.0 * rms), 0.0, 1.0)
+            # Use the entire physical PCM range.  The previous ``24 * rms``
+            # curve reached 1.0 at only -8.5 dBFS, so ordinary mastered music
+            # lost almost all distinction between a loud passage and the
+            # loudest passage in a track.  ``9 * rms`` retains the useful
+            # logarithmic response while reserving 1.0 for full-scale RMS.
+            loudness = clamp(math.log10(1.0 + 9.0 * rms), 0.0, 1.0)
             rise = max(0.0, loudness - self._previous_loudness)
             amplitude_transient = max(
                 0.0,
@@ -228,7 +232,12 @@ class RealtimeAudioAnalyzer:
             )
         self._previous_loudness = loudness
 
-        beat_drive = spectral_onset * loudness if signal_present else 0.0
+        # Spectral onset is already normalized against its recent history.
+        # Multiplying it by program loudness suppressed valid beats in quiet
+        # intros/breakdowns and changed the apparent tempo as arrangements grew
+        # louder.  Physical signal presence remains the noise gate; beat timing
+        # must otherwise be level-independent.
+        beat_drive = spectral_onset if signal_present else 0.0
         fallback_beat_state = self._beat_tracker.update(beat_drive, now=timestamp)
         update_rate = self.sample_rate / max(1, len(mono))
         if (
@@ -244,6 +253,12 @@ class RealtimeAudioAnalyzer:
             spectral=spectral_beat_state,
             fallback=fallback_beat_state,
             now=timestamp,
+            spectral_support_for_fallback=self._tempo_tracker.tempo_support(
+                fallback_beat_state.bpm
+            ),
+            spectral_peak_score=float(
+                self._tempo_tracker.diagnostics.get("candidate_score", 0.0)
+            ),
         )
         if signal_present:
             self._silence_started_at = None

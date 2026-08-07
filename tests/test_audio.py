@@ -153,6 +153,19 @@ class AudioAnalyzerTests(unittest.TestCase):
         self.assertGreater(analyzer.last_metrics.peak, 0.3)
         self.assertEqual(len(analyzer.last_metrics.waveform), 128)
 
+    def test_loudness_curve_preserves_headroom_below_full_scale(self) -> None:
+        analyzer = RealtimeAudioAnalyzer(sample_rate=8_000, channels=1)
+        ordinary_loud = analyzer.analyze_pcm16(
+            sine_pcm(100, 8_000, 2048, 24_000), timestamp_s=1.0
+        )
+        near_full_scale = analyzer.analyze_pcm16(
+            sine_pcm(100, 8_000, 2048, 32_000), timestamp_s=2.0
+        )
+
+        self.assertLess(ordinary_loud.loudness, 0.9)
+        self.assertGreater(near_full_scale.loudness, ordinary_loud.loudness)
+        self.assertLess(near_full_scale.loudness, 1.0)
+
     def test_stereo_metrics_report_each_channel_and_clipping(self) -> None:
         analyzer = RealtimeAudioAnalyzer(sample_rate=48_000, channels=2)
         samples = array("h", [32767, 1000, -32768, -1000] * 512)

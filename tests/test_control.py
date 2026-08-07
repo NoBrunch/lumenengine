@@ -438,6 +438,54 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertLess(elapsed, 0.05)
 
+    def test_bootstrap_never_runs_exact_training_readiness_inline(self) -> None:
+        self.application._research_readiness_cache = None
+        with patch.object(
+            self.application,
+            "_schedule_research_readiness_refresh",
+            return_value=True,
+        ), patch("lumen_engine.control.training_readiness") as readiness:
+            payload = self.application.bootstrap()
+        readiness.assert_not_called()
+        self.assertTrue(payload["research"]["readiness_cache"]["refreshing"])
+        self.assertFalse(payload["research"]["training"]["train_ready"])
+        self.assertIn(
+            "refreshing",
+            payload["research"]["training"]["blockers"][0].lower(),
+        )
+
+    def test_large_readiness_refresh_isolated_in_subprocess(self) -> None:
+        large_database = Path(self.temporary.name) / "large-memory.sqlite3"
+        large_database.touch()
+        os.truncate(large_database, 257 * 1024 * 1024)
+        original_memory_path = self.application.memory_path
+        self.application.memory_path = large_database
+
+        class Completed:
+            returncode = 0
+            stderr = ""
+            stdout = json.dumps(
+                {"training": {"train_ready": True, "model": {}}}
+            )
+
+        try:
+            with patch(
+                "lumen_engine.control.subprocess.run",
+                return_value=Completed(),
+            ) as run, patch(
+                "lumen_engine.control.training_readiness"
+            ) as inline_readiness:
+                self.application._refresh_research_readiness_cache()
+            inline_readiness.assert_not_called()
+            run.assert_called_once()
+            self.assertTrue(
+                self.application._research_readiness_cache["training"][
+                    "train_ready"
+                ]
+            )
+        finally:
+            self.application.memory_path = original_memory_path
+
     def test_settings_file_write_never_holds_live_publication_lock(self) -> None:
         entered = threading.Event()
         release = threading.Event()
@@ -1687,6 +1735,14 @@ class ControlApplicationTests(unittest.TestCase):
                 time.sleep(0.04)
                 server.status_body()
                 self.assertEqual(snapshot.call_count, 2)
+
+                without_history = server.status_body(
+                    include_analysis_history=False
+                )
+                self.assertEqual(snapshot.call_count, 3)
+                self.assertEqual(
+                    json.loads(without_history)["analysis_history"], []
+                )
         finally:
             ThreadingHTTPServer.server_close(server)
 

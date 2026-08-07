@@ -8,6 +8,25 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Restored musical headroom to the live loudness axis. The former logarithmic
+  curve reached 1.0 at ordinary mastered-program levels; the revised curve
+  reserves 1.0 for full-scale RMS while physical clipping remains an
+  independent PCM measurement.
+- Made beat evidence independent of program loudness and strengthened
+  half-time, double-time, and 3:2 tempo-family arbitration with spectral
+  confirmation and stable source ownership.
+- Removed the full teacher-corpus readiness audit from browser bootstrap and
+  research polling. The verified result is now durable and cached; a mature
+  cache refresh runs as a low-CPU/low-I/O-priority subprocess rather than
+  competing with Live's interpreter or remaining in the console heap.
+- Serialized and shared Spotify console work across browsers, reused stable
+  profile/device/library data between playback refreshes, and increased the
+  active player cadence without moving network work into Live timing.
+- Scoped rolling analysis history to Audio Laboratory instead of transferring
+  it to every page and every connected phone.
+- Added the unused OLA daemon to the reversible appliance disable list after
+  confirming its USB detector could spin on the FT232R adapter at one full CPU
+  core even though Lumen uses native libftdi directly.
 - Corrected exact-song teacher fusion to resolve authority from each timeline's
   own teacher instead of a stale database-loop value, and added strict
   SongFormer artifact ownership/checksum validation before a completed job can
@@ -56,8 +75,13 @@ result. Git commit history remains the detailed engineering log.
 ### Verification
 
 - `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`
-- 345 tests passed on 2026-08-05.
+- 350 tests passed on 2026-08-06.
 - `node --check web/app.js` and `git diff --check` passed.
+- The installed 5-GiB database/corpus was smoke-tested locally: cold bootstrap
+  fell from roughly 35 seconds to 0.19 seconds, status to 0.01 seconds, and
+  cached research status to 0.17 seconds. The exact readiness refresh completed
+  successfully in its low-priority subprocess. No engine mode or physical DMX
+  output was opened, and the test console was stopped afterward.
 
 ## 0.7.2 - 2026-08-04
 

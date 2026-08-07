@@ -24,6 +24,7 @@ import queue
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, Iterable
@@ -53,6 +54,7 @@ from lumen_engine.media import (
     SpotifyTokenCache,
     SpotifyWebAPI,
     media_identity_from_spotify,
+    spotify_playback_summary,
 )
 from lumen_engine.memory import (
     EDMFORMER_PREPROCESSING_VERSION,
@@ -124,6 +126,7 @@ DEFAULT_SETTINGS_PATH = PROJECT_DIR / "state" / "settings.json"
 DEFAULT_SPOTIFY_TOKEN = (
     Path.home() / ".local" / "state" / "lumenengine" / "spotify-token.json"
 )
+SPOTIFY_MEDIA_POLL_INTERVAL_S = 2.0
 
 REHEARSAL_ROUTINES: tuple[dict[str, str], ...] = (
     {
@@ -453,6 +456,24 @@ class LumenApplication:
             self.training_root / "research",
             store=self.memory,
         )
+        # The exact readiness audit verifies checksums and parses every trusted
+        # teacher-example file.  On the installed library that is roughly a
+        # gigabyte of reads, so it must never run synchronously in bootstrap or
+        # an HTTP status poll.  Exact Analyze/Train operations still perform
+        # the audit; the console reads this durable last-known result while a
+        # single background refresh catches up after an older installation.
+        self._research_readiness_cache_path = (
+            self.training_root
+            / "research"
+            / "cache"
+            / "operator-readiness.json"
+        )
+        self._research_readiness_lock = threading.Lock()
+        self._research_readiness_cache = (
+            self._load_research_readiness_cache()
+        )
+        self._research_readiness_thread: threading.Thread | None = None
+        self._research_readiness_error: str | None = None
         self._student_model_path = (
             self.training_root
             / "research"
@@ -561,6 +582,8 @@ class LumenApplication:
         self._spotify_error: str | None = None
         self._spotify_last_command: dict[str, Any] | None = None
         self._spotify_console_cache: dict[str, Any] = {}
+        self._spotify_console_cached_at: dict[str, float] = {}
+        self._spotify_console_lock = threading.Lock()
         self._spotify_rate_limited_until = 0.0
         self._feedback_biases: dict[str, dict[str, Any]] = {}
         self._calibration_overrides: dict[str, dict[str, float]] = {}
@@ -3125,6 +3148,7 @@ class LumenApplication:
                 self._training_prepare_pending = False
                 self._training_prepare_pending_session = None
                 self._training_prepare_thread = None
+            self._schedule_research_readiness_refresh()
             if rerun and not self._stop.is_set():
                 self._start_training_preparation(pending_session)
 
@@ -3502,7 +3526,10 @@ class LumenApplication:
         thread = self._spotify_poll_thread
         if thread is not None and thread.is_alive():
             return
-        if time.monotonic() - self._last_media_poll < 5.0:
+        if (
+            time.monotonic() - self._last_media_poll
+            < SPOTIFY_MEDIA_POLL_INTERVAL_S
+        ):
             return
         self._spotify_poll_thread = threading.Thread(
             target=self._poll_spotify_if_due,
@@ -3956,24 +3983,201 @@ class LumenApplication:
         finally:
             self._training_export_lock.release()
 
-    def research_status(self) -> dict[str, Any]:
+    def _load_research_readiness_cache(self) -> dict[str, Any] | None:
+        path = self._research_readiness_cache_path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        training = payload.get("training")
+        if (
+            payload.get("schema") != "lumen_operator_readiness_cache_v1"
+            or not isinstance(training, dict)
+            or payload.get("database_path")
+            != str(self.memory_path.resolve(strict=False))
+        ):
+            return None
+        return payload
+
+    def _store_research_readiness_cache(
+        self, training: dict[str, Any]
+    ) -> dict[str, Any]:
+        payload = {
+            "schema": "lumen_operator_readiness_cache_v1",
+            "created_unix_ms": int(time.time() * 1000),
+            "database_path": str(self.memory_path.resolve(strict=False)),
+            "training": deepcopy(training),
+        }
+        path = self._research_readiness_cache_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".partial")
+        temporary.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+        with self._research_readiness_lock:
+            self._research_readiness_cache = payload
+            self._research_readiness_error = None
+        return payload
+
+    def _refresh_research_readiness_cache(self) -> None:
+        try:
+            database_bytes = self.memory_path.stat().st_size
+            if database_bytes < 256 * 1024 * 1024:
+                # Tests and new installations complete this in milliseconds.
+                training = training_readiness(
+                    self.memory,
+                    research_root=self.training_root / "research",
+                )
+            else:
+                # A mature library parses hundreds of megabytes of provenance
+                # and example JSON. Run that audit in a low-priority process so
+                # it cannot contend for the live console's interpreter lock or
+                # leave its temporary allocations in the long-lived UI heap.
+                command = [
+                    sys.executable,
+                    "-m",
+                    "lumen_engine",
+                    "research-status",
+                    "--root",
+                    str(self.training_root / "research"),
+                    "--memory",
+                    str(self.memory_path),
+                ]
+                if shutil.which("nice"):
+                    command = ["nice", "-n", "10", *command]
+                if shutil.which("ionice"):
+                    command = ["ionice", "-c", "2", "-n", "7", *command]
+                environment = dict(os.environ)
+                source_root = str(PROJECT_DIR / "src")
+                existing_python_path = environment.get("PYTHONPATH")
+                environment["PYTHONPATH"] = (
+                    source_root
+                    if not existing_python_path
+                    else source_root + os.pathsep + existing_python_path
+                )
+                completed = subprocess.run(
+                    command,
+                    cwd=PROJECT_DIR,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    timeout=3_600,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    detail = (completed.stderr or completed.stdout).strip()
+                    raise RuntimeError(
+                        "readiness subprocess failed"
+                        + (f": {detail}" if detail else "")
+                    )
+                result = json.loads(completed.stdout)
+                training = result.get("training")
+                if not isinstance(training, dict):
+                    raise RuntimeError(
+                        "readiness subprocess returned no training state"
+                    )
+            self._store_research_readiness_cache(training)
+        except Exception as error:
+            with self._research_readiness_lock:
+                self._research_readiness_error = (
+                    f"{type(error).__name__}: {error}"
+                )
+        finally:
+            with self._research_readiness_lock:
+                self._research_readiness_thread = None
+
+    def _schedule_research_readiness_refresh(self) -> bool:
+        with self._research_readiness_lock:
+            thread = self._research_readiness_thread
+            if thread is not None and thread.is_alive():
+                return True
+            thread = threading.Thread(
+                target=self._refresh_research_readiness_cache,
+                name="lumen-readiness-audit",
+                daemon=True,
+            )
+            self._research_readiness_thread = thread
+            thread.start()
+            return True
+
+    @staticmethod
+    def _pending_research_readiness() -> dict[str, Any]:
+        return {
+            "recordings_planned": 0,
+            "recordings_processed": 0,
+            "recordings_captured": 0,
+            "recordings_eligible": 0,
+            "eligible_teacher_jobs": 0,
+            "eligible_teacher_jobs_complete": 0,
+            "progress": 0.0,
+            "usable_examples": 0,
+            "split_counts": {},
+            "teacher_errors": [],
+            "provenance_errors": [],
+            "label_balance": {},
+            "train_ready": False,
+            "activation_ready": False,
+            "blockers": [
+                "Lumen is refreshing the offline training summary"
+            ],
+            "activation_blockers": [],
+            "model": {},
+        }
+
+    def research_status(
+        self, *, wait_for_readiness: bool = True
+    ) -> dict[str, Any]:
         # Status polling is also the recovery path for a console that remains
         # open when an external CLI worker dies. Healthy leases are retained;
         # dead or stale leases are atomically requeued and immediately stop
         # holding the Analyze/Train/Live controls disabled.
         self._recover_abandoned_research_jobs()
-        result = self.research.status()
-        # ResearchManager already computed readiness. Repeating it doubled a
-        # multi-second SQLite/filesystem scan on every bootstrap request.
-        training_payload = result.get("training")
-        training = (
-            deepcopy(training_payload)
-            if isinstance(training_payload, dict)
-            else training_readiness(
+        result = self.research.status(include_training=False)
+        # Exact readiness is intentionally requested only by callers performing
+        # an offline operation. Browser bootstrap and polling use the durable
+        # cache below and never verify the teacher corpus inline.
+        training_payload = (
+            training_readiness(
                 self.memory,
                 research_root=self.training_root / "research",
             )
+            if wait_for_readiness
+            else None
         )
+        if isinstance(training_payload, dict):
+            training = deepcopy(training_payload)
+            cached = self._store_research_readiness_cache(training)
+            readiness_refreshing = False
+            readiness_error = None
+        else:
+            with self._research_readiness_lock:
+                cached = deepcopy(self._research_readiness_cache)
+                readiness_thread = self._research_readiness_thread
+                readiness_error = self._research_readiness_error
+            if cached is None:
+                readiness_refreshing = (
+                    self._schedule_research_readiness_refresh()
+                )
+                training = self._pending_research_readiness()
+            else:
+                readiness_refreshing = bool(
+                    readiness_thread is not None
+                    and readiness_thread.is_alive()
+                )
+                training = deepcopy(cached["training"])
+            result["readiness_cache"] = {
+                "refreshing": readiness_refreshing,
+                "created_unix_ms": (
+                    cached.get("created_unix_ms")
+                    if cached is not None
+                    else None
+                ),
+                "error": readiness_error,
+            }
         # SQLite can wait on an offline writer. Never perform that wait while
         # holding the lock used to publish audio/DMX state.
         running_jobs = [
@@ -4141,7 +4345,9 @@ class LumenApplication:
                 )
             return {
                 "export": export,
-                "research": self.research_status(),
+                "research": self.research_status(
+                    wait_for_readiness=False
+                ),
                 "started": False,
                 "message": message,
             }
@@ -4299,7 +4505,7 @@ class LumenApplication:
                 f"Started offline analysis batch ({min(available, maximum_jobs or available)} job(s))",
             )
             self._status_sequence += 1
-        return self.research_status()
+        return self.research_status(wait_for_readiness=False)
 
     def cancel_research_worker(self) -> dict[str, Any]:
         worker = self._research_worker_thread
@@ -4309,7 +4515,7 @@ class LumenApplication:
         with self._lock:
             self._add_event("memory", "Pausing offline analysis after cancellation")
             self._status_sequence += 1
-        return self.research_status()
+        return self.research_status(wait_for_readiness=False)
 
     def train_structure_student(
         self, payload: dict[str, Any]
@@ -4418,6 +4624,10 @@ class LumenApplication:
                 message = f"Offline analysis batch complete: {len(results)} job(s)"
             self._add_event("memory", message)
             self._status_sequence += 1
+        # Recompute the expensive readiness evidence after, rather than inside,
+        # the worker completion path.  The UI keeps receiving its last verified
+        # summary while this daemon refreshes the cache.
+        self._schedule_research_readiness_refresh()
 
     def provision_research_sources(
         self, payload: dict[str, Any]
@@ -4568,6 +4778,17 @@ class LumenApplication:
         query: str = "",
         playlist_id: str = "",
     ) -> dict[str, Any]:
+        # Several phones may open the remote together.  Serialize Spotify's
+        # network calls and share the resulting console payload rather than
+        # issuing the same profile/device/library requests per browser.
+        with self._spotify_console_lock:
+            return self._spotify_console_locked(query, playlist_id)
+
+    def _spotify_console_locked(
+        self,
+        query: str = "",
+        playlist_id: str = "",
+    ) -> dict[str, Any]:
         if not self.spotify_client_id or not DEFAULT_SPOTIFY_TOKEN.exists():
             return {
                 "connected": False,
@@ -4590,8 +4811,12 @@ class LumenApplication:
                 ),
             }
         cache_key = f"{query[:200]}|{playlist_id[:128]}"
+        cached_at = self._spotify_console_cached_at.get(cache_key, 0.0)
+        cache_age = max(0.0, time.time() - cached_at)
+        if cache_key in self._spotify_console_cache and cache_age < 1.0:
+            return deepcopy(self._spotify_console_cache[cache_key])
         if time.time() < self._spotify_rate_limited_until and cache_key in self._spotify_console_cache:
-            cached = dict(self._spotify_console_cache[cache_key])
+            cached = deepcopy(self._spotify_console_cache[cache_key])
             cached["stale"] = True
             cached["message"] = "Spotify is rate limited; showing the last known player state."
             return cached
@@ -4601,10 +4826,24 @@ class LumenApplication:
                 cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
             )
             client = SpotifyWebAPI(oauth.valid_token)
-            console = client.console(
-                query=query[:200],
-                playlist_id=playlist_id[:128],
-            )
+            if cache_key in self._spotify_console_cache and cache_age < 60.0:
+                # Playback is the only console data that normally changes from
+                # second to second.  Reuse profile, device and library data so
+                # a responsive player does not repeatedly enumerate all of
+                # Spotify on this dedicated machine.
+                playback_payload = client.playback()
+                client.last_playback_payload = playback_payload
+                console = deepcopy(self._spotify_console_cache[cache_key])
+                console["playback"] = spotify_playback_summary(
+                    playback_payload
+                )
+                console["observed_at_unix_ms"] = round(time.time() * 1000)
+                console.pop("stale", None)
+            else:
+                console = client.console(
+                    query=query[:200],
+                    playlist_id=playlist_id[:128],
+                )
             self._remember_spotify_payload(client.last_playback_payload)
             with self._lock:
                 self._spotify_error = None
@@ -4627,12 +4866,13 @@ class LumenApplication:
                         "Lumen will follow that active route."
                     ),
                 }
-            self._spotify_console_cache[cache_key] = dict(console)
+            self._spotify_console_cache[cache_key] = deepcopy(console)
+            self._spotify_console_cached_at[cache_key] = time.time()
             return console
         except Exception as error:
             if "rate limited" in str(error).lower() and cache_key in self._spotify_console_cache:
                 self._spotify_rate_limited_until = time.time() + 15.0
-                cached = dict(self._spotify_console_cache[cache_key])
+                cached = deepcopy(self._spotify_console_cache[cache_key])
                 cached["stale"] = True
                 cached["message"] = "Spotify API rate limited; showing cached player state for 15 seconds."
                 return cached
@@ -4675,6 +4915,9 @@ class LumenApplication:
             self._last_media_poll = 0.0
             self._add_event("media", f"Spotify control: {action}")
             self._status_sequence += 1
+        with self._spotify_console_lock:
+            self._spotify_console_cache.clear()
+            self._spotify_console_cached_at.clear()
         return {"accepted": True, "action": action}
 
     def _remember_spotify_payload(
@@ -6048,7 +6291,7 @@ class LumenApplication:
 
     def _poll_spotify_if_due(self) -> None:
         now = time.monotonic()
-        if now - self._last_media_poll < 5.0:
+        if now - self._last_media_poll < SPOTIFY_MEDIA_POLL_INTERVAL_S:
             return
         self._last_media_poll = now
         client_id = self.spotify_client_id
@@ -6131,14 +6374,19 @@ class LumenApplication:
             ],
             "status": status,
             "memory": self.memory.summary(limit=30),
-            "research": self.research_status(),
+            "research": self.research_status(wait_for_readiness=False),
             "system": self.scan_system(),
             "settings": settings,
         }
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(
+        self, *, include_analysis_history: bool = True
+    ) -> dict[str, Any]:
         with self._lock:
-            return self._snapshot_unlocked()
+            snapshot = self._snapshot_unlocked()
+            if not include_analysis_history:
+                snapshot["analysis_history"] = []
+            return snapshot
 
     def song_teaching_snapshot(self, *, force: bool = False) -> dict[str, Any]:
         """Read the teaching timeline without holding the audio-state lock."""
@@ -6675,7 +6923,18 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, self.server.application.bootstrap())
             return
         if path == "/api/status":
-            self._json_body(HTTPStatus.OK, self.server.status_body())
+            query_values = parse_qs(parsed.query)
+            include_history = query_values.get("history", ["0"])[0] in {
+                "1",
+                "true",
+                "yes",
+            }
+            self._json_body(
+                HTTPStatus.OK,
+                self.server.status_body(
+                    include_analysis_history=include_history
+                ),
+            )
             return
         if path == "/api/system":
             self._json(HTTPStatus.OK, self.server.application.scan_system())
@@ -6712,7 +6971,9 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/research":
             self._json(
                 HTTPStatus.OK,
-                self.server.application.research_status(),
+                self.server.application.research_status(
+                    wait_for_readiness=False
+                ),
             )
             return
         if path == "/api/spotify":
@@ -6914,23 +7175,34 @@ class LumenHTTPServer(ThreadingHTTPServer):
         # cache is deliberately owned by the HTTP layer, never the live clock,
         # and remains fresh enough for a smooth 30 Hz operator display.
         self._status_body_lock = threading.Lock()
-        self._status_body_cached_at = 0.0
-        self._status_body_cache = b""
+        self._status_body_cached_at: dict[bool, float] = {}
+        self._status_body_cache: dict[bool, bytes] = {}
         super().__init__(address, LumenRequestHandler)
 
-    def status_body(self) -> bytes:
+    def status_body(
+        self, *, include_analysis_history: bool = True
+    ) -> bytes:
         now = time.monotonic()
         with self._status_body_lock:
             if (
-                self._status_body_cache
-                and now - self._status_body_cached_at < 1.0 / 30.0
+                include_analysis_history in self._status_body_cache
+                and now
+                - self._status_body_cached_at.get(
+                    include_analysis_history, 0.0
+                )
+                < 1.0 / 30.0
             ):
-                return self._status_body_cache
+                return self._status_body_cache[include_analysis_history]
             body = json.dumps(
-                self.application.snapshot(), separators=(",", ":")
+                self.application.snapshot(
+                    include_analysis_history=include_analysis_history
+                ),
+                separators=(",", ":"),
             ).encode("utf-8")
-            self._status_body_cache = body
-            self._status_body_cached_at = time.monotonic()
+            self._status_body_cache[include_analysis_history] = body
+            self._status_body_cached_at[
+                include_analysis_history
+            ] = time.monotonic()
             return body
 
     def server_close(self) -> None:

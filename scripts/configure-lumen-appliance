@@ -16,6 +16,10 @@ readonly SWAP_FILE="/swap-lumen.img"
 readonly FSTAB_MARKER="# lumen-appliance-offline-swap"
 
 readonly -a SYSTEM_DISABLE_UNITS=(
+  # Lumen owns its FT232R/Open-DMX adapter through native libftdi.  OLA's USB
+  # detector otherwise probes the same serial device forever and has been
+  # observed spinning at a full CPU core after a Live session.
+  olad.service
   anydesk.service
   gnome-remote-desktop.service
   cups-browsed.service

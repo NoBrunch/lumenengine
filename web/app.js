@@ -590,7 +590,9 @@ async function pollStatus() {
   app.pollInFlight = true;
   const requestedAt = performance.now();
   try {
-    const status = await api("/api/status");
+    const status = await api(
+      app.page === "audio" ? "/api/status?history=1" : "/api/status",
+    );
     app.statusLatencyMs = performance.now() - requestedAt;
     app.lastStatusReceivedAt = Date.now();
     app.status = status;
@@ -603,7 +605,8 @@ async function pollStatus() {
     if (app.pollCount % 50 === 0) void refreshSongTeaching();
     const researchRunning = Boolean(app.bootstrap?.research?.worker?.running);
     if (app.page === "audio" && app.pollCount % (researchRunning ? 50 : 300) === 0) void refreshResearch();
-    if (app.pollCount % 100 === 0 && app.system?.spotify?.token_present) {
+    const spotifyRefreshPolls = (app.page === "music" || app.remote) ? 50 : 100;
+    if (app.pollCount % spotifyRefreshPolls === 0 && app.system?.spotify?.token_present) {
       refreshSpotifyConsole(false);
     }
   } catch {
@@ -1884,6 +1887,7 @@ function renderResearch(research = {}) {
               : "Awaiting training",
   );
   const blockers = training.blockers || [];
+  const readinessRefreshing = Boolean(research.readiness_cache?.refreshing);
   const workerProgress = research.worker?.progress || {};
   const recoveredJobs = research.worker?.recovered_jobs || [];
   const recoveryNote = recoveredJobs.length
@@ -1893,7 +1897,10 @@ function renderResearch(research = {}) {
   const cancelRequested = Boolean(research.worker?.cancel_requested);
   const readiness = $("research-readiness");
   if (readiness) {
-    if (preparationRunning) {
+    if (readinessRefreshing && !Number(training.recordings_captured || 0)) {
+      readiness.textContent = "Refreshing the offline training summary in the background. Live audio, lighting, Spotify, and this console remain responsive.";
+      readiness.className = "research-readiness active";
+    } else if (preparationRunning) {
       readiness.textContent = "Preparing the most recent capture: verifying continuity, song identity, and full-song eligibility before teacher jobs are queued.";
       readiness.className = "research-readiness active";
     } else if (research.worker?.running) {

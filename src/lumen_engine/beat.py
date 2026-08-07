@@ -240,6 +240,9 @@ class SpectralTempoTracker:
         self._latest_candidate_confidence = 0.0
         self._latest_octave_promoted = False
         self._latest_family_ambiguity = 0.0
+        self._latest_prior_selected = False
+        self._latest_tempos = np.asarray([], dtype=np.float64)
+        self._latest_correlations = np.asarray([], dtype=np.float64)
 
     @property
     def diagnostics(self) -> dict[str, float]:
@@ -251,9 +254,24 @@ class SpectralTempoTracker:
             "candidate_confidence": self._latest_candidate_confidence,
             "octave_promoted": self._latest_octave_promoted,
             "family_ambiguity": self._latest_family_ambiguity,
+            "prior_selected": self._latest_prior_selected,
             "minimum_bpm": self.min_bpm,
             "maximum_bpm": self.max_bpm,
         }
+
+    def tempo_support(self, bpm: float) -> float:
+        """Return current onset-envelope support for an external tempo.
+
+        The interval clock can sometimes identify the correct metrical layer
+        while this tracker has selected a stronger half-time or 3:2 peak.  The
+        arbiter may use this value to verify that the spectral envelope itself
+        supports the interval clock before accepting a handoff.
+        """
+
+        if bpm <= 0.0 or not len(self._latest_tempos):
+            return 0.0
+        offset = int(np.argmin(np.abs(self._latest_tempos - float(bpm))))
+        return max(0.0, float(self._latest_correlations[offset]))
 
     def update(self, activation: float, now: float) -> BeatState:
         value = clamp(float(activation), 0.0, 1.0)
@@ -372,11 +390,53 @@ class SpectralTempoTracker:
         correlations = [
             _fractional_correlation(novelty, float(lag)) for lag in lags
         ]
-        best_offset = max(
-            range(len(correlations)),
-            key=correlations.__getitem__,
+        self._latest_tempos = tempos
+        self._latest_correlations = np.asarray(correlations, dtype=np.float64)
+        # Autocorrelation alone frequently selects a sparse 1/2- or 2/3-rate
+        # layer even when the actual beat layer is also strongly present.  A
+        # broad log-tempo prior (the standard approach in established tempo
+        # trackers) resolves that ambiguity without importing an offline audio
+        # stack into Live.  It is deliberately broad enough to retain slow
+        # genuine pulses and fast drum-and-bass when their evidence is real.
+        positive_correlations = np.maximum(
+            0.0, np.asarray(correlations, dtype=np.float64)
         )
-        self._latest_octave_promoted = False
+        log_tempo_prior = -0.5 * (
+            np.log2(tempos / 128.0) / 0.60
+        ) ** 2
+        weighted_scores = (
+            np.log1p(1_000_000.0 * positive_correlations)
+            + log_tempo_prior
+        )
+        raw_best_offset = int(np.argmax(positive_correlations))
+        weighted_offset = int(np.argmax(weighted_scores))
+        weighted_bpm = float(tempos[weighted_offset])
+        family_offsets = np.flatnonzero(
+            np.abs(tempos - weighted_bpm)
+            / max(weighted_bpm, 1e-9)
+            <= 0.08
+        )
+        # The prior chooses a metrical family, not an exact BPM. Recover the
+        # strongest unweighted peak inside that family so a clean 175.8 pulse
+        # is not dragged toward the 128-BPM prior.
+        best_offset = int(
+            family_offsets[
+                np.argmax(positive_correlations[family_offsets])
+            ]
+        )
+        raw_best_bpm = float(tempos[raw_best_offset])
+        selected_bpm = float(tempos[best_offset])
+        prior_octave_promoted = bool(
+            raw_best_bpm < 105.0
+            and 1.90 <= selected_bpm / max(raw_best_bpm, 1e-9) <= 2.10
+        )
+        self._latest_octave_promoted = prior_octave_promoted
+        self._latest_prior_selected = bool(
+            abs(selected_bpm - raw_best_bpm)
+            / max(raw_best_bpm, 1e-9)
+            > 0.08
+            and _same_metrical_family(selected_bpm, raw_best_bpm)
+        )
         self._latest_family_ambiguity = 0.0
         coarse_bpm = float(tempos[best_offset])
         # Autocorrelation often gives the bar-accent/half-time lag a slightly
@@ -542,12 +602,17 @@ class SpectralTempoTracker:
         if _same_metrical_family(candidate_bpm, self._bpm):
             ratio = candidate_bpm / self._bpm
             is_supported_double = bool(
-                self._latest_octave_promoted
-                and 1.90 <= ratio <= 2.10
+                1.90 <= ratio <= 2.10
+                and candidate_confidence >= 0.35
+                and self._latest_octave_promoted
+                and candidate_score >= locked_score - 0.20
+            )
+            is_supported_prior_relative = bool(
+                self._latest_prior_selected
                 and candidate_score >= locked_score - 0.20
                 and candidate_confidence >= 0.35
             )
-            if not is_supported_double:
+            if not is_supported_double and not is_supported_prior_relative:
                 self._clear_challenger()
                 return
             self._remember_challenger(
@@ -672,6 +737,8 @@ class TempoSourceArbiter:
         spectral: BeatState,
         fallback: BeatState,
         now: float | None = None,
+        spectral_support_for_fallback: float = 0.0,
+        spectral_peak_score: float = 0.0,
     ) -> BeatState:
         candidates = {"spectral": spectral, "fallback": fallback}
         valid = {
@@ -755,6 +822,13 @@ class TempoSourceArbiter:
             )
         else:
             close = abs(challenger.bpm - current.bpm) / current.bpm <= 0.08
+            # Once the preferred spectral clock owns a matching tempo family,
+            # a slightly more confident interval clock must not take it back.
+            # That caused dozens of source handoffs inside a single steady
+            # track even though the two clocks differed by only a few BPM.
+            if close and self.source == "spectral":
+                self._clear_pending_source()
+                return self._publish(current, now)
             ratio = challenger.bpm / current.bpm
             supported_spectral_double = bool(
                 other_source == "spectral"
@@ -766,11 +840,20 @@ class TempoSourceArbiter:
                 and 1.90 <= ratio <= 2.10
                 and challenger.confidence >= 0.78
             )
+            supported_fallback_relative = bool(
+                other_source == "fallback"
+                and _same_metrical_family(challenger.bpm, current.bpm)
+                and challenger.confidence >= 0.72
+                and spectral_peak_score >= 0.16
+                and spectral_support_for_fallback
+                >= max(0.16, spectral_peak_score * 0.68)
+            )
             if (
                 not close
                 and _same_metrical_family(challenger.bpm, current.bpm)
                 and not supported_spectral_double
                 and not supported_fallback_double
+                and not supported_fallback_relative
             ):
                 self._clear_pending_source()
                 return self._publish(current, now)
@@ -780,6 +863,8 @@ class TempoSourceArbiter:
                 if supported_spectral_double
                 else -0.25
                 if supported_fallback_double
+                else -0.20
+                if supported_fallback_relative
                 else -0.20
                 if preferred_spectral
                 else 0.12
@@ -794,6 +879,8 @@ class TempoSourceArbiter:
                 if supported_spectral_double
                 else 24
                 if supported_fallback_double
+                else 36
+                if supported_fallback_relative
                 else 12 if other_source == "spectral" else 120
             )
         if self._pending_source == other_source:

@@ -140,7 +140,7 @@ class ResearchManager:
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, include_training: bool = True) -> dict[str, Any]:
         """Return a complete diagnosis without importing ML into this process."""
         self.ensure_layout()
         components = [
@@ -189,7 +189,7 @@ class ResearchManager:
                 else None
             ),
         }
-        if self.store is not None:
+        if self.store is not None and include_training:
             from lumen_engine.offline import training_readiness
 
             result["training"] = training_readiness(
