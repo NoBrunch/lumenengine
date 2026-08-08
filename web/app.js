@@ -47,6 +47,7 @@ const app = {
   rehearsalTimer: null,
   motionTimer: null,
   motionEditorScope: null,
+  colorPaletteDraft: [],
   participantId: null,
   participantName: "",
   feedbackReceipts: [],
@@ -571,6 +572,7 @@ async function initialize() {
   renderSequenceDraft();
   updateClock();
   window.setInterval(updateClock, 1000);
+  window.requestAnimationFrame(drawCenterMotion);
   try {
     app.bootstrap = await api("/api/bootstrap");
     app.status = app.bootstrap.status;
@@ -669,6 +671,7 @@ function renderBootstrap() {
   if (!app.selectedFixtureId && fixtures().length) selectFixture(fixtures()[0].id);
   renderSystem(app.system);
   renderOperatorSettings(app.bootstrap.settings || {});
+  renderColorStudio(app.bootstrap.settings || {});
   renderResearch(app.bootstrap.research || {});
   renderLink(app.link || {});
   renderMemory(app.memory);
@@ -736,6 +739,7 @@ function renderRehearsal(rehearsal = {}) {
     "rehearsal-strobe": Number(rehearsal.strobe) * 100,
     "rehearsal-palette": rehearsal.palette,
   };
+  renderColorOptions(rehearsal.palette);
   for (const [id, value] of Object.entries(values)) {
     const element = $(id);
     if (element && document.activeElement !== element && value !== undefined) element.value = value;
@@ -749,6 +753,62 @@ function renderRehearsal(rehearsal = {}) {
   if ($("rehearsal-start")) $("rehearsal-start").disabled = running;
   if ($("rehearsal-stop")) $("rehearsal-stop").disabled = !running;
   renderMotionEditor(rehearsal.motion_editor || {});
+}
+
+function colorStudioSettings() {
+  return app.bootstrap?.settings?.color_studio || { colors: {}, palettes: {} };
+}
+
+function renderColorOptions(selected = "") {
+  const select = $("rehearsal-palette");
+  if (!select) return;
+  const settings = app.bootstrap?.settings || {};
+  const families = settings.palette_families || ["auto", "party_vivid", "midnight_teal", "cool", "warm", "magenta_blue", "cyan_violet", "red_amber"];
+  const colors = colorStudioSettings().colors || {};
+  const options = [
+    ...families.map((value) => [value, label(value)]),
+    ...Object.keys(colors).map((value) => [value, `Solid · ${label(value)}`]),
+  ];
+  const existing = options.map(([value, name]) => `<option value="${escapeHtml(value)}">${escapeHtml(name)}</option>`).join("");
+  if (select.innerHTML !== existing) select.innerHTML = existing;
+  if (selected) select.value = selected;
+  const calibration = $("calibration-color");
+  if (calibration) {
+    const solidOptions = Object.keys(colors).map((value) => `<option value="${escapeHtml(value)}">Solid · ${escapeHtml(label(value))}</option>`).join("");
+    if (calibration.innerHTML !== solidOptions) calibration.innerHTML = solidOptions;
+    const controlPalette = app.status?.controls?.palette;
+    if (controlPalette && colors[controlPalette]) calibration.value = controlPalette;
+  }
+}
+
+function renderColorStudio(settings = app.bootstrap?.settings || {}) {
+  const studio = settings.color_studio || { colors: {}, palettes: {} };
+  const colors = studio.colors || {};
+  const palettes = studio.palettes || {};
+  const list = $("solid-color-list");
+  if (list) {
+    list.innerHTML = Object.entries(colors).map(([name, hex]) => `<button class="solid-color-chip" data-solid-color="${escapeHtml(name)}" title="${escapeHtml(hex)}"><i style="background:${escapeHtml(hex)}"></i><span>${escapeHtml(label(name))}</span><code>${escapeHtml(hex)}</code></button>`).join("");
+  }
+  const picker = $("palette-color-picker");
+  if (picker) {
+    picker.innerHTML = Object.entries(colors).map(([name, hex]) => `<label class="palette-swatch"><input type="checkbox" value="${escapeHtml(hex)}" ${app.colorPaletteDraft.includes(hex) ? "checked" : ""}><i style="background:${escapeHtml(hex)}"></i><span>${escapeHtml(label(name))}</span></label>`).join("");
+  }
+  const paletteNames = Object.keys(palettes);
+  setText("color-studio-status", `${Object.keys(colors).length} solid colors · ${paletteNames.length} custom palettes`);
+  renderColorOptions(app.status?.rehearsal?.palette || "");
+}
+
+async function saveColorStudio(payload) {
+  try {
+    const result = await api("/api/settings", { method: "POST", body: { color_studio: payload } });
+    app.bootstrap.settings = result.settings;
+    app.status = result.status;
+    renderColorStudio(result.settings);
+    renderStatus();
+    toast("Color Studio saved", "Solid colors and palettes are available for rehearsal and fixture tests.", "success");
+  } catch (error) {
+    toast("Color Studio was not saved", error.message, "error");
+  }
 }
 
 function renderMotionEditor(editor = {}) {
@@ -889,6 +949,43 @@ function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || [
       }
     }
   });
+}
+
+function drawCenterMotion() {
+  const canvas = $("center-motion-canvas");
+  if (!canvas || $("motion-center-preview")?.classList.contains("hidden")) return;
+  const configured = configureCanvas(canvas);
+  if (!configured) return;
+  const { context: ctx, width, height } = configured;
+  const values = app.status?.rehearsal?.motion_editor?.groups?.center?.values || {};
+  const t = performance.now() / 1000;
+  const cycle = Math.max(1, Number(values.cycle_beats || 8));
+  const beat = t * Number(app.status?.rehearsal?.bpm || 120) / 60;
+  const phase = (beat / cycle) * Math.PI * 2;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#071012"; ctx.fillRect(0, 0, width, height);
+  const cx = width * .5, cy = height * .53, radius = Math.min(width, height) * .16;
+  ctx.strokeStyle = "rgba(100,160,151,.22)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, radius * 1.65, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = "#c9e5df"; ctx.beginPath(); ctx.arc(cx, cy, radius * .38, 0, Math.PI * 2); ctx.fill();
+  const body = Number(values.body_travel ?? .75), arm1 = Number(values.arm_1_travel ?? .85), arm2 = Number(values.arm_2_travel ?? .85);
+  const rates = [Number(values.arm_1_speed || 1), Number(values.arm_2_speed || 1)];
+  const phases = [Number(values.arm_1_phase || 0) * Math.PI * 2, Number(values.arm_2_phase || 0) * Math.PI * 2];
+  const dirs = [Number(values.arm_1_direction || 1), Number(values.arm_2_direction || 1)];
+  const colors = ["#68d9cd", "#d7a85e"];
+  [arm1, arm2].forEach((travel, index) => {
+    const angle = phase * rates[index] * dirs[index] + phases[index] + (index ? Math.PI : 0);
+    const length = radius * (1.5 + travel * 2.1);
+    const ex = cx + Math.cos(angle) * length;
+    const ey = cy + Math.sin(angle) * length * .55;
+    ctx.strokeStyle = colors[index]; ctx.lineWidth = Math.max(3, radius * .18);
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
+    ctx.fillStyle = colors[index]; ctx.beginPath(); ctx.arc(ex, ey, radius * .22, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.strokeStyle = "rgba(210,232,225,.55)"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, radius * (1 + body * .45), 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = "#718681"; ctx.font = "10px DejaVu Sans Mono"; ctx.fillText("BODY + ARM 1 + ARM 2", 10, height - 10);
+  window.requestAnimationFrame(drawCenterMotion);
 }
 
 function motionFormValues() {
@@ -1584,6 +1681,7 @@ function captureLiveCue(lane) {
 function renderStatus() {
   const status = app.status;
   if (!status) return;
+  renderColorStudio(app.bootstrap?.settings || {});
   const engine = status.engine;
   const controls = status.controls;
   const observation = status.observation;
@@ -4503,6 +4601,34 @@ function installHandlers() {
       setText("rehearsal-strobe-value", Number($("rehearsal-strobe").value) ? `${$("rehearsal-strobe").value}%` : "Off");
       queueRehearsal(rehearsalFormValues());
     });
+  });
+  $("color-add-button")?.addEventListener("click", () => {
+    const name = $("color-name-input")?.value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_");
+    const value = $("color-value-input")?.value;
+    if (!name || !value) return toast("Name the color first", "Choose a name and hexadecimal color.", "error");
+    const studio = colorStudioSettings();
+    saveColorStudio({ colors: { ...(studio.colors || {}), [name]: value }, palettes: studio.palettes || {} });
+  });
+  $("palette-color-picker")?.addEventListener("change", () => {
+    app.colorPaletteDraft = $$('[data-page="rig"] #palette-color-picker input:checked').map((input) => input.value);
+  });
+  $("palette-save-button")?.addEventListener("click", () => {
+    const name = $("palette-name-input")?.value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_");
+    if (!name || app.colorPaletteDraft.length === 0) return toast("Choose a palette name and colors", "Select at least one solid color for this palette.", "error");
+    const studio = colorStudioSettings();
+    saveColorStudio({ colors: studio.colors || {}, palettes: { ...(studio.palettes || {}), [name]: app.colorPaletteDraft } });
+  });
+  $("calibration-color")?.addEventListener("change", (event) => {
+    patchControl("palette", event.target.value);
+  });
+  $("solid-color-list")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-solid-color]");
+    if (!button) return;
+    const value = button.dataset.solidColor;
+    if ($("rehearsal-palette")) {
+      $("rehearsal-palette").value = value;
+      patchRehearsal({ palette: value });
+    }
   });
   $$('[data-motion-control]').forEach((input) => {
     input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {

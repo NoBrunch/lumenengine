@@ -208,8 +208,8 @@ class RuntimeTests(unittest.TestCase):
             initial_ids,
         )
 
-        runtime.step(self._lane_observation(1.8, 0.9))
-        runtime.step(self._lane_observation(2.0, 0.1))
+        for timestamp in (1.8, 2.0, 2.8, 3.0, 3.8, 4.0):
+            runtime.step(self._lane_observation(timestamp, 0.9 if timestamp % 1.0 > 0.5 else 0.1))
         developed = runtime.choreography_snapshot()["lanes"]
         self.assertEqual(
             developed["movers"]["active_sequence_id"],
@@ -246,8 +246,8 @@ class RuntimeTests(unittest.TestCase):
         )
         runtime.step(self._lane_observation(0.8, 0.9, section="build"))
         runtime.step(self._lane_observation(1.0, 0.1, section="build"))
-        runtime.step(self._lane_observation(1.8, 0.9, section="build"))
-        runtime.step(self._lane_observation(2.0, 0.1, section="build"))
+        for timestamp in (1.8, 2.0, 2.8, 3.0, 3.8, 4.0):
+            runtime.step(self._lane_observation(timestamp, 0.9 if timestamp % 1.0 > 0.5 else 0.1, section="build"))
         after = runtime.choreography_snapshot()["lanes"]
         self.assertEqual(
             after["movers"]["active_sequence_id"],

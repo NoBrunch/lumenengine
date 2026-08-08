@@ -29,6 +29,7 @@ from lumen_engine.expression import ExpressionEngine
 from lumen_engine.fixture_output import (
     apply_auxiliary_fixture,
     apply_moving_head_profile,
+    expression_rgb,
 )
 from lumen_engine.models import (
     FixturePatch,
@@ -242,6 +243,12 @@ class PerformanceRuntime:
             else dict(center_motion_tunings)
         )
         self._effective_outputs: dict[str, EffectiveCueOutput] = {}
+        # One actual color is held per fixture lane. Palette selection is a
+        # cue-level decision; brightness and movement may change every frame
+        # without making the beam change hue.
+        self._latched_colors: dict[str, tuple[float, float, float]] = {}
+        self._boundary_changed_lanes: set[str] = set()
+        self._lane_handoff_started_s: dict[str, float] = {}
 
     def set_rehearsal(
         self,
@@ -257,11 +264,16 @@ class PerformanceRuntime:
         """Force one auditable routine without invoking the song planner."""
         if routine is None:
             self._rehearsal_step = None
+            self._latched_colors.clear()
             return
         previous_routine = (
             self._rehearsal_step.routine
             if self._rehearsal_step is not None
             else None
+        )
+        previous_palette = (
+            self._rehearsal_step.palette
+            if self._rehearsal_step is not None else None
         )
         self._rehearsal_step = ChoreographyStep(
             start_beat=0.0,
@@ -274,8 +286,9 @@ class PerformanceRuntime:
         )
         self._rehearsal_size = clamp(size, 0.0, 1.0)
         self._rehearsal_isolate = bool(isolate)
-        if previous_routine != routine:
+        if previous_routine != routine or previous_palette != palette:
             self._rehearsal_phase_origin_s = None
+            self._latched_colors.clear()
 
     def set_motion_tunings(
         self,
@@ -352,6 +365,9 @@ class PerformanceRuntime:
             lane: 0.0 for lane in CHOREOGRAPHY_LANES
         }
         self._pending_replan_lanes.clear()
+        self._latched_colors.clear()
+        self._boundary_changed_lanes.clear()
+        self._lane_handoff_started_s.clear()
         for lane in CHOREOGRAPHY_LANES:
             self._consumed_recalled_sequence_ids[lane].clear()
         self._activate_pending_feedback()
@@ -999,6 +1015,7 @@ class PerformanceRuntime:
                 )
             )
             if should_reselect:
+                self._boundary_changed_lanes.add(lane)
                 if not feedback_activated:
                     self._activate_pending_feedback()
                     feedback_activated = True
@@ -1377,7 +1394,25 @@ class PerformanceRuntime:
             )
         )
 
+    def _latched_color_for(
+        self,
+        lane: str,
+        fixture_id: str,
+        decision: PerformanceDecision,
+        palette_bias: float,
+        color_activity: float,
+    ) -> tuple[float, float, float]:
+        """Return the fixture's held color for the current cue lease."""
+
+        key = f"{lane}:{fixture_id}"
+        if key not in self._latched_colors or lane in self._boundary_changed_lanes:
+            self._latched_colors[key] = expression_rgb(
+                decision, palette_bias, color_activity
+            )
+        return self._latched_colors[key]
+
     def step(self, observation: MusicalObservation) -> RuntimeFrame:
+        self._boundary_changed_lanes = set()
         self._active_section = observation.section
         decision = self.expression.decide(observation)
         rehearsal_step = self._rehearsal_step
@@ -1482,6 +1517,8 @@ class PerformanceRuntime:
                     beat_pulse=observation.beat_pulse,
                     step_elapsed_beats=self._active_step_elapsed_beats["movers"],
                 )
+            for lane in self._boundary_changed_lanes:
+                self._lane_handoff_started_s[lane] = observation.timestamp_s
         elapsed = (
             None
             if self._last_timestamp_s is None
@@ -1610,6 +1647,13 @@ class PerformanceRuntime:
                 )
             if self._calibration_overrides.get(fixture.fixture_id) is not None:
                 fixture_decision = replace(fixture_decision, brightness=0.35)
+            latched_rgb = self._latched_color_for(
+                "movers",
+                fixture.fixture_id,
+                fixture_decision,
+                feedback.palette,
+                effective.color_activity,
+            )
             try:
                 calibration_override = self._calibration_overrides.get(fixture.fixture_id)
                 rehearsal_inactive = (
@@ -1683,6 +1727,27 @@ class PerformanceRuntime:
                         solution,
                         effective,
                     )
+                    handoff_start = self._lane_handoff_started_s.get("movers")
+                    if previous is not None and handoff_start is not None:
+                        handoff_seconds = max(
+                            0.25, 240.0 / (observation.bpm or 120.0)
+                        )
+                        handoff_alpha = clamp(
+                            (observation.timestamp_s - handoff_start)
+                            / handoff_seconds,
+                            0.0,
+                            1.0,
+                        )
+                        if handoff_alpha < 1.0:
+                            solution = replace(
+                                solution,
+                                pan_deg=previous[0]
+                                + (solution.pan_deg - previous[0]) * handoff_alpha,
+                                tilt_deg=previous[1]
+                                + (solution.tilt_deg - previous[1]) * handoff_alpha,
+                            )
+                        else:
+                            self._lane_handoff_started_s.pop("movers", None)
                 if previous is not None and elapsed is not None:
                     solution = self._rate_limit(fixture, solution, previous, elapsed)
                 self._previous[fixture.fixture_id] = (
@@ -1733,6 +1798,7 @@ class PerformanceRuntime:
                         * (observation.bpm or 120.0)
                         / 60.0
                     ),
+                    latched_rgb=latched_rgb,
                 )
                 if calibration_override is not None:
                     # The profile's speed channel is intentionally overridden
@@ -1831,6 +1897,13 @@ class PerformanceRuntime:
                     else "breathe"
                 ),
             )
+            latched_rgb = self._latched_color_for(
+                "center",
+                fixture.fixture_id,
+                fixture_decision,
+                feedback.palette,
+                effective.color_activity,
+            )
             if (
                 rehearsal_step is not None
                 and self._rehearsal_isolate
@@ -1873,6 +1946,7 @@ class PerformanceRuntime:
                         - self._rehearsal_phase_origin_s,
                     )
                 ),
+                latched_rgb=latched_rgb,
             )
 
         self.output.send(frame)
@@ -2215,86 +2289,86 @@ def _choreography_candidates(
         )
 
     if lane == "movers":
-        calm = sequence("movers-calm-arc", (0.0, 8.0, "breathe"))
+        calm = sequence("movers-calm-arc", (0.0, 16.0, "breathe"))
         calm_development = sequence(
             "movers-calm-open",
-            (0.0, 2.0, "fan_sweep"),
-            (2.0, 6.0, "breathe"),
+            (0.0, 8.0, "fan_sweep"),
+            (8.0, 8.0, "breathe"),
         )
         groove = sequence(
             "movers-groove-exchange",
-            (0.0, 4.0, "figure_eight"),
-            (4.0, 4.0, "opposing_chase"),
+            (0.0, 8.0, "figure_eight"),
+            (8.0, 8.0, "opposing_chase"),
         )
         groove_development = sequence(
             "movers-groove-wide-answer",
-            (0.0, 4.0, "fan_sweep"),
-            (4.0, 2.0, "beat_nod"),
-            (6.0, 2.0, "figure_eight"),
+            (0.0, 8.0, "fan_sweep"),
+            (8.0, 4.0, "beat_nod"),
+            (12.0, 4.0, "figure_eight"),
         )
         build = sequence(
             "movers-build-and-answer",
-            (0.0, 4.0, "fan_sweep"),
-            (4.0, 2.0, "beat_nod"),
-            (6.0, 2.0, "opposing_chase"),
+            (0.0, 8.0, "fan_sweep"),
+            (8.0, 4.0, "beat_nod"),
+            (12.0, 4.0, "opposing_chase"),
         )
         build_development = sequence(
             "movers-build-figure-rise",
-            (0.0, 4.0, "figure_eight"),
-            (4.0, 2.0, "fan_sweep"),
-            (6.0, 2.0, "beat_nod"),
+            (0.0, 8.0, "figure_eight"),
+            (8.0, 4.0, "fan_sweep"),
+            (12.0, 4.0, "beat_nod"),
         )
         release = sequence(
             "movers-release-counterplay",
-            (0.0, 2.0, "opposing_chase"),
-            (2.0, 2.0, "beat_nod"),
-            (4.0, 4.0, "counter_rotate"),
+            (0.0, 4.0, "opposing_chase"),
+            (4.0, 4.0, "beat_nod"),
+            (8.0, 8.0, "counter_rotate"),
         )
         release_development = sequence(
             "movers-release-wide-trade",
-            (0.0, 4.0, "counter_rotate"),
-            (4.0, 2.0, "opposing_chase"),
-            (6.0, 2.0, "beat_nod"),
+            (0.0, 8.0, "counter_rotate"),
+            (8.0, 4.0, "opposing_chase"),
+            (12.0, 4.0, "beat_nod"),
         )
     else:
-        calm = sequence("center-calm-arc", (0.0, 8.0, "breathe"))
+        calm = sequence("center-calm-arc", (0.0, 16.0, "breathe"))
         calm_development = sequence(
             "center-calm-open",
-            (0.0, 2.0, "fan_sweep"),
-            (2.0, 6.0, "breathe"),
+            (0.0, 8.0, "fan_sweep"),
+            (8.0, 8.0, "breathe"),
         )
         groove = sequence(
             "center-groove-counterplay",
-            (0.0, 4.0, "counter_rotate"),
-            (4.0, 4.0, "fan_sweep"),
+            (0.0, 8.0, "counter_rotate"),
+            (8.0, 8.0, "fan_sweep"),
         )
         groove_development = sequence(
             "center-groove-answer",
-            (0.0, 4.0, "opposing_chase"),
-            (4.0, 4.0, "counter_rotate"),
+            (0.0, 8.0, "opposing_chase"),
+            (8.0, 8.0, "counter_rotate"),
         )
         build = sequence(
             "center-build-chase",
-            (0.0, 4.0, "opposing_chase"),
-            (4.0, 4.0, "counter_rotate"),
+            (0.0, 8.0, "opposing_chase"),
+            (8.0, 8.0, "counter_rotate"),
         )
         build_development = sequence(
             "center-build-fan-answer",
-            (0.0, 4.0, "fan_sweep"),
-            (4.0, 2.0, "opposing_chase"),
-            (6.0, 2.0, "counter_rotate"),
+            (0.0, 8.0, "fan_sweep"),
+            (8.0, 4.0, "opposing_chase"),
+            (12.0, 4.0, "counter_rotate"),
         )
         release = sequence(
             "center-release-exchange",
-            (0.0, 2.0, "beat_nod"),
-            (2.0, 2.0, "opposing_chase"),
-            (4.0, 4.0, "counter_rotate"),
+            (0.0, 4.0, "beat_nod"),
+            (4.0, 4.0, "opposing_chase"),
+            (8.0, 8.0, "counter_rotate"),
         )
         release_development = sequence(
             "center-release-counter-chase",
-            (0.0, 4.0, "counter_rotate"),
-            (4.0, 2.0, "opposing_chase"),
-            (6.0, 2.0, "beat_nod"),
+            (0.0, 8.0, "counter_rotate"),
+            (8.0, 4.0, "opposing_chase"),
+            (12.0, 4.0, "beat_nod"),
         )
 
     def developed(

@@ -371,6 +371,27 @@ alternating emitters, circles, sweeps, nods, laser accents, strip programs,
 and strobe accents. Its activity is reduced during soft passages and parked
 during sustained silence.
 
+### Color Studio and color latching
+
+The Room & rig page includes Color Studio. Solid colors are named hexadecimal
+RGB values and can be selected directly during fixture calibration or
+Rehearsal. Custom palettes are optional collections of those colors for Live
+development; they are not required for a fixture test.
+
+During Live, Lumen latches one resolved RGB color per fixture lane for the
+active choreography lease. The lease normally lasts 16 beats or longer. Energy
+and intensity may still modulate brightness, but they do not silently change
+the selected hue. A confirmed musical boundary, a new explicit cue, or a new
+song can replace the latch. This makes a solid beam useful for judging pan,
+tilt, arm travel, and fixture direction.
+
+### Center motion preview
+
+Motion Studio's Center multi-effect view includes an animated schematic of the
+body and both independent arms. It is a visual model of the configured cycle,
+travel, rate, phase, and direction—not a camera image of the physical fixture.
+The actual fixture profile and DMX channel mapping remain authoritative.
+
 ## Feedback and learning
 
 Feedback is both stored and used.

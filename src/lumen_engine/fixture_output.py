@@ -36,6 +36,64 @@ PALETTE_FAMILIES: dict[str, tuple[int, ...] | None] = {
     "red_amber": (3, 4, 6),
 }
 
+# User-authored colors are kept separate from palette families.  A palette is
+# useful for developing a show, but a fixture test needs one unambiguous color
+# that does not change because the beat clock advanced.  The control layer
+# replaces this registry when the operator edits Color Studio.
+_CUSTOM_COLORS: dict[str, tuple[float, float, float]] = {}
+_CUSTOM_PALETTES: dict[str, tuple[tuple[float, float, float], ...]] = {}
+
+
+def configure_color_library(
+    colors: dict[str, str] | None = None,
+    palettes: dict[str, list[str]] | None = None,
+) -> None:
+    """Install validated operator colors for the current Lumen process."""
+
+    def parse(value: str) -> tuple[float, float, float] | None:
+        raw = str(value).strip().lstrip("#")
+        if len(raw) != 6:
+            return None
+        try:
+            return tuple(int(raw[index:index + 2], 16) / 255.0 for index in (0, 2, 4))  # type: ignore[return-value]
+        except ValueError:
+            return None
+
+    parsed_colors: dict[str, tuple[float, float, float]] = {}
+    for name, value in (colors or {}).items():
+        key = str(name).strip()[:48]
+        rgb = parse(str(value))
+        if key and rgb is not None:
+            parsed_colors[key] = rgb
+    parsed_palettes: dict[str, tuple[tuple[float, float, float], ...]] = {}
+    for name, values in (palettes or {}).items():
+        key = str(name).strip()[:48]
+        if not key or not isinstance(values, list):
+            continue
+        entries = tuple(rgb for item in values if (rgb := parse(str(item))) is not None)
+        if entries:
+            parsed_palettes[key] = entries[:16]
+    _CUSTOM_COLORS.clear()
+    _CUSTOM_COLORS.update(parsed_colors)
+    _CUSTOM_PALETTES.clear()
+    _CUSTOM_PALETTES.update(parsed_palettes)
+
+
+def color_library_snapshot() -> dict[str, object]:
+    return {
+        "colors": {
+            name: "#%02x%02x%02x" % tuple(round(channel * 255) for channel in rgb)
+            for name, rgb in _CUSTOM_COLORS.items()
+        },
+        "palettes": {
+            name: [
+                "#%02x%02x%02x" % tuple(round(channel * 255) for channel in rgb)
+                for rgb in values
+            ]
+            for name, values in _CUSTOM_PALETTES.items()
+        },
+    }
+
 
 def _strobe_request(
     observation: MusicalObservation | None,
@@ -136,7 +194,24 @@ def expression_rgb(
         (0.55, 0.08, 1.00),  # violet
         (0.95, 0.95, 1.00),  # white hit
     )
-    mode = PALETTE_FAMILIES.get(decision.palette_hint)
+    palette_hint = str(decision.palette_hint or "auto")
+    if palette_hint.startswith("solid:"):
+        raw = palette_hint[6:].strip().lstrip("#")
+        if len(raw) == 6:
+            try:
+                return tuple(int(raw[index:index + 2], 16) / 255.0 for index in (0, 2, 4))  # type: ignore[return-value]
+            except ValueError:
+                pass
+    custom = _CUSTOM_COLORS.get(palette_hint)
+    if custom is not None:
+        return custom
+    custom_palette = _CUSTOM_PALETTES.get(palette_hint)
+    if custom_palette:
+        # Custom palette selection is still deterministic. Runtime color
+        # latching decides when this index may advance.
+        index = int(max(0.0, decision.timestamp_s) / 8.0 + tension * 2.0 + palette_bias * 2.0)
+        return custom_palette[index % len(custom_palette)]
+    mode = PALETTE_FAMILIES.get(palette_hint)
     # Structure controls how frequently the palette family develops. Quiet
     # states hold a color long enough to read; drops can advance normally.
     palette_clock = max(0.0, decision.timestamp_s) * clamp(
@@ -157,7 +232,7 @@ def expression_rgb(
     blue *= saturation
     # Release changes movement/brightness, not color to white. This keeps a
     # release from being mistaken for a strobe hit.
-    if energy < 0.46 and decision.palette_hint in {"auto", "cool", "cyan_violet"}:
+    if energy < 0.46 and palette_hint in {"auto", "cool", "cyan_violet"}:
         # Soft acoustic/jazz material defaults to cool, low-saturation color.
         red = 0.18
         green = 0.08
@@ -200,6 +275,7 @@ def apply_moving_head_profile(
     fixture_index: int = 0,
     fixture_count: int = 1,
     chase_beat_position: float | None = None,
+    latched_rgb: tuple[float, float, float] | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -283,9 +359,9 @@ def apply_moving_head_profile(
         for name, value in zip(
             ("red", "green", "blue", "white"),
             rgb_to_rgbw(
-                expression_rgb(
-                    decision, chase_palette_bias, color_activity
-                )
+                latched_rgb
+                if latched_rgb is not None
+                else expression_rgb(decision, chase_palette_bias, color_activity)
             ),
         ):
             _set_relative(
@@ -312,6 +388,7 @@ def apply_auxiliary_fixture(
     enabled: bool = True,
     motion_tuning: MotionTuning | CenterMotionTuning | None = None,
     motion_timestamp_s: float | None = None,
+    latched_rgb: tuple[float, float, float] | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -336,6 +413,7 @@ def apply_auxiliary_fixture(
             enabled,
             motion_tuning,
             motion_timestamp_s,
+            latched_rgb,
         )
         return
     dimmer = profile.channels.get("dimmer")
@@ -368,6 +446,7 @@ def _apply_generic_multi_effect(
     enabled: bool = True,
     motion_tuning: MotionTuning | CenterMotionTuning | None = None,
     motion_timestamp_s: float | None = None,
+    latched_rgb: tuple[float, float, float] | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     assert profile is not None
@@ -397,7 +476,9 @@ def _apply_generic_multi_effect(
         return
     if idle_amount >= 1.0:
         rgbw = rgb_to_rgbw(
-            expression_rgb(decision, palette_bias, color_activity)
+            latched_rgb
+            if latched_rgb is not None
+            else expression_rgb(decision, palette_bias, color_activity)
         )
         values = {
             "body_rotation": 128,
@@ -621,10 +702,14 @@ def _apply_generic_multi_effect(
         ball_bias = palette_bias + (0.45 if even_beat else -0.45)
         arm_bias = palette_bias + (-0.45 if even_beat else 0.45)
     ball_rgbw = rgb_to_rgbw(
-        expression_rgb(decision, ball_bias, color_activity)
+        latched_rgb
+        if latched_rgb is not None
+        else expression_rgb(decision, ball_bias, color_activity)
     )
     arm_rgbw = rgb_to_rgbw(
-        expression_rgb(decision, arm_bias, color_activity)
+        latched_rgb
+        if latched_rgb is not None
+        else expression_rgb(decision, arm_bias, color_activity)
     )
     contrast = beat_pulse * (0.45 + 0.45 * activity)
     ball_scale = clamp(
@@ -656,7 +741,9 @@ def _apply_generic_multi_effect(
         for color_name, value in zip(("red", "green", "blue", "white"), color_values):
             values[f"{prefix}_{color_name}"] = round(value * scale)
 
-    red, green, _blue = expression_rgb(decision)
+    red, green, _blue = (
+        latched_rgb if latched_rgb is not None else expression_rgb(decision)
+    )
     laser_mode = "beat" if center_tuning is None else center_tuning.laser_mode
     laser_level = 1.0 if center_tuning is None else center_tuning.laser_level
     laser_floor = (72.0 + 138.0 * activity) * laser_level
@@ -692,7 +779,9 @@ def _apply_generic_multi_effect(
         values["strip_speed"] = round((58 + 186 * activity) * strip_scale)
     else:
         values["strip_program"] = _strip_color_value(
-            expression_rgb(decision, palette_bias, color_activity)
+            latched_rgb
+            if latched_rgb is not None
+            else expression_rgb(decision, palette_bias, color_activity)
         )
 
     for channel_name, value in values.items():

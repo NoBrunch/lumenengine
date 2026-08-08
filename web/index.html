@@ -401,6 +401,7 @@
                     <div class="motion-path-legend"><span class="mover-a">Mover A</span><span class="mover-b">Mover B</span><span>Pan ↔ · Tilt ↕</span></div>
                   </div>
                   <div id="motion-center-preview" class="center-motion-preview hidden">
+                    <canvas id="center-motion-canvas" aria-label="Animated center fixture motion preview"></canvas>
                     <div><span>Body</span><b id="center-preview-body">Musical rotation</b></div>
                     <div><span>Arm 1</span><b id="center-preview-arm-1">Independent</b></div>
                     <div><span>Arm 2</span><b id="center-preview-arm-2">Independent</b></div>
@@ -618,6 +619,7 @@
                         <div class="calibration-points"><button type="button" data-calibration-preview="tilt_high">High <span id="capture-tilt-high">—</span></button><button type="button" data-calibration-preview="tilt_home">Home <span id="capture-tilt-home">—</span></button><button type="button" data-calibration-preview="tilt_low">Low <span id="capture-tilt-low">—</span></button></div>
                       </div>
                       <label>Jog speed <output id="calibration-speed-value">192</output><input id="calibration-speed" type="range" min="0" max="255" value="192" disabled></label>
+                      <label>Test color <select id="calibration-color"><option value="pure_blue">Solid · Pure blue</option></select></label>
                       <p id="calibration-direction-note" class="calibration-direction-note">Axis direction will be detected from the captured points.</p>
                     </div>
                     <div class="calibration-storage" aria-hidden="true">
@@ -644,6 +646,24 @@
                     </div>
                   </fieldset>
                 </form>
+              </section>
+              <section class="panel color-studio-panel">
+                <div class="panel-titlebar"><h3>Color Studio</h3><span id="color-studio-status" class="panel-note">Solid fixture colors</span></div>
+                <p class="control-help">Create named solid colors for calibration and rehearsal. A solid selection is latched for the cue; intensity can still change without changing hue.</p>
+                <div class="color-studio-grid">
+                  <div>
+                    <h4>Solid colors</h4>
+                    <div id="solid-color-list" class="solid-color-list"></div>
+                    <div class="color-add-row"><input id="color-name-input" placeholder="Name" maxlength="48"><input id="color-value-input" type="color" value="#00a8a8"><button id="color-add-button" class="compact-button">Add color</button></div>
+                  </div>
+                  <div>
+                    <h4>Palette editor</h4>
+                    <label><span>Palette name</span><input id="palette-name-input" placeholder="Garage cool" maxlength="48"></label>
+                    <div id="palette-color-picker" class="palette-color-picker"></div>
+                    <button id="palette-save-button" class="compact-button primary">Save palette</button>
+                    <small>Palettes are optional for Live; choose a solid color when testing a fixture or motion.</small>
+                  </div>
+                </div>
               </section>
             </div>
           </section>

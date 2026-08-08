@@ -97,7 +97,11 @@ from lumen_engine.profiles import (
     profile_summary,
 )
 from lumen_engine.research import ResearchManager
-from lumen_engine.fixture_output import PALETTE_FAMILIES
+from lumen_engine.fixture_output import (
+    PALETTE_FAMILIES,
+    color_library_snapshot,
+    configure_color_library,
+)
 from lumen_engine.runtime import PerformanceRuntime, RuntimeFrame
 from lumen_engine.spatial import SpatialTargetingEngine, UnreachableTargetError
 from lumen_engine.structure import (
@@ -128,6 +132,29 @@ DEFAULT_SPOTIFY_TOKEN = (
     Path.home() / ".local" / "state" / "lumenengine" / "spotify-token.json"
 )
 SPOTIFY_MEDIA_POLL_INTERVAL_S = 2.0
+
+BUILTIN_SOLID_COLORS = {
+    "pure_red": "#ff0000",
+    "pure_green": "#00ff00",
+    "pure_blue": "#0000ff",
+    "cyan": "#00ffff",
+    "magenta": "#ff00ff",
+    "amber": "#ff8000",
+    "deep_violet": "#6000ff",
+    "white": "#ffffff",
+}
+
+
+def _valid_palette_hint(value: str) -> bool:
+    if value in PALETTE_FAMILIES:
+        return True
+    if value.startswith("solid:"):
+        raw = value[6:].lstrip("#")
+        return len(raw) == 6 and all(
+            character in "0123456789abcdefABCDEF" for character in raw
+        )
+    library = color_library_snapshot()
+    return value in (library.get("colors") or {}) or value in (library.get("palettes") or {})
 
 REHEARSAL_ROUTINES: tuple[dict[str, str], ...] = (
     {
@@ -190,7 +217,7 @@ class OperatorControls:
             self.blackout = bool(values["blackout"])
         if "palette" in values:
             palette = str(values["palette"]).strip()
-            if palette in PALETTE_FAMILIES:
+            if _valid_palette_hint(palette):
                 self.palette = palette[:64]
 
 
@@ -230,7 +257,7 @@ class RehearsalControls:
             self.strobe = clamp(float(values["strobe"]), 0.0, 1.0)
         if "palette" in values:
             palette = str(values["palette"]).strip()
-            if palette not in PALETTE_FAMILIES:
+            if not _valid_palette_hint(palette):
                 raise ValueError("unknown rehearsal palette")
             self.palette = palette
         if "isolate" in values:
@@ -383,6 +410,20 @@ class LumenApplication:
         self.settings_path = Path(settings_path)
         self.motion_path = self.settings_path.parent / "motion-routines.json"
         self._settings = self._read_settings()
+        _saved_color_studio = self._settings.get("color_studio", {})
+        configure_color_library(
+            {
+                **BUILTIN_SOLID_COLORS,
+                **(
+                    _saved_color_studio.get("colors", {})
+                    if isinstance(_saved_color_studio, dict)
+                    else {}
+                ),
+            },
+            _saved_color_studio.get("palettes", {})
+            if isinstance(_saved_color_studio, dict)
+            else {},
+        )
         self.audio_device = (
             audio_device
             if audio_device != "default"
@@ -629,6 +670,7 @@ class LumenApplication:
             "maximum_stages_ms": {},
         }
         self._analysis_history: deque[dict[str, Any]] = deque(maxlen=240)
+        self._audio_age_history: deque[dict[str, Any]] = deque(maxlen=240)
         self._last_analysis_history_at: float | None = None
         self._analysis_generation = 0
         self._add_event("system", f"Loaded {self.rig.name}")
@@ -3628,6 +3670,7 @@ class LumenApplication:
             "maximum_stages_ms": {},
         }
         self._analysis_history.clear()
+        self._audio_age_history.clear()
         self._last_analysis_history_at = None
 
     def _audio_snapshot_unlocked(self, running: bool) -> dict[str, Any]:
@@ -3644,6 +3687,22 @@ class LumenApplication:
             else deepcopy(self._audio_capture_diagnostics)
         )
         source_age_ms = capture_diagnostics.get("last_packet_age_ms")
+        self._audio_age_history.append(
+            {
+                "monotonic_s": round(now, 3),
+                "source_age_ms": (
+                    None
+                    if source_age_ms is None
+                    else round(float(source_age_ms), 3)
+                ),
+                "processed_age_ms": (
+                    None
+                    if processed_age_ms is None
+                    else round(float(processed_age_ms), 3)
+                ),
+                "queue_depth": self._audio_queue_depth,
+            }
+        )
         packet_rate_hz = 0.0
         if len(self._audio_packet_times) >= 2:
             elapsed = self._audio_packet_times[-1] - self._audio_packet_times[0]
@@ -3755,6 +3814,7 @@ class LumenApplication:
             },
             "tempo_clock": deepcopy(self._tempo_diagnostics),
             "live_pipeline": deepcopy(self._live_pipeline_timing),
+            "age_history": list(self._audio_age_history),
             "last_packet_age_ms": processed_age_ms,
             "last_processed_frame_age_ms": processed_age_ms,
             "last_source_packet_age_ms": source_age_ms,
@@ -3984,6 +4044,37 @@ class LumenApplication:
                             else "Training audio capture disabled"
                         ),
                     )
+                if "color_studio" in payload:
+                    if self._thread is not None and self._thread.is_alive():
+                        raise RuntimeError(
+                            "stop Live or Rehearsal before editing Color Studio"
+                        )
+                    raw = payload["color_studio"]
+                    if not isinstance(raw, dict):
+                        raise ValueError("color_studio must be an object")
+                    colors = raw.get("colors", {})
+                    palettes = raw.get("palettes", {})
+                    if not isinstance(colors, dict) or not isinstance(palettes, dict):
+                        raise ValueError(
+                            "Color Studio colors and palettes must be objects"
+                        )
+                    # The resolver performs strict hexadecimal validation and
+                    # drops malformed entries; retain only its normalized
+                    # result so the settings file cannot accumulate junk.
+                    configure_color_library(
+                        {
+                            **BUILTIN_SOLID_COLORS,
+                            **{str(k): str(v) for k, v in colors.items()},
+                        },
+                        {
+                            str(k): [str(item) for item in values]
+                            for k, values in palettes.items()
+                            if isinstance(values, list)
+                        },
+                    )
+                    normalized = color_library_snapshot()
+                    self._settings["color_studio"] = normalized
+                    self._add_event("control", "Color Studio saved")
                 settings = dict(self._settings)
                 self._status_sequence += 1
             self._save_settings(settings)
@@ -3993,6 +4084,11 @@ class LumenApplication:
         }
 
     def operator_settings(self) -> dict[str, Any]:
+        color_studio = color_library_snapshot()
+        color_studio["colors"] = {
+            **BUILTIN_SOLID_COLORS,
+            **(color_studio.get("colors") or {}),
+        }
         return {
             "audio_device": self.audio_device,
             "spotify_client_id_masked": _masked_identifier(
@@ -4001,6 +4097,8 @@ class LumenApplication:
             "training_capture_enabled": self.training_capture_enabled,
             "training_max_gb": self.training_max_gb,
             "training_path": str(self.training_root),
+            "color_studio": color_studio,
+            "palette_families": sorted(PALETTE_FAMILIES),
         }
 
     def export_training_data(self) -> dict[str, Any]:
@@ -6032,7 +6130,7 @@ class LumenApplication:
             if scope != "overall" and step_scope != scope:
                 raise ValueError("a group sequence cannot control another group")
             palette = str(raw.get("palette", "")).strip() or None
-            if palette is not None and palette not in PALETTE_FAMILIES:
+            if palette is not None and not _valid_palette_hint(palette):
                 raise ValueError("unknown choreography palette")
             strobe_rate = clamp(
                 float(raw.get("strobe_rate", raw.get("strobe", 0.0))),
