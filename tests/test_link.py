@@ -24,6 +24,7 @@ from lumen_engine.link import (
     LinkProtocolError,
     LinkSpool,
     LumenLinkCoordinator,
+    _job_asset_contract,
 )
 from lumen_engine.memory import (
     EDMFORMER_PREPROCESSING_VERSION,
@@ -171,6 +172,19 @@ def manifest(
 
 
 class LinkTests(unittest.TestCase):
+    def test_student_asset_contract_does_not_require_manifest_objects(self):
+        """Console compatibility scans must be independent of job manifests."""
+        with tempfile.TemporaryDirectory() as temporary:
+            contract = _job_asset_contract(
+                STUDENT_TRAIN_JOB,
+                Path(temporary) / "research",
+                Path(temporary) / "project",
+            )
+        self.assertEqual(
+            contract["student_format_version"],
+            StreamingStructureStudent.format_version,
+        )
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

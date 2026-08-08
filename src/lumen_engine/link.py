@@ -412,11 +412,11 @@ def _job_asset_contract(
     if job_type == SONGFORMER_JOB:
         return _songformer_asset_contract(research_root, project_root)
     if job_type == STUDENT_TRAIN_JOB:
-        if any(
-            item.get("role") not in {"student_examples", "recording_audio"}
-            for item in objects
-        ):
-            raise ValueError("student manifest contains an unknown object role")
+        # Asset contracts describe the code/model versions required by a job.
+        # Manifest object-role validation happens when the manifest is built or
+        # validated, where the manifest's ``objects`` list is actually in
+        # scope.  Keeping that validation here made the console compatibility
+        # scan raise ``NameError: objects is not defined`` for student jobs.
         return _student_asset_contract(project_root)
     raise ValueError(f"unsupported Lumen Link job type {job_type!r}")
 
