@@ -2258,6 +2258,17 @@ class LumenLinkCoordinator:
             raise RuntimeError("Lumen Link secret is not configured")
         return LinkClient(self.configuration.endpoint, self.configuration.secret)
 
+    def _job_threads(self, job_type: str) -> int:
+        """Choose the remote worker's current CPU ceiling for a manifest."""
+
+        capabilities = (self.remote_status or {}).get("capabilities") or {}
+        maximum = int(capabilities.get("max_threads") or 24)
+        if job_type == EDMFORMER_JOB:
+            # The validated EDMFormer runner has its own bounded attention
+            # implementation and currently accepts at most eight threads.
+            return max(1, min(maximum, EDMFORMER_MAX_THREADS))
+        return max(1, maximum)
+
     def _poll_health(self) -> dict[str, Any]:
         started = time.monotonic()
         try:
@@ -2757,7 +2768,7 @@ class LumenLinkCoordinator:
                 **contract,
                 "result_schema": RESULT_SCHEMA,
             },
-            "resources": {"threads": 24},
+            "resources": {"threads": self._job_threads(str(job["job_type"]))},
             # This must survive transfer retry and both-machine restart so
             # submitting the same canonical job remains byte-for-byte
             # idempotent.
@@ -2868,7 +2879,7 @@ class LumenLinkCoordinator:
                 "result_schema": RESULT_SCHEMA,
             },
             "training": training,
-            "resources": {"threads": 24},
+            "resources": {"threads": self._job_threads(STUDENT_TRAIN_JOB)},
             "created_unix_ms": int(job["created_unix_ms"]),
         }
 

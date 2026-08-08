@@ -22,7 +22,7 @@
     "root": "@@STATE_ROOT@@"
   },
   "execution": {
-    "cpu_threads": 24,
+    "cpu_threads": 48,
     "maximum_memory_gib": 96,
     "maximum_parallel_jobs": 1,
     "job_types": [

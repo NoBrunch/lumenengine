@@ -168,7 +168,7 @@ The second command prints intended operations but does not use `sudo`, access
 the network or change files. When it looks correct:
 
 ```bash
-./scripts/lumen-link-wsl install --apply --cpu-threads 24
+./scripts/lumen-link-wsl install --apply --cpu-threads 48
 ```
 
 Enter the Linux password when `sudo` asks. Provisioning installs:

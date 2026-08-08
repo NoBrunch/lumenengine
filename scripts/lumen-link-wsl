@@ -14,7 +14,7 @@ USER_SERVICE_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 USER_SERVICE="${USER_SERVICE_ROOT}/lumen-link-worker.service"
 PYENV_ROOT="${LUMEN_LINK_PYENV_ROOT:-${HOME}/.local/share/lumen-link/pyenv}"
 PYENV_REVISION=v2.6.27
-CPU_THREADS_DEFAULT=24
+CPU_THREADS_DEFAULT=48
 CORE_PYTHON_VERSION=3.12.8
 SONGFORMER_PYTHON_VERSION=3.10.20
 
@@ -50,7 +50,7 @@ Commands:
 Options:
   --apply               Authorize installation/configuration mutations
   --config PATH         Worker JSON path (default: ~/.config/lumen-link/worker.json)
-  --cpu-threads N       Worker CPU threads (default: 24)
+  --cpu-threads N       Worker CPU threads (default: 48 on the 48-thread node)
   --lumen-public-key-file PATH
                        Existing Ed25519 public key from the Lumen PC
 
