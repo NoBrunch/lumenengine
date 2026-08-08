@@ -29,6 +29,7 @@ import time
 from typing import Any, BinaryIO, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+import wave
 
 from lumen_engine.memory import (
     EDMFORMER_PREPROCESSING_VERSION,
@@ -118,6 +119,35 @@ def _hash_file(path: Path) -> str:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _hash_wav_pcm(path: Path) -> str | None:
+    """Hash the PCM payload used by Lumen recording identities."""
+
+    try:
+        digest = hashlib.sha256()
+        with wave.open(str(path), "rb") as source:
+            while chunk := source.readframes(262_144):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
+def _audio_object_digest(path: Path, declared: str | None) -> str:
+    """Validate a queued audio identity and return the full-WAV digest.
+
+    Recording metadata uses a PCM-content digest, whereas Link object
+    transport hashes the complete WAV file. Existing queued jobs therefore
+    need both forms accepted while the transferred object remains immutable.
+    """
+
+    wav_digest = _hash_file(path)
+    if not declared or declared == wav_digest:
+        return wav_digest
+    if declared != _hash_wav_pcm(path):
+        raise ValueError("queued recording checksum does not match its WAV")
+    return wav_digest
 
 
 def _git_revision(path: Path) -> str:
@@ -2708,9 +2738,9 @@ class LumenLinkCoordinator:
         if job["job_type"] == STUDENT_TRAIN_JOB:
             return self._student_manifest(job, jobs=jobs)
         audio_path = Path(str(payload["audio_path"])).resolve()
-        digest = str(payload.get("content_sha256") or _hash_file(audio_path))
-        if _hash_file(audio_path) != digest:
-            raise ValueError("queued recording checksum does not match its WAV")
+        digest = _audio_object_digest(
+            audio_path, str(payload.get("content_sha256") or "") or None
+        )
         contract = self._local_contract(str(job["job_type"]))
         return {
             "schema": MANIFEST_SCHEMA,
@@ -2774,13 +2804,10 @@ class LumenLinkCoordinator:
             path = Path(raw_path).resolve()
             if not path.is_file():
                 continue
-            digest = str(
-                candidate_payload.get("content_sha256") or _hash_file(path)
+            digest = _audio_object_digest(
+                path,
+                str(candidate_payload.get("content_sha256") or "") or None,
             )
-            if _hash_file(path) != digest:
-                raise ValueError(
-                    f"coherent WAV checksum changed for {recording_id}"
-                )
             audio_by_recording[recording_id] = (path, digest)
         missing = recording_ids - set(audio_by_recording)
         if missing:

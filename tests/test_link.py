@@ -185,6 +185,40 @@ class LinkTests(unittest.TestCase):
             StreamingStructureStudent.format_version,
         )
 
+    def test_teacher_manifest_accepts_pcm_recording_identity(self):
+        """Queued recording metadata hashes PCM, while Link sends full WAV."""
+        audio = self.root / "pcm-identity.wav"
+        pcm = (b"\x01\x02\x03\x04" * 2048)
+        with wave.open(str(audio), "wb") as output:
+            output.setnchannels(2)
+            output.setsampwidth(2)
+            output.setframerate(48_000)
+            output.writeframes(pcm)
+        pcm_digest = hashlib.sha256(pcm).hexdigest()
+        full_digest = hashlib.sha256(audio.read_bytes()).hexdigest()
+        coordinator = LumenLinkCoordinator(
+            SongMemoryStore(self.root / "pcm-identity.sqlite3"),
+            research_root=self.root / "research",
+            state_root=self.root / "pcm-identity-state",
+            config_path=self.root / "pcm-identity-state" / "config.json",
+        )
+        job = {
+            "id": "job:pcm-identity",
+            "job_type": EDMFORMER_JOB,
+            "created_unix_ms": 1,
+            "payload": {
+                "audio_path": str(audio),
+                "content_sha256": pcm_digest,
+                "duration_ms": 1_000,
+                "recording_id": "recording:pcm-identity",
+            },
+        }
+        with patch.object(coordinator, "_local_contract", return_value={}):
+            value = coordinator._manifest(job)
+        self.assertEqual(value["objects"][0]["sha256"], full_digest)
+        self.assertNotEqual(pcm_digest, full_digest)
+        coordinator.close()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
