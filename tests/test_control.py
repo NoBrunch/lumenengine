@@ -1103,7 +1103,7 @@ class ControlApplicationTests(unittest.TestCase):
 
     def test_rehearsal_controls_validate_and_clamp(self) -> None:
         controls = RehearsalControls()
-        self.assertEqual(controls.palette, "auto")
+        self.assertEqual(controls.palette, "pure_blue")
         controls.patch({
             "routine": "fan_sweep", "scope": "center", "output": "virtual",
             "bpm": 900, "size": -2, "intensity": 2, "strobe": 0.4,
@@ -1115,6 +1115,9 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertEqual(controls.intensity, 1.0)
         with self.assertRaises(ValueError):
             controls.patch({"routine": "not-a-routine"})
+
+    def test_live_performance_defaults_to_automatic_palette(self) -> None:
+        self.assertEqual(OperatorControls().palette, "auto")
 
     def test_interpolated_control_ticks_do_not_create_input_dropouts(self) -> None:
         runtime = self.application._runtime_for_rig(

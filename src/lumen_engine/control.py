@@ -234,7 +234,9 @@ class OperatorControls:
     warmth: float = 0.44
     influence: float = 0.74
     blackout: bool = False
-    palette: str = "midnight_teal"
+    # Live performance chooses an appropriate palette unless the operator
+    # deliberately overrides it from the console.
+    palette: str = "auto"
 
     def patch(self, values: dict[str, Any]) -> None:
         for name in (
@@ -263,7 +265,9 @@ class RehearsalControls:
     bpm: float = 120.0
     intensity: float = 0.68
     size: float = 1.0
-    palette: str = "auto"
+    # Rehearsal is a fixture/motion inspection environment. Begin with one
+    # stable, saturated color so motion can be judged without palette churn.
+    palette: str = "pure_blue"
     strobe: float = 0.0
     isolate: bool = True
     tour: bool = False

@@ -211,8 +211,9 @@ show. Open workspace **2 — Rehearsal** and use the Movement Lab as follows:
 3. Choose Both movers, Center effect, or Whole rig. The movers are intentionally
    treated as one choreographic group; individual-mover selection is not part of
    the rehearsal vocabulary.
-4. Adjust tempo, movement size, intensity, palette, and strobe. **Automatic**
-   is the default Palette Family. The generated
+4. Adjust tempo, movement size, intensity, palette, and strobe. **Pure Blue**
+   is the default Rehearsal color so movement is shown by one stable,
+   saturated beam. The generated
    clock is exact, so motion differences are not obscured by live beat analysis.
 5. Use Previous/Next for individual routines or Tour to advance every eight
    beats.
@@ -411,7 +412,8 @@ Color Studio exists only in Rehearsal. Its Paint-style hue/saturation wheel and
 brightness bar produce a named hexadecimal solid color. Saved solids can be
 selected directly during fixture calibration or Rehearsal. Custom palette
 families are optional collections of those colors for Live development; they
-are not required for a fixture test. Automatic remains the default family.
+are not required for a fixture test. Automatic is the default for Live
+Performance, not Rehearsal.
 
 During Live, Lumen latches one resolved RGB color per fixture lane for the
 active choreography lease. The lease normally lasts 16 beats or longer. Energy
@@ -1690,7 +1692,8 @@ runbook before treating any Git checkout as operational.
   latest measured dBFS and are marked with their physical-input age; they no
   longer draw false dropouts. The source/processed age history is sampled by
   the internal clock rather than browser requests.
-- Rehearsal defaults to Automatic color selection. Its Color Studio provides a
+- Live Performance defaults to Automatic color selection; Rehearsal defaults
+  to a solid Pure Blue test beam. Color Studio provides a
   hue/saturation wheel, brightness, reusable solid colors, and named palette
   families. Color libraries replace atomically and invalidate active color
   latches, so a save cannot expose a partial palette or leave an old solid
