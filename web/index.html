@@ -387,7 +387,7 @@
                   <label><span>Audition scale <output id="rehearsal-size-value">100%</output></span><input id="rehearsal-size" type="range" min="0" max="100" step="1" value="100"></label>
                   <label><span>Intensity <output id="rehearsal-intensity-value">68%</output></span><input id="rehearsal-intensity" type="range" min="0" max="100" step="1" value="68"></label>
                   <label><span>Strobe <output id="rehearsal-strobe-value">Off</output></span><input id="rehearsal-strobe" type="range" min="0" max="100" step="1" value="0"></label>
-                  <label><span>Palette family</span><select id="rehearsal-palette"><option value="auto" selected>Automatic</option><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
+                  <label><span>Palette family</span><select id="rehearsal-palette"><option value="pure_blue" selected>Solid · Pure blue</option><option value="auto">Automatic</option><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
                   <label class="check-control"><input id="rehearsal-isolate" type="checkbox" checked><span>Darken fixtures outside selected scope</span></label>
                 </div>
                 <button id="rehearsal-start" class="rehearsal-start">Start selected routine</button>
@@ -400,12 +400,12 @@
                     <canvas id="motion-path-canvas"></canvas>
                     <div class="motion-path-legend"><span class="mover-a">Mover A</span><span class="mover-b">Mover B</span><span>Pan ↔ · Tilt ↕</span></div>
                   </div>
-                  <div id="motion-center-preview" class="center-motion-preview">
+                  <div id="motion-center-preview" class="center-motion-preview hidden">
                     <canvas id="center-motion-canvas" aria-label="Animated center fixture motion preview"></canvas>
                     <div><span>Center rotor · 300°</span><b id="center-preview-body">Musical rotation</b></div>
                     <div><span>Side pod A · 180°</span><b id="center-preview-arm-1">Independent</b></div>
                     <div><span>Side pod B · 180°</span><b id="center-preview-arm-2">Independent</b></div>
-                    <p>The ceiling-mounted base remains fixed. The rectangular center tower hangs downward and rotates with its floor-facing hemispherical RGBW scatter lens and segmented color ring; both downward-facing RGBW/laser pods travel with the tower and rotate independently.</p>
+                    <p>One complete movement cycle. Each trace shows the commanded position and the moving dot shows its current point in the routine. The fixed ceiling base has no motion track.</p>
                   </div>
                   <div id="motion-mover-controls" class="motion-editor-controls">
                     <label><span>Cycle length <output id="motion-cycle-value">16 beats</output></span><input id="motion-cycle" data-motion-control="cycle_beats" type="range" min="1" max="32" step="1" value="16"></label>

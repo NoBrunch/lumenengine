@@ -1652,10 +1652,10 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .center-motion-preview {
-  min-height: 30rem;
-  padding: 1rem;
+  min-height: 0;
+  padding: .75rem;
   border: 1px solid var(--line);
-  background: linear-gradient(145deg, rgba(20, 42, 43, .9), rgba(6, 15, 17, .96));
+  background: #071012;
 }
 
 .color-studio-panel { grid-column: 1 / -1; }
@@ -1684,7 +1684,7 @@ input[type="range"]::-moz-range-thumb {
   padding: .8rem 0;
   border-bottom: 1px solid rgba(120, 160, 154, .18);
 }
-.center-motion-preview canvas { width: 100%; height: 300px; display: block; grid-column: 1 / -1; border: 1px solid rgba(117,164,158,.18); border-radius: 4px; }
+.center-motion-preview canvas { width: 100%; height: 260px; display: block; grid-column: 1 / -1; border: 1px solid rgba(117,164,158,.18); border-radius: 4px; }
 .gesture-movement-panel { grid-column: 1 / -1; }
 .gesture-movement-editor { display: grid; grid-template-columns: minmax(180px, .35fr) minmax(420px, 1fr); gap: 12px; padding: 12px; }
 .gesture-movement-editor > label { display: grid; align-content: start; gap: 6px; color: #8fa3a0; }

@@ -1709,9 +1709,12 @@ runbook before treating any Git checkout as operational.
   families. Color libraries replace atomically and invalidate active color
   latches, so a save cannot expose a partial palette or leave an old solid
   color running.
-- Rehearsal Motion Studio displays Movers paths and the center fixture's fixed
-  base, rotating carriage, scatter lens, segmented ring, and two independently
-  phased side pods. Gesture Movement Editor associates an
+- Rehearsal Motion Studio displays only the fixture group being edited. Movers
+  use their pan/tilt path plot; the center fixture uses three cycle traces for
+  center rotation, Pod A tilt, and Pod B tilt with live position markers and
+  physical degree ranges. This is an operator-facing motion representation,
+  not a decorative fixture drawing or neural-model input. Gesture Movement
+  Editor associates an
   allowed movement pool with each expression gesture; Lumen ranks complete,
   measure-aligned choices from that pool rather than treating unordered checks
   as a forced sequence. The center graphic is intentionally absent from Room &

@@ -953,6 +953,8 @@ function renderMotionEditor(editor = {}) {
   }
   $("motion-mover-controls")?.classList.toggle("hidden", scope !== "movers");
   $("motion-center-controls")?.classList.toggle("hidden", scope !== "center");
+  $("motion-mover-preview")?.classList.toggle("hidden", scope !== "movers");
+  $("motion-center-preview")?.classList.toggle("hidden", scope !== "center");
   const controls = {
     "motion-cycle": values.cycle_beats,
     "motion-pan-size": Number(values.pan_size) * 100,
@@ -1118,24 +1120,6 @@ function centerPreviewCoordinates(values, beat, routine) {
   return [clamp(body, -1, 1), clamp(podA, -1, 1), clamp(podB, -1, 1)];
 }
 
-function centerPreviewPalette() {
-  const selected = String(app.status?.rehearsal?.palette || "pure_blue");
-  const colors = colorStudioSettings().colors || {};
-  if (/^#[0-9a-f]{6}$/i.test(colors[selected] || "")) {
-    return [colors[selected], colors[selected], colors[selected]];
-  }
-  const families = {
-    warm: ["#ff3400", "#ff9100", "#ffd45a"],
-    red_amber: ["#ff2100", "#ff7800", "#ffc14a"],
-    magenta_blue: ["#ff25c8", "#315cff", "#8f45ff"],
-    cyan_violet: ["#00e8ff", "#7a42ff", "#24a6ff"],
-    midnight_teal: ["#00bcae", "#0869d8", "#5d38c7"],
-    cool: ["#00d7ff", "#315cff", "#8d48ff"],
-    party_vivid: ["#ff245f", "#00d9ff", "#ffd23f"],
-  };
-  return families[selected] || ["#00d9ff", "#8d48ff", "#ff3ea5"];
-}
-
 function drawCenterFixtureMotion(canvas, values, mechanics, t) {
   if (!canvas || canvas.offsetParent === null) return;
   const configured = configureCanvas(canvas);
@@ -1143,198 +1127,65 @@ function drawCenterFixtureMotion(canvas, values, mechanics, t) {
   const { context: ctx, width, height } = configured;
   const beat = t * Number(app.status?.rehearsal?.bpm || 120) / 60;
   const routine = String(app.status?.rehearsal?.routine || "breathe");
+  const cycle = Math.max(1, Number(values.cycle_beats || 8));
   const [bodyMotion, podAMotion, podBMotion] = centerPreviewCoordinates(
     values, beat, routine,
   );
   const centerTravel = Number(mechanics.center_rotation_deg || 300);
   const podTravel = Number(mechanics.pod_rotation_deg || 180);
-  const yaw = bodyMotion * centerTravel * .5 * Math.PI / 180;
-  const podAngles = [podAMotion, podBMotion].map(
-    (motion) => motion * podTravel * .5 * Math.PI / 180,
-  );
-  const palette = centerPreviewPalette();
   ctx.clearRect(0, 0, width, height);
-  const background = ctx.createLinearGradient(0, 0, 0, height);
-  background.addColorStop(0, "#071012");
-  background.addColorStop(1, "#102023");
-  ctx.fillStyle = background; ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = "#071012";
+  ctx.fillRect(0, 0, width, height);
 
-  const cx = width * .5;
-  const scale = Math.min(width / 560, height / 330);
-  const ceilingY = 33 * scale;
-  const baseTop = 43 * scale;
-  const baseBottom = 94 * scale;
-  const towerTop = 92 * scale;
-  const towerBottom = 210 * scale;
-  const towerHalfWidth = 47 * scale;
-  const towerDepth = 19 * scale;
-  const podPivotY = 143 * scale;
-  const podSpan = Math.min(width * .28, 155 * scale);
-  const floorY = height - 34 * scale;
-  const axisX = Math.cos(yaw);
-  const axisY = Math.sin(yaw) * .28;
-
-  ctx.strokeStyle = "rgba(113,161,156,.28)";
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(width * .08, ceilingY); ctx.lineTo(width * .92, ceilingY); ctx.stroke();
-  ctx.fillStyle = "#718681";
-  ctx.font = `${Math.max(9, 10 * scale)}px DejaVu Sans Mono`;
-  ctx.fillText("CEILING · FIXED MOUNT", width * .08, ceilingY - 8 * scale);
-
-  // Fixed control base, inverted from the product's tabletop orientation.
-  ctx.fillStyle = "#2d4144";
-  ctx.beginPath();
-  ctx.moveTo(cx - 68 * scale, baseTop);
-  ctx.lineTo(cx + 68 * scale, baseTop);
-  ctx.lineTo(cx + 57 * scale, baseBottom);
-  ctx.lineTo(cx - 57 * scale, baseBottom);
-  ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = "#68807d"; ctx.lineWidth = 1.2; ctx.stroke();
-  ctx.fillStyle = "#101b1d";
-  ctx.fillRect(cx - 31 * scale, baseTop + 12 * scale, 62 * scale, 20 * scale);
-  ctx.fillStyle = "#7fa8a2";
-  ctx.font = `${Math.max(8, 9 * scale)}px DejaVu Sans Mono`;
-  ctx.fillText("8.8.8.8", cx - 18 * scale, baseTop + 26 * scale);
-
-  // The characterized 300-degree bearing sits below the fixed base.
-  const rangeRadians = centerTravel * Math.PI / 180;
-  ctx.strokeStyle = "rgba(108,215,202,.58)"; ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.ellipse(cx, towerTop + 4 * scale, 69 * scale, 18 * scale, 0,
-    -Math.PI / 2 - rangeRadians / 2, -Math.PI / 2 + rangeRadians / 2);
-  ctx.stroke();
-
-  const podPositions = [-1, 1].map((side) => ({
-    side,
-    x: cx + axisX * podSpan * side,
-    y: podPivotY + axisY * podSpan * side,
-  }));
-  const orderedPods = podPositions.map((pod, index) => ({ pod, index }))
-    .sort((left, right) => left.pod.y - right.pod.y);
-
-  // Both pod pivots are attached to—and therefore yaw with—the tower.
-  ctx.strokeStyle = "#182729"; ctx.lineWidth = 15 * scale;
-  ctx.beginPath();
-  ctx.moveTo(podPositions[0].x, podPositions[0].y);
-  ctx.lineTo(podPositions[1].x, podPositions[1].y);
-  ctx.stroke();
-  ctx.strokeStyle = "#607775"; ctx.lineWidth = 7 * scale; ctx.stroke();
-
-  const drawPod = (pod, podAngle, index) => {
-    const podWidth = 70 * scale;
-    const podHeight = 45 * scale;
-    const beamAngle = Math.PI / 2 + podAngle;
-    const lensDistance = podHeight * .53;
-    const lensX = pod.x + Math.cos(beamAngle) * lensDistance;
-    const lensY = pod.y + Math.sin(beamAngle) * lensDistance;
-    ctx.save();
-    ctx.translate(pod.x, pod.y);
-    ctx.rotate(podAngle);
-    ctx.fillStyle = "#2a3d40";
+  const padLeft = 112;
+  const padRight = 18;
+  const padTop = 25;
+  const padBottom = 24;
+  const plotWidth = Math.max(1, width - padLeft - padRight);
+  const plotHeight = Math.max(1, height - padTop - padBottom);
+  const tracks = [
+    { name: "CENTER ROTATION", range: centerTravel, color: "#68d9cd", value: bodyMotion, index: 0 },
+    { name: "POD A TILT", range: podTravel, color: "#d7a85e", value: podAMotion, index: 1 },
+    { name: "POD B TILT", range: podTravel, color: "#bd7fc9", value: podBMotion, index: 2 },
+  ];
+  const trackHeight = plotHeight / tracks.length;
+  ctx.font = "10px DejaVu Sans Mono";
+  tracks.forEach((track, trackIndex) => {
+    const centerY = padTop + trackHeight * (trackIndex + .5);
+    const amplitude = trackHeight * .36;
+    ctx.strokeStyle = "rgba(93,126,124,.24)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padLeft, centerY); ctx.lineTo(width - padRight, centerY); ctx.stroke();
+    ctx.fillStyle = track.color;
+    ctx.fillText(track.name, 10, centerY - 4);
+    ctx.fillStyle = "#718681";
+    ctx.fillText(`±${(track.range / 2).toFixed(0)}°`, 10, centerY + 11);
+    ctx.strokeStyle = track.color;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(-podWidth / 2, -podHeight / 2 + 7 * scale);
-    ctx.lineTo(-podWidth / 2 + 8 * scale, -podHeight / 2);
-    ctx.lineTo(podWidth / 2 - 8 * scale, -podHeight / 2);
-    ctx.lineTo(podWidth / 2, -podHeight / 2 + 7 * scale);
-    ctx.lineTo(podWidth / 2, podHeight / 2);
-    ctx.lineTo(-podWidth / 2, podHeight / 2);
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = "#6d8582"; ctx.lineWidth = 1.2; ctx.stroke();
-    ctx.fillStyle = "#172426";
-    ctx.beginPath(); ctx.ellipse(0, podHeight / 2, 19 * scale, 8 * scale, 0, 0, Math.PI * 2); ctx.fill();
-    const dome = ctx.createRadialGradient(-4 * scale, podHeight / 2 - 3 * scale, 1, 0, podHeight / 2, 14 * scale);
-    dome.addColorStop(0, "#ffffff");
-    dome.addColorStop(.32, palette[(index + 1) % palette.length]);
-    dome.addColorStop(1, "#172426");
-    ctx.fillStyle = dome;
-    ctx.beginPath(); ctx.arc(0, podHeight / 2, 13 * scale, Math.PI, 0); ctx.fill();
-    ctx.fillStyle = "#ff3030"; ctx.beginPath(); ctx.arc(-22 * scale, podHeight / 2 - 7 * scale, 2 * scale, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#2cff61"; ctx.beginPath(); ctx.arc(22 * scale, podHeight / 2 - 7 * scale, 2 * scale, 0, Math.PI * 2); ctx.fill();
-    ctx.restore();
-
-    ctx.strokeStyle = `${palette[(index + 1) % palette.length]}78`;
-    ctx.lineWidth = 5 * scale;
-    ctx.beginPath(); ctx.moveTo(lensX, lensY);
-    ctx.lineTo(lensX + Math.cos(beamAngle) * 82 * scale, lensY + Math.sin(beamAngle) * 82 * scale);
-    ctx.stroke();
-    if (String(values.laser_mode || "off") !== "off") {
-      ["#ff3030", "#2cff61"].forEach((color, laserIndex) => {
-        ctx.strokeStyle = color; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(lensX, lensY);
-        ctx.lineTo(
-          lensX + Math.cos(beamAngle + (laserIndex ? .04 : -.04)) * 102 * scale,
-          lensY + Math.sin(beamAngle + (laserIndex ? .04 : -.04)) * 102 * scale,
-        );
-        ctx.stroke();
-      });
+    for (let sample = 0; sample <= 160; sample += 1) {
+      const sampleBeat = cycle * sample / 160;
+      const coordinate = centerPreviewCoordinates(values, sampleBeat, routine)[track.index];
+      const x = padLeft + plotWidth * sample / 160;
+      const y = centerY - coordinate * amplitude;
+      if (sample === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
-    ctx.fillStyle = "#91aaa6";
-    ctx.fillText(index ? "POD B" : "POD A", pod.x - 19 * scale, pod.y - 31 * scale);
-  };
-
-  // The far pod passes behind the rotating rectangular center tower.
-  drawPod(orderedPods[0].pod, podAngles[orderedPods[0].index], orderedPods[0].index);
-
-  const yawDepth = Math.sin(yaw) * towerDepth;
-  ctx.fillStyle = "#304548";
-  ctx.beginPath();
-  ctx.moveTo(cx - towerHalfWidth + yawDepth, towerTop);
-  ctx.lineTo(cx + towerHalfWidth + yawDepth, towerTop);
-  ctx.lineTo(cx + towerHalfWidth - yawDepth, towerBottom);
-  ctx.lineTo(cx - towerHalfWidth - yawDepth, towerBottom);
-  ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = "#718784"; ctx.stroke();
-  ctx.fillStyle = yawDepth >= 0 ? "#1b2c2f" : "#3b5052";
-  ctx.beginPath();
-  ctx.moveTo(cx + towerHalfWidth + yawDepth, towerTop);
-  ctx.lineTo(cx + towerHalfWidth + towerDepth, towerTop + 9 * scale);
-  ctx.lineTo(cx + towerHalfWidth + towerDepth, towerBottom - 9 * scale);
-  ctx.lineTo(cx + towerHalfWidth - yawDepth, towerBottom);
-  ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = "rgba(133,158,154,.28)"; ctx.lineWidth = 1;
-  for (let index = -4; index <= 4; index += 1) {
-    const xTop = cx + index * 9 * scale + yawDepth * .6;
-    const xBottom = cx + index * 9 * scale - yawDepth * .6;
-    ctx.beginPath(); ctx.moveTo(xTop, towerTop + 8 * scale); ctx.lineTo(xBottom, towerBottom - 9 * scale); ctx.stroke();
-  }
-
-  // The central hemisphere and segmented ring are on the bottom of the
-  // inverted tower, directing their scatter pattern toward the floor.
-  const ringY = towerBottom + 2 * scale;
-  ctx.fillStyle = "#152426";
-  ctx.beginPath(); ctx.ellipse(cx, ringY, 40 * scale, 13 * scale, 0, 0, Math.PI * 2); ctx.fill();
-  for (let index = 0; index < 16; index += 1) {
-    const start = index * Math.PI / 8;
-    ctx.strokeStyle = palette[index % palette.length];
-    ctx.lineWidth = 6 * scale;
-    ctx.beginPath(); ctx.ellipse(cx, ringY, 33 * scale, 10 * scale, 0, start + .035, start + Math.PI / 8 - .035); ctx.stroke();
-  }
-  const centerLens = ctx.createRadialGradient(cx - 5 * scale, ringY + 2 * scale, 2, cx, ringY + 7 * scale, 24 * scale);
-  centerLens.addColorStop(0, "#ffffff");
-  centerLens.addColorStop(.30, palette[0]);
-  centerLens.addColorStop(1, "#142426");
-  ctx.fillStyle = centerLens;
-  ctx.beginPath(); ctx.arc(cx, ringY, 23 * scale, 0, Math.PI); ctx.fill();
-  ctx.strokeStyle = "rgba(225,255,251,.76)"; ctx.stroke();
-
-  for (let index = 0; index < 11; index += 1) {
-    const spread = (index - 5) / 5;
-    ctx.strokeStyle = `${palette[index % palette.length]}72`;
-    ctx.lineWidth = 1.3;
-    ctx.beginPath(); ctx.moveTo(cx, ringY + 18 * scale);
-    ctx.lineTo(cx + spread * width * .34, floorY + Math.abs(spread) * 10 * scale);
     ctx.stroke();
-  }
-  ctx.strokeStyle = "rgba(105,153,148,.20)"; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.ellipse(cx, floorY, width * .35, 17 * scale, 0, 0, Math.PI * 2); ctx.stroke();
-
-  drawPod(orderedPods[1].pod, podAngles[orderedPods[1].index], orderedPods[1].index);
-
-  ctx.fillStyle = "#9bb3af";
-  ctx.font = `${Math.max(9, 10 * scale)}px DejaVu Sans Mono`;
-  ctx.fillText(`CEILING-DOWN · TOWER ${centerTravel.toFixed(0)}° · PODS ${podTravel.toFixed(0)}°`, 12, 18 * scale);
+    const phase = ((beat % cycle) + cycle) % cycle / cycle;
+    const markerX = padLeft + plotWidth * phase;
+    const markerY = centerY - track.value * amplitude;
+    ctx.fillStyle = track.color;
+    ctx.beginPath(); ctx.arc(markerX, markerY, 4, 0, Math.PI * 2); ctx.fill();
+  });
+  const phase = ((beat % cycle) + cycle) % cycle;
+  ctx.strokeStyle = "rgba(224,244,240,.42)";
+  ctx.beginPath();
+  ctx.moveTo(padLeft + plotWidth * phase / cycle, padTop);
+  ctx.lineTo(padLeft + plotWidth * phase / cycle, height - padBottom);
+  ctx.stroke();
   ctx.fillStyle = "#718681";
-  ctx.fillText("ROTATING TOWER · CENTER SCATTER DOME/RING · TWO RGBW/LASER PODS", 12, height - 10);
+  ctx.fillText("0", padLeft, height - 7);
+  ctx.fillText(`${cycle.toFixed(0)} BEATS`, width - padRight - 54, height - 7);
 }
 
 function motionFormValues() {

@@ -2470,7 +2470,11 @@ class LumenApplication:
             else "generic_multi_effect_19ch"
         )
         housing_rotation = (
-            list(center_fixture.housing_rotation_deg)
+            [
+                center_fixture.housing_rotation.x_deg,
+                center_fixture.housing_rotation.y_deg,
+                center_fixture.housing_rotation.z_deg,
+            ]
             if center_fixture is not None
             else [180.0, 0.0, 0.0]
         )
