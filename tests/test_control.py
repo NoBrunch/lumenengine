@@ -1298,6 +1298,11 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertEqual(editor["values"]["cycle_beats"], 20.0)
         self.assertEqual(editor["values"]["relationship"], "counter")
         self.assertTrue(editor["modified"])
+        center = editor["groups"]["center"]
+        self.assertTrue(center["mechanics"]["base_fixed"])
+        self.assertEqual(center["mechanics"]["center_rotation_deg"], 300.0)
+        self.assertEqual(center["mechanics"]["pod_rotation_deg"], 180.0)
+        self.assertEqual(center["mechanics"]["pod_count"], 2)
         self.assertTrue(self.application.motion_path.is_file())
         restored = self.application._load_motion_tunings()
         self.assertEqual(restored.movers["figure_eight"].pan_size, 0.88)

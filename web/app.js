@@ -1081,57 +1081,221 @@ function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || [
 }
 
 function drawCenterMotion() {
-  const values = app.status?.rehearsal?.motion_editor?.groups?.center?.values || {};
+  const center = app.status?.rehearsal?.motion_editor?.groups?.center || {};
+  const values = center.values || {};
   const now = performance.now() / 1000;
-  drawCenterFixtureMotion($("center-motion-canvas"), values, now);
-  drawCenterFixtureMotion($("calibration-center-motion-canvas"), values, now);
+  drawCenterFixtureMotion($("center-motion-canvas"), values, center.mechanics || {}, now);
   window.requestAnimationFrame(drawCenterMotion);
 }
 
-function drawCenterFixtureMotion(canvas, values, t) {
+function centerPreviewCoordinates(values, beat, routine) {
+  const cycle = Math.max(1, Number(values.cycle_beats || 8));
+  const cycles = beat / cycle;
+  const wave = (speed, direction, startPhase, bodyAxis = false) => {
+    const angle = Math.PI * 2 * (
+      cycles * Number(speed || 1) * Number(direction || 1)
+      + Number(startPhase || 0)
+    );
+    if (routine === "figure_eight") return Math.sin(angle * 2);
+    if (routine === "beat_nod") return -Math.cos(angle * 2);
+    if (routine === "counter_rotate" && bodyAxis) return Math.cos(angle);
+    return Math.sin(angle);
+  };
+  const body = wave(values.body_speed, values.body_direction, values.body_phase, true)
+    * Number(values.body_travel ?? .75);
+  const podA = wave(values.arm_1_speed, values.arm_1_direction, values.arm_1_phase)
+    * Number(values.arm_1_travel ?? .85);
+  let podBPhase = Number(values.arm_2_phase || 0);
+  let podBDirection = Number(values.arm_2_direction || 1);
+  let mirror = false;
+  if (values.relationship === "opposed") podBPhase += .5;
+  else if (values.relationship === "mirrored") mirror = true;
+  else if (values.relationship === "chase") podBPhase += .25;
+  else if (values.relationship === "counter") podBDirection *= -1;
+  let podB = wave(values.arm_2_speed, podBDirection, podBPhase)
+    * Number(values.arm_2_travel ?? .85);
+  if (mirror) podB *= -1;
+  return [clamp(body, -1, 1), clamp(podA, -1, 1), clamp(podB, -1, 1)];
+}
+
+function centerPreviewPalette() {
+  const selected = String(app.status?.rehearsal?.palette || "pure_blue");
+  const colors = colorStudioSettings().colors || {};
+  if (/^#[0-9a-f]{6}$/i.test(colors[selected] || "")) {
+    return [colors[selected], colors[selected], colors[selected]];
+  }
+  const families = {
+    warm: ["#ff3400", "#ff9100", "#ffd45a"],
+    red_amber: ["#ff2100", "#ff7800", "#ffc14a"],
+    magenta_blue: ["#ff25c8", "#315cff", "#8f45ff"],
+    cyan_violet: ["#00e8ff", "#7a42ff", "#24a6ff"],
+    midnight_teal: ["#00bcae", "#0869d8", "#5d38c7"],
+    cool: ["#00d7ff", "#315cff", "#8d48ff"],
+    party_vivid: ["#ff245f", "#00d9ff", "#ffd23f"],
+  };
+  return families[selected] || ["#00d9ff", "#8d48ff", "#ff3ea5"];
+}
+
+function drawCenterFixtureMotion(canvas, values, mechanics, t) {
   if (!canvas || canvas.offsetParent === null) return;
   const configured = configureCanvas(canvas);
   if (!configured) return;
   const { context: ctx, width, height } = configured;
-  const cycle = Math.max(1, Number(values.cycle_beats || 8));
   const beat = t * Number(app.status?.rehearsal?.bpm || 120) / 60;
-  const phase = (beat / cycle) * Math.PI * 2;
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#071012"; ctx.fillRect(0, 0, width, height);
-  const cx = width * .5, cy = height * .53, radius = Math.min(width, height) * .16;
-  ctx.strokeStyle = "rgba(100,160,151,.22)"; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.arc(cx, cy, radius * 1.65, 0, Math.PI * 2); ctx.stroke();
-  ctx.fillStyle = "#c9e5df"; ctx.beginPath(); ctx.arc(cx, cy, radius * .38, 0, Math.PI * 2); ctx.fill();
-  const body = Number(values.body_travel ?? .75), arm1 = Number(values.arm_1_travel ?? .85), arm2 = Number(values.arm_2_travel ?? .85);
-  const bodyAngle = phase
-    * Number(values.body_speed || 1)
-    * Number(values.body_direction || 1)
-    + Number(values.body_phase || 0) * Math.PI * 2;
-  const rates = [Number(values.arm_1_speed || 1), Number(values.arm_2_speed || 1)];
-  const phases = [Number(values.arm_1_phase || 0) * Math.PI * 2, Number(values.arm_2_phase || 0) * Math.PI * 2];
-  const dirs = [Number(values.arm_1_direction || 1), Number(values.arm_2_direction || 1)];
-  const colors = ["#68d9cd", "#d7a85e"];
-  [arm1, arm2].forEach((travel, index) => {
-    const angle = phase * rates[index] * dirs[index] + phases[index] + (index ? Math.PI : 0);
-    const length = radius * (1.5 + travel * 2.1);
-    const ex = cx + Math.cos(angle) * length;
-    const ey = cy + Math.sin(angle) * length * .55;
-    ctx.strokeStyle = colors[index]; ctx.lineWidth = Math.max(3, radius * .18);
-    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
-    ctx.fillStyle = colors[index]; ctx.beginPath(); ctx.arc(ex, ey, radius * .22, 0, Math.PI * 2); ctx.fill();
-  });
-  const bodyRadius = radius * (1 + body * .45);
-  ctx.strokeStyle = "rgba(210,232,225,.55)"; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, bodyRadius, 0, Math.PI * 2); ctx.stroke();
-  ctx.strokeStyle = "#c9e5df"; ctx.lineWidth = Math.max(2, radius * .1);
-  ctx.beginPath();
-  ctx.moveTo(cx, cy);
-  ctx.lineTo(
-    cx + Math.cos(bodyAngle) * bodyRadius,
-    cy + Math.sin(bodyAngle) * bodyRadius * .55,
+  const routine = String(app.status?.rehearsal?.routine || "breathe");
+  const [bodyMotion, podAMotion, podBMotion] = centerPreviewCoordinates(
+    values, beat, routine,
   );
+  const centerTravel = Number(mechanics.center_rotation_deg || 300);
+  const podTravel = Number(mechanics.pod_rotation_deg || 180);
+  const yaw = bodyMotion * centerTravel * .5 * Math.PI / 180;
+  const podAngles = [podAMotion, podBMotion].map(
+    (motion) => motion * podTravel * .5 * Math.PI / 180,
+  );
+  const palette = centerPreviewPalette();
+  ctx.clearRect(0, 0, width, height);
+  const background = ctx.createLinearGradient(0, 0, 0, height);
+  background.addColorStop(0, "#071012");
+  background.addColorStop(1, "#102023");
+  ctx.fillStyle = background; ctx.fillRect(0, 0, width, height);
+
+  const cx = width * .5;
+  const fixtureY = height * .50;
+  const floorY = height * .82;
+  const scale = Math.min(width / 520, height / 300);
+  const centerRadius = 31 * scale;
+  const carriageSpan = Math.min(width * .27, 142 * scale);
+  const axisX = Math.cos(yaw);
+  const axisY = Math.sin(yaw) * .30;
+
+  // Floor grid and the scatter-lens footprint make the current downward
+  // installation legible without pretending this is a room-calibration view.
+  ctx.strokeStyle = "rgba(91,136,133,.13)";
+  ctx.lineWidth = 1;
+  for (let index = -4; index <= 4; index += 1) {
+    ctx.beginPath();
+    ctx.moveTo(cx + index * width * .10, floorY - height * .08);
+    ctx.lineTo(cx + index * width * .16, height);
+    ctx.stroke();
+  }
+  ctx.beginPath(); ctx.ellipse(cx, floorY, width * .34, height * .11, 0, 0, Math.PI * 2); ctx.stroke();
+  for (let index = 0; index < 12; index += 1) {
+    const angle = yaw + index * Math.PI / 6;
+    const reach = width * (.17 + (index % 3) * .035);
+    ctx.strokeStyle = `${palette[index % palette.length]}70`;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(cx, fixtureY + centerRadius * .6);
+    ctx.lineTo(cx + Math.cos(angle) * reach, floorY + Math.sin(angle) * height * .075);
+    ctx.stroke();
+  }
+
+  // The housing base is fixed; only the carriage above the bearing rotates.
+  ctx.fillStyle = "rgba(0,0,0,.38)";
+  ctx.beginPath(); ctx.ellipse(cx, fixtureY + 55 * scale, 88 * scale, 17 * scale, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#26383a";
+  ctx.beginPath();
+  ctx.moveTo(cx - 66 * scale, fixtureY + 36 * scale);
+  ctx.lineTo(cx + 66 * scale, fixtureY + 36 * scale);
+  ctx.lineTo(cx + 52 * scale, fixtureY + 62 * scale);
+  ctx.lineTo(cx - 52 * scale, fixtureY + 62 * scale);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#55706e"; ctx.stroke();
+  ctx.fillStyle = "#101b1d";
+  ctx.fillRect(cx - 26 * scale, fixtureY + 21 * scale, 52 * scale, 21 * scale);
+
+  // Show the characterized 300-degree bearing envelope with its rear gap.
+  const rangeRadians = centerTravel * Math.PI / 180;
+  ctx.strokeStyle = "rgba(108,215,202,.48)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(cx, fixtureY + 24 * scale, 75 * scale, 23 * scale, 0,
+    -Math.PI / 2 - rangeRadians / 2, -Math.PI / 2 + rangeRadians / 2);
   ctx.stroke();
-  ctx.fillStyle = "#718681"; ctx.font = "10px DejaVu Sans Mono"; ctx.fillText("BODY + ARM 1 + ARM 2", 10, height - 10);
+
+  const podPositions = [-1, 1].map((side) => ({
+    side,
+    x: cx + axisX * carriageSpan * side,
+    y: fixtureY + axisY * carriageSpan * side,
+  }));
+  ctx.strokeStyle = "#607775";
+  ctx.lineWidth = 12 * scale;
+  ctx.beginPath();
+  ctx.moveTo(podPositions[0].x, podPositions[0].y);
+  ctx.lineTo(podPositions[1].x, podPositions[1].y);
+  ctx.stroke();
+  ctx.strokeStyle = "#19282a"; ctx.lineWidth = 6 * scale; ctx.stroke();
+
+  const drawPod = (pod, podAngle, index) => {
+    const beamAngle = Math.PI / 2 + podAngle;
+    const lensX = pod.x + Math.cos(beamAngle) * 17 * scale;
+    const lensY = pod.y + Math.sin(beamAngle) * 17 * scale;
+    ctx.save();
+    ctx.translate(pod.x, pod.y);
+    ctx.rotate(beamAngle);
+    ctx.fillStyle = "#263b3d";
+    ctx.fillRect(-13 * scale, -18 * scale, 26 * scale, 36 * scale);
+    ctx.strokeStyle = "#78918d"; ctx.lineWidth = 1.2;
+    ctx.strokeRect(-13 * scale, -18 * scale, 26 * scale, 36 * scale);
+    ctx.fillStyle = palette[(index + 1) % palette.length];
+    ctx.beginPath(); ctx.arc(0, 15 * scale, 8 * scale, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ff3030"; ctx.beginPath(); ctx.arc(-6 * scale, 5 * scale, 2 * scale, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#2cff61"; ctx.beginPath(); ctx.arc(6 * scale, 5 * scale, 2 * scale, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = `${palette[(index + 1) % palette.length]}88`;
+    ctx.lineWidth = 5 * scale;
+    ctx.beginPath(); ctx.moveTo(lensX, lensY);
+    ctx.lineTo(lensX + Math.cos(beamAngle) * 80 * scale, lensY + Math.sin(beamAngle) * 80 * scale);
+    ctx.stroke();
+    if (String(values.laser_mode || "off") !== "off") {
+      ["#ff3030", "#28ff62"].forEach((color, laserIndex) => {
+        ctx.strokeStyle = color; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(lensX, lensY);
+        ctx.lineTo(
+          lensX + Math.cos(beamAngle + (laserIndex ? .035 : -.035)) * 96 * scale,
+          lensY + Math.sin(beamAngle + (laserIndex ? .035 : -.035)) * 96 * scale,
+        );
+        ctx.stroke();
+      });
+    }
+    ctx.fillStyle = "#91aaa6"; ctx.font = `${Math.max(9, 10 * scale)}px DejaVu Sans Mono`;
+    ctx.fillText(index ? "POD B" : "POD A", pod.x - 17 * scale, pod.y - 25 * scale);
+  };
+
+  // Draw the farther pod, the center carriage, then the nearer pod.
+  const orderedPods = podPositions.map((pod, index) => ({ pod, index }))
+    .sort((left, right) => left.pod.y - right.pod.y);
+  drawPod(orderedPods[0].pod, podAngles[orderedPods[0].index], orderedPods[0].index);
+
+  // Center RGBW emitter behind a hemisphere, with the independently
+  // programmed segmented ring around its circumference.
+  ctx.fillStyle = "#314649";
+  ctx.beginPath(); ctx.arc(cx, fixtureY, centerRadius * 1.27, 0, Math.PI * 2); ctx.fill();
+  for (let index = 0; index < 16; index += 1) {
+    const ringStart = yaw + index * Math.PI / 8;
+    ctx.strokeStyle = palette[index % palette.length];
+    ctx.lineWidth = 7 * scale;
+    ctx.beginPath();
+    ctx.arc(cx, fixtureY, centerRadius * 1.05, ringStart + .035, ringStart + Math.PI / 8 - .035);
+    ctx.stroke();
+  }
+  const lens = ctx.createRadialGradient(
+    cx - centerRadius * .28, fixtureY - centerRadius * .34, 2,
+    cx, fixtureY, centerRadius,
+  );
+  lens.addColorStop(0, "#ffffff");
+  lens.addColorStop(.28, palette[0]);
+  lens.addColorStop(1, "rgba(15,31,34,.92)");
+  ctx.fillStyle = lens;
+  ctx.beginPath(); ctx.arc(cx, fixtureY, centerRadius * .78, Math.PI, 0); ctx.lineTo(cx + centerRadius * .78, fixtureY); ctx.arc(cx, fixtureY, centerRadius * .78, 0, Math.PI); ctx.fill();
+  ctx.strokeStyle = "rgba(222,255,250,.78)"; ctx.lineWidth = 1.5; ctx.stroke();
+  drawPod(orderedPods[1].pod, podAngles[orderedPods[1].index], orderedPods[1].index);
+
+  ctx.fillStyle = "#9bb3af";
+  ctx.font = `${Math.max(9, 10 * scale)}px DejaVu Sans Mono`;
+  ctx.fillText(`FIXED BASE · CENTER ${centerTravel.toFixed(0)}° · PODS ${podTravel.toFixed(0)}°`, 12, 18 * scale);
+  ctx.fillStyle = "#718681";
+  ctx.fillText("HEMISPHERICAL SCATTER LENS + SEGMENTED RGBW RING", 12, height - 10);
 }
 
 function motionFormValues() {

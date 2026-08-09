@@ -225,7 +225,7 @@ Motion Studio edits the actual routine generator while Rehearsal is running.
 Its trajectory display uses horizontal position for normalized pan and vertical
 position for normalized tilt. Cyan is the first mover; amber is the second.
 The moving markers indicate the current point in the selected cycle.
-The Movers trajectory and Center body/arm schematic remain visible together;
+The Movers trajectory and Center mechanical schematic remain visible together;
 the Editing selector changes the controls being edited, not whether the other
 fixture group's movement can be observed.
 
@@ -242,16 +242,16 @@ Editable values are:
 - **Fixture relationship**: synchronized, exactly opposed, mirrored, evenly
   chased, or counter-direction movement.
 - **Direction**: forward or reverse traversal.
-- **Center cycle and arm relationship**: independent center-fixture timing with
+- **Center cycle and side-pod relationship**: independent center-fixture timing with
   synchronized, opposed, mirrored, quarter-cycle chase, or counter-direction
-  arm relationships.
-- **Center body controls**: direction, musical-rate multiplier, travel, and
-  starting phase for the rotating body.
-- **Center arm controls**: separate direction, musical-rate multiplier, travel,
-  and starting phase for arm 1 and arm 2.
-- **Center optical/effect controls**: ball/arm emitter pattern, color behavior,
-  laser mode and level, strip program and rate, characterized hardware strobe,
-  fixture intensity, and beat-blackout accent.
+  side-pod relationships.
+- **Center-carriage controls**: direction, musical-rate multiplier, travel, and
+  starting phase for the 300-degree rotating center component.
+- **Side-pod controls**: separate direction, musical-rate multiplier, travel,
+  and starting phase for the two 180-degree rotating pods.
+- **Center optical/effect controls**: center/pod emitter pattern, color
+  behavior, pod laser mode and level, segmented-ring program and rate,
+  characterized hardware strobe, fixture intensity, and beat-blackout accent.
 
 The velocity indicator compares the requested trajectory at the current
 rehearsal BPM with each mover's saved pan/tilt speed model. **Velocity OK** means
@@ -401,10 +401,13 @@ bursts and learned strobe preference.
 
 ### Center multi-effect
 
-The center fixture changes motor speed and pattern with musical energy. It uses
-alternating emitters, circles, sweeps, nods, laser accents, strip programs,
-and strobe accents. Its activity is reduced during soft passages and parked
-during sustained silence.
+The center fixture has a fixed base and a center carriage characterized for
+300 degrees of rotation. The carriage carries a central RGBW emitter behind a
+hemispherical scatter lens, surrounded by a segmented RGBW ring. Two side pods
+travel with the carriage; each is characterized for 180 degrees of independent
+rotation and contains an RGBW beam plus red/green lasers. Lumen changes their
+motor speed and optical patterns with musical energy, reduces activity during
+soft passages, and parks them during sustained silence.
 
 ### Color Studio and color latching
 
@@ -424,13 +427,12 @@ tilt, arm travel, and fixture direction.
 
 ### Center motion preview
 
-Motion Studio's Center multi-effect view includes an animated schematic of the
-body and both independent arms. It is a visual model of the configured cycle,
-travel, rate, phase, and direction—not a camera image of the physical fixture.
-The actual fixture profile and DMX channel mapping remain authoritative.
-Room & rig repeats this same schematic using the currently selected Rehearsal
-routine and saved Center tuning, providing a movement reference during room and
-fixture calibration without duplicating the editor.
+Motion Studio's Center multi-effect view models the fixed base, 300-degree
+center carriage, hemispherical scatter lens, segmented ring, and two
+carriage-mounted 180-degree RGBW/laser pods. The carriage and pods follow the
+same routine-coordinate calculation used by fixture output. Mechanical ranges
+come from the characterized fixture profile rather than drawing constants.
+This graphic exists only in Rehearsal; Room & Rig does not display it.
 
 ## Feedback and learning
 
@@ -1705,12 +1707,13 @@ runbook before treating any Git checkout as operational.
   families. Color libraries replace atomically and invalidate active color
   latches, so a save cannot expose a partial palette or leave an old solid
   color running.
-- Rehearsal Motion Studio displays Movers paths and the center fixture's body
-  plus two independently phased arms. Gesture Movement Editor associates an
+- Rehearsal Motion Studio displays Movers paths and the center fixture's fixed
+  base, rotating carriage, scatter lens, segmented ring, and two independently
+  phased side pods. Gesture Movement Editor associates an
   allowed movement pool with each expression gesture; Lumen ranks complete,
   measure-aligned choices from that pool rather than treating unordered checks
-  as a forced sequence. Room & Rig shows the same saved center-routine
-  reference and explicitly distinguishes it from live DMX position.
+  as a forced sequence. The center graphic is intentionally absent from Room &
+  Rig.
 - Stable cue colors are latched per fixture role, not shared as one hue across
   the entire rig. This preserves a solid beam while allowing deliberate mover
   exchanges and center ball/arm contrast.

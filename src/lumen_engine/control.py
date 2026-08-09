@@ -2456,6 +2456,14 @@ class LumenApplication:
             "velocity": diagnostics,
         }
         center_tuning = self.center_motion_tunings[routine]
+        center_profile = next(
+            (
+                party_parrot_profile(fixture.profile_key)
+                for fixture in self.rig.auxiliary_fixtures
+                if fixture.profile_key == "generic_multi_effect_19ch"
+            ),
+            party_parrot_profile("generic_multi_effect_19ch"),
+        )
         center = {
             "values": center_tuning.as_dict(),
             "defaults": DEFAULT_CENTER_MOTION_TUNINGS[routine].as_dict(),
@@ -2463,6 +2471,19 @@ class LumenApplication:
                 center_tuning != DEFAULT_CENTER_MOTION_TUNINGS[routine]
             ),
             "path": str(self.motion_path),
+            "mechanics": {
+                "base_fixed": True,
+                "center_rotation_deg": (
+                    center_profile.pan_degrees if center_profile else 300.0
+                ),
+                "pod_rotation_deg": (
+                    center_profile.tilt_degrees if center_profile else 180.0
+                ),
+                "pod_count": 2,
+                "center_emitter": "hemispherical_rgbw_scatter_lens",
+                "ring": "segmented_rgbw",
+                "pod_emitters": "rgbw_beam_plus_red_green_lasers",
+            },
         }
         selected = (
             "center" if self.rehearsal.scope == "center" else "movers"

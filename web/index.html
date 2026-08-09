@@ -402,10 +402,10 @@
                   </div>
                   <div id="motion-center-preview" class="center-motion-preview">
                     <canvas id="center-motion-canvas" aria-label="Animated center fixture motion preview"></canvas>
-                    <div><span>Body</span><b id="center-preview-body">Musical rotation</b></div>
-                    <div><span>Arm 1</span><b id="center-preview-arm-1">Independent</b></div>
-                    <div><span>Arm 2</span><b id="center-preview-arm-2">Independent</b></div>
-                    <p>The center editor controls its body, both arms, emitters, laser, strip, and hardware strobe independently from the movers.</p>
+                    <div><span>Center rotor · 300°</span><b id="center-preview-body">Musical rotation</b></div>
+                    <div><span>Side pod A · 180°</span><b id="center-preview-arm-1">Independent</b></div>
+                    <div><span>Side pod B · 180°</span><b id="center-preview-arm-2">Independent</b></div>
+                    <p>The base remains fixed. The center carriage rotates with its hemispherical RGBW scatter lens and segmented color ring; both RGBW/laser pods travel with that carriage and rotate independently.</p>
                   </div>
                   <div id="motion-mover-controls" class="motion-editor-controls">
                     <label><span>Cycle length <output id="motion-cycle-value">16 beats</output></span><input id="motion-cycle" data-motion-control="cycle_beats" type="range" min="1" max="32" step="1" value="16"></label>
@@ -418,25 +418,25 @@
                   </div>
                   <div id="motion-center-controls" class="motion-editor-controls hidden">
                     <label><span>Cycle length <output id="center-cycle-value">8 beats</output></span><input id="center-cycle" data-center-motion-control type="range" min="1" max="64" step="1" value="8"></label>
-                    <label><span>Arm relationship</span><select id="center-relationship" data-center-motion-control><option value="synchronized">Synchronized</option><option value="opposed">Exactly opposed</option><option value="mirrored">Mirrored</option><option value="chase">Quarter-cycle chase</option><option value="counter">Counter direction</option></select></label>
-                    <label><span>Body travel <output id="center-body-travel-value">75%</output></span><input id="center-body-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="75"></label>
-                    <label><span>Body rate <output id="center-body-speed-value">1×</output></span><input id="center-body-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
-                    <label><span>Body start phase <output id="center-body-phase-value">0%</output></span><input id="center-body-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
-                    <label><span>Body direction</span><select id="center-body-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
-                    <label><span>Arm 1 travel <output id="center-arm-1-travel-value">85%</output></span><input id="center-arm-1-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="85"></label>
-                    <label><span>Arm 1 rate <output id="center-arm-1-speed-value">1×</output></span><input id="center-arm-1-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
-                    <label><span>Arm 1 start phase <output id="center-arm-1-phase-value">0%</output></span><input id="center-arm-1-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
-                    <label><span>Arm 1 direction</span><select id="center-arm-1-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
-                    <label><span>Arm 2 travel <output id="center-arm-2-travel-value">85%</output></span><input id="center-arm-2-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="85"></label>
-                    <label><span>Arm 2 rate <output id="center-arm-2-speed-value">1×</output></span><input id="center-arm-2-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
-                    <label><span>Arm 2 start phase <output id="center-arm-2-phase-value">0%</output></span><input id="center-arm-2-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
-                    <label><span>Arm 2 direction</span><select id="center-arm-2-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
-                    <label><span>Emitters</span><select id="center-emitter-pattern" data-center-motion-control><option value="both">Ball + arms</option><option value="alternate">Alternate ball / arms</option><option value="ball">Ball only</option><option value="arms">Arms only</option><option value="chase">Emitter chase</option></select></label>
+                    <label><span>Side-pod relationship</span><select id="center-relationship" data-center-motion-control><option value="synchronized">Synchronized</option><option value="opposed">Exactly opposed</option><option value="mirrored">Mirrored</option><option value="chase">Quarter-cycle chase</option><option value="counter">Counter direction</option></select></label>
+                    <label><span>Center rotation travel <output id="center-body-travel-value">75%</output></span><input id="center-body-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="75"></label>
+                    <label><span>Center rotation rate <output id="center-body-speed-value">1×</output></span><input id="center-body-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
+                    <label><span>Center start phase <output id="center-body-phase-value">0%</output></span><input id="center-body-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
+                    <label><span>Center direction</span><select id="center-body-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
+                    <label><span>Pod A travel <output id="center-arm-1-travel-value">85%</output></span><input id="center-arm-1-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="85"></label>
+                    <label><span>Pod A rate <output id="center-arm-1-speed-value">1×</output></span><input id="center-arm-1-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
+                    <label><span>Pod A start phase <output id="center-arm-1-phase-value">0%</output></span><input id="center-arm-1-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
+                    <label><span>Pod A direction</span><select id="center-arm-1-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
+                    <label><span>Pod B travel <output id="center-arm-2-travel-value">85%</output></span><input id="center-arm-2-travel" data-center-motion-control type="range" min="0" max="100" step="1" value="85"></label>
+                    <label><span>Pod B rate <output id="center-arm-2-speed-value">1×</output></span><input id="center-arm-2-speed" data-center-motion-control type="range" min="1" max="32" step="1" value="8"></label>
+                    <label><span>Pod B start phase <output id="center-arm-2-phase-value">0%</output></span><input id="center-arm-2-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
+                    <label><span>Pod B direction</span><select id="center-arm-2-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
+                    <label><span>Emitters</span><select id="center-emitter-pattern" data-center-motion-control><option value="both">Center + pods</option><option value="alternate">Alternate center / pods</option><option value="ball">Center lens only</option><option value="arms">Pod beams only</option><option value="chase">Emitter chase</option></select></label>
                     <label><span>Color behavior</span><select id="center-color-pattern" data-center-motion-control><option value="palette">Selected palette</option><option value="alternate">Alternate within palette</option><option value="opposed">Opposed colors</option><option value="pulse">Beat pulse</option></select></label>
                     <label><span>Laser behavior</span><select id="center-laser-mode" data-center-motion-control><option value="off">Off</option><option value="steady">Steady</option><option value="beat">On beat</option><option value="alternate">Alternate red / green</option></select></label>
                     <label><span>Laser level <output id="center-laser-level-value">65%</output></span><input id="center-laser-level" data-center-motion-control type="range" min="0" max="100" step="1" value="65"></label>
-                    <label><span>Strip program <output id="center-strip-program-value">0</output></span><input id="center-strip-program" data-center-motion-control type="range" min="0" max="255" step="1" value="0"></label>
-                    <label><span>Strip rate <output id="center-strip-speed-value">55%</output></span><input id="center-strip-speed" data-center-motion-control type="range" min="0" max="100" step="1" value="55"></label>
+                    <label><span>Segmented ring program <output id="center-strip-program-value">0</output></span><input id="center-strip-program" data-center-motion-control type="range" min="0" max="255" step="1" value="0"></label>
+                    <label><span>Ring program rate <output id="center-strip-speed-value">55%</output></span><input id="center-strip-speed" data-center-motion-control type="range" min="0" max="100" step="1" value="55"></label>
                     <label><span>Hardware strobe <output id="center-strobe-level-value">Off</output></span><input id="center-strobe-level" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
                     <label><span>Fixture intensity <output id="center-intensity-value">100%</output></span><input id="center-intensity" data-center-motion-control type="range" min="0" max="100" step="1" value="100"></label>
                     <label><span>Beat blackout accent <output id="center-blackout-accent-value">Off</output></span><input id="center-blackout-accent" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
@@ -676,13 +676,6 @@
                     </div>
                   </fieldset>
                 </form>
-              </section>
-              <section class="panel calibration-center-preview-panel">
-                <div class="panel-titlebar"><h3>Center Fixture Movement</h3><span class="panel-note">Saved routine reference</span></div>
-                <div class="center-motion-preview calibration-center-motion-preview">
-                  <canvas id="calibration-center-motion-canvas" aria-label="Center fixture movement during room and rig calibration"></canvas>
-                  <p>This is a reference animation of the currently selected Rehearsal routine—not live DMX position. It keeps the saved body and independent arm motion visible while configuring the room and rig.</p>
-                </div>
               </section>
             </div>
           </section>

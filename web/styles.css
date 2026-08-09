@@ -1652,7 +1652,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .center-motion-preview {
-  min-height: 17rem;
+  min-height: 30rem;
   padding: 1rem;
   border: 1px solid var(--line);
   background: linear-gradient(145deg, rgba(20, 42, 43, .9), rgba(6, 15, 17, .96));
@@ -1684,7 +1684,7 @@ input[type="range"]::-moz-range-thumb {
   padding: .8rem 0;
   border-bottom: 1px solid rgba(120, 160, 154, .18);
 }
-.center-motion-preview canvas { width: 100%; height: 170px; display: block; grid-column: 1 / -1; border: 1px solid rgba(117,164,158,.18); border-radius: 4px; }
+.center-motion-preview canvas { width: 100%; height: 300px; display: block; grid-column: 1 / -1; border: 1px solid rgba(117,164,158,.18); border-radius: 4px; }
 .gesture-movement-panel { grid-column: 1 / -1; }
 .gesture-movement-editor { display: grid; grid-template-columns: minmax(180px, .35fr) minmax(420px, 1fr); gap: 12px; padding: 12px; }
 .gesture-movement-editor > label { display: grid; align-content: start; gap: 6px; color: #8fa3a0; }
@@ -1693,9 +1693,6 @@ input[type="range"]::-moz-range-thumb {
 .gesture-movement-option { display: flex; align-items: center; gap: 7px; border: 1px solid #324b4d; border-radius: 3px; padding: 8px; background: #101d20; color: #9fb4b0; cursor: pointer; }
 .gesture-movement-option input { width: auto; accent-color: #69cfc2; }
 .gesture-movement-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
-.calibration-center-preview-panel { grid-column: 1 / -1; min-height: 280px; }
-.calibration-center-motion-preview { max-width: 720px; margin: 12px; }
-.calibration-center-motion-preview canvas { height: 230px; }
 @media (max-width: 800px) {
   .gesture-movement-editor { grid-template-columns: 1fr; }
   .gesture-movement-options { grid-template-columns: 1fr 1fr; }

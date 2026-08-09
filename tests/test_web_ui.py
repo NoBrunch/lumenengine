@@ -194,6 +194,20 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn('state === "incompatible" ? "degraded"', script)
         self.assertIn("connection.detail", script)
         self.assertIn("a silently disabled control made revision drift", script)
+
+    def test_center_fixture_preview_matches_characterized_mechanics(self) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="center-motion-canvas"', html)
+        self.assertNotIn('id="calibration-center-motion-canvas"', html)
+        self.assertIn("Center rotor · 300°", html)
+        self.assertIn("Side pod A · 180°", html)
+        self.assertIn("hemispherical RGBW scatter lens", html)
+        self.assertIn("function centerPreviewCoordinates", script)
+        self.assertIn("mechanics.center_rotation_deg", script)
+        self.assertIn("mechanics.pod_rotation_deg", script)
+        self.assertIn("SEGMENTED RGBW RING", script)
         self.assertIn('currentIndeterminate', script)
         self.assertIn('"ACTIVE"', script)
         self.assertIn("function linkJobPhase", script)
