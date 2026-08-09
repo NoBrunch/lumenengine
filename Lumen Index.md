@@ -401,11 +401,13 @@ bursts and learned strobe preference.
 
 ### Center multi-effect
 
-The center fixture has a fixed base and a center carriage characterized for
-300 degrees of rotation. The carriage carries a central RGBW emitter behind a
-hemispherical scatter lens, surrounded by a segmented RGBW ring. Two side pods
-travel with the carriage; each is characterized for 180 degrees of independent
-rotation and contains an RGBW beam plus red/green lasers. Lumen changes their
+The center fixture is mounted upside-down from the ceiling. It has a fixed
+control base and a hanging rectangular center tower characterized for 300
+degrees of rotation. The tower carries a floor-facing RGBW emitter behind a
+hemispherical scatter lens, surrounded by a segmented RGBW ring. Two box-shaped
+side pods travel with the tower; each is characterized for 180 degrees of
+independent rotation and contains a downward-facing RGBW beam plus red/green
+lasers. Lumen changes their
 motor speed and optical patterns with musical energy, reduces activity during
 soft passages, and parks them during sustained silence.
 
@@ -427,9 +429,9 @@ tilt, arm travel, and fixture direction.
 
 ### Center motion preview
 
-Motion Studio's Center multi-effect view models the fixed base, 300-degree
-center carriage, hemispherical scatter lens, segmented ring, and two
-carriage-mounted 180-degree RGBW/laser pods. The carriage and pods follow the
+Motion Studio's Center multi-effect view models the ceiling-mounted fixed base,
+300-degree hanging rectangular tower, floor-facing hemispherical scatter lens,
+segmented ring, and two tower-mounted 180-degree RGBW/laser pods. The tower and pods follow the
 same routine-coordinate calculation used by fixture output. Mechanical ranges
 come from the characterized fixture profile rather than drawing constants.
 This graphic exists only in Rehearsal; Room & Rig does not display it.

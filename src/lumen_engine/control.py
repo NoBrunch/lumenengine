@@ -2456,13 +2456,23 @@ class LumenApplication:
             "velocity": diagnostics,
         }
         center_tuning = self.center_motion_tunings[routine]
-        center_profile = next(
+        center_fixture = next(
             (
-                party_parrot_profile(fixture.profile_key)
+                fixture
                 for fixture in self.rig.auxiliary_fixtures
                 if fixture.profile_key == "generic_multi_effect_19ch"
             ),
-            party_parrot_profile("generic_multi_effect_19ch"),
+            None,
+        )
+        center_profile = party_parrot_profile(
+            center_fixture.profile_key
+            if center_fixture is not None
+            else "generic_multi_effect_19ch"
+        )
+        housing_rotation = (
+            list(center_fixture.housing_rotation_deg)
+            if center_fixture is not None
+            else [180.0, 0.0, 0.0]
         )
         center = {
             "values": center_tuning.as_dict(),
@@ -2480,6 +2490,8 @@ class LumenApplication:
                     center_profile.tilt_degrees if center_profile else 180.0
                 ),
                 "pod_count": 2,
+                "housing_rotation_deg": housing_rotation,
+                "mount_orientation": "ceiling_down",
                 "center_emitter": "hemispherical_rgbw_scatter_lens",
                 "ring": "segmented_rgbw",
                 "pod_emitters": "rgbw_beam_plus_red_green_lasers",
