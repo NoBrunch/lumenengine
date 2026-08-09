@@ -188,6 +188,9 @@ class PerformanceRuntime:
         self._last_bar_phase: float | None = None
         self._motion_phase = 0.0
         self._motion_clock_s: float | None = None
+        self._motion_clock_bpm = 120.0
+        self._motion_path_phase = 0.0
+        self._motion_path_source_phase: float | None = None
         self._calibration_overrides: dict[str, dict[str, float]] = {}
         self._active_song_id: int | None = None
         self._active_section: str | None = None
@@ -343,6 +346,11 @@ class PerformanceRuntime:
         self._active_routine_section = None
         self._routine_bar_counter = 0
         self._last_bar_phase = None
+        self._motion_phase = 0.0
+        self._motion_clock_s = None
+        self._motion_clock_bpm = 120.0
+        self._motion_path_phase = 0.0
+        self._motion_path_source_phase = None
         if self._choreography_planner is not None:
             self._choreography_planner.release()
         self._active_choreography_step = None
@@ -614,8 +622,12 @@ class PerformanceRuntime:
                 lifetime=lifetime,
             ))
         receipt = receipts[-1]
-        with self._feedback_lock:
-            self._pending_replan_lanes.update(selections)
+        # Metric feedback teaches how the completed choice was received; it
+        # does not call a replacement routine. Only the explicit Preferred
+        # Action flow is an instruction to revise the next phrase early.
+        if preferred_routine is not None:
+            with self._feedback_lock:
+                self._pending_replan_lanes.update(selections)
         return {
             "model_revision": receipt.model_revision,
             "effective_strength": max(
@@ -790,17 +802,13 @@ class PerformanceRuntime:
     ) -> None:
         snapshot = deepcopy(biases)
         planner = self._choreography_planner
-        if planner is not None and planner.active is not None:
+        requested = tuple(() if replan_lanes is None else replan_lanes)
+        if planner is not None and planner.active is not None and requested:
             # A live phrase is a lease. Collect feedback immediately, but do
             # not rewrite scalar output characteristics underneath that lease.
             # The new state becomes active at the next musical boundary.
             with self._feedback_lock:
                 self._pending_feedback_biases = snapshot
-                requested = (
-                    CHOREOGRAPHY_LANES
-                    if replan_lanes is None
-                    else tuple(replan_lanes)
-                )
                 for lane in requested:
                     normalized = str(lane).casefold().strip()
                     if normalized not in CHOREOGRAPHY_LANES:
@@ -809,6 +817,11 @@ class PerformanceRuntime:
                         )
                     self._pending_replan_lanes.add(normalized)
             return
+        # Scalar feedback changes speed, travel, density, brightness, and
+        # effect characteristics. It must not terminate or replace the
+        # phrase that the operator is currently watching. The deterministic
+        # output rate limiter absorbs the resulting target adjustment while
+        # routine preferences wait for the sequence's natural boundary.
         self._replace_feedback_now(snapshot)
 
     def _replace_feedback_now(
@@ -1197,29 +1210,24 @@ class PerformanceRuntime:
     ) -> EffectiveCueOutput:
         active_step = step if applies else None
         speed = clamp(
-            (0.5 if active_step is None else active_step.motion_speed)
-            + 0.35 * feedback.motion_speed,
+            (0.5 if active_step is None else active_step.motion_speed),
             0.0,
             1.0,
         )
         travel = clamp(
-            (1.0 if active_step is None else active_step.travel_size)
-            + 0.35 * feedback.travel_size,
+            (1.0 if active_step is None else active_step.travel_size),
             0.05,
             1.0,
         )
         density = clamp(
-            (1.0 if active_step is None else active_step.activity_density)
-            + 0.45 * feedback.activity_density,
+            (1.0 if active_step is None else active_step.activity_density),
             0.05,
             1.0,
         )
         base_brightness = decision.brightness
         if active_step is not None and active_step.brightness is not None:
             base_brightness = active_step.brightness
-        brightness = clamp(
-            base_brightness + 0.30 * feedback.brightness, 0.0, 1.0
-        )
+        brightness = clamp(base_brightness, 0.0, 1.0)
         structure_profile, structure_strength = self._structure_output_profile()
         if structure_profile is not None and structure_strength > 0.0:
             speed = _blend(speed, structure_profile["motion_speed"], structure_strength)
@@ -1231,6 +1239,17 @@ class PerformanceRuntime:
                 0.0,
                 1.0,
             )
+        # Structure supplies the automatic baseline. The operator's literal
+        # instruction is applied afterward so a trusted section label cannot
+        # quietly erase "more movement", "faster", or "calm down".
+        speed = clamp(speed + 0.45 * feedback.motion_speed, 0.0, 1.0)
+        travel = clamp(travel + 0.55 * feedback.travel_size, 0.05, 1.0)
+        density = clamp(
+            density + 0.55 * feedback.activity_density, 0.05, 1.0
+        )
+        brightness = clamp(
+            brightness + 0.30 * feedback.brightness, 0.0, 1.0
+        )
         authored_strobe = bool(
             active_step is not None
             and (
@@ -1661,15 +1680,28 @@ class PerformanceRuntime:
                     and self._rehearsal_isolate
                     and not applies_to_fixture
                 )
-                if rehearsal_inactive and previous is not None:
+                if rehearsal_inactive:
+                    calibration = fixture.calibration
+                    hold_pan = (
+                        previous[0]
+                        if previous is not None
+                        else (calibration.pan_min_deg + calibration.pan_max_deg)
+                        * 0.5
+                    )
+                    hold_tilt = (
+                        previous[1]
+                        if previous is not None
+                        else (calibration.tilt_min_deg + calibration.tilt_max_deg)
+                        * 0.5
+                    )
                     direction = self.targeting.direction_for_angles(
-                        fixture, previous[0], previous[1]
+                        fixture, hold_pan, hold_tilt
                     )
                     solution = TargetingSolution(
                         fixture_id=fixture.fixture_id,
                         target=fixture.position_m + direction * 5.0,
-                        pan_deg=previous[0],
-                        tilt_deg=previous[1],
+                        pan_deg=hold_pan,
+                        tilt_deg=hold_tilt,
                         distance_m=5.0,
                         movement_cost_deg=0.0,
                         aim_error_deg=0.0,
@@ -1702,6 +1734,38 @@ class PerformanceRuntime:
                         movement_cost_deg=0.0,
                         aim_error_deg=0.0,
                         branch="quiet-hold",
+                    )
+                elif observation.loudness >= 0.02:
+                    # Authored mover routines already live inside the captured
+                    # pan/tilt envelope. An unrelated room target must not be
+                    # solved first: if that target is unreachable, the former
+                    # implementation omitted this fixture's entire DMX frame
+                    # and resumed it later, visibly interrupting every path.
+                    calibration = fixture.calibration
+                    seed_pan = (
+                        previous[0]
+                        if previous is not None
+                        else (calibration.pan_min_deg + calibration.pan_max_deg)
+                        * 0.5
+                    )
+                    seed_tilt = (
+                        previous[1]
+                        if previous is not None
+                        else (calibration.tilt_min_deg + calibration.tilt_max_deg)
+                        * 0.5
+                    )
+                    direction = self.targeting.direction_for_angles(
+                        fixture, seed_pan, seed_tilt
+                    )
+                    solution = TargetingSolution(
+                        fixture_id=fixture.fixture_id,
+                        target=fixture.position_m + direction * 5.0,
+                        pan_deg=seed_pan,
+                        tilt_deg=seed_tilt,
+                        distance_m=5.0,
+                        movement_cost_deg=0.0,
+                        aim_error_deg=0.0,
+                        branch="performance-seed",
                     )
                 else:
                     solution = self.targeting.solve(
@@ -1786,17 +1850,14 @@ class PerformanceRuntime:
                     fixture_index=index,
                     fixture_count=len(self.fixtures),
                     chase_beat_position=(
-                        (
-                            observation.timestamp_s
-                            - self._rehearsal_phase_origin_s
+                        self._continuous_motion_path_beat(
+                            observation,
+                            (0.5 + effective.motion_speed)
+                            * (
+                                0.82
+                                + 0.18 * effective.activity_density
+                            ),
                         )
-                        * (observation.bpm or 120.0)
-                        / 60.0
-                        if self._rehearsal_step is not None
-                        and self._rehearsal_phase_origin_s is not None
-                        else observation.timestamp_s
-                        * (observation.bpm or 120.0)
-                        / 60.0
                     ),
                     latched_rgb=latched_rgb,
                 )
@@ -2116,18 +2177,21 @@ class PerformanceRuntime:
             decision.routine,
             self._motion_tunings["breathe"],
         )
-        bpm = observation.bpm or 120.0
-        absolute_beat = observation.timestamp_s * bpm / 60.0
-        speed_multiplier = 0.5 + effective.motion_speed
+        # Speed and density change future velocity. They must never multiply
+        # the accumulated song clock, which would rewrite the path's history
+        # and teleport a fixture whenever an output characteristic changed.
+        speed_multiplier = (
+            (0.5 + effective.motion_speed)
+            * (0.82 + 0.18 * effective.activity_density)
+        )
+        beat_position = self._continuous_motion_path_beat(
+            observation, speed_multiplier
+        )
         if self._rehearsal_step is not None:
             if self._rehearsal_phase_origin_s is None:
                 self._rehearsal_phase_origin_s = observation.timestamp_s
-            beat_position = (
-                observation.timestamp_s - self._rehearsal_phase_origin_s
-            ) * bpm / 60.0 * speed_multiplier
             size = self._rehearsal_size * effective.travel_size
         else:
-            beat_position = absolute_beat * speed_multiplier
             structural_motion = {
                 "release": 0.24,
                 "drop": 0.24,
@@ -2142,26 +2206,24 @@ class PerformanceRuntime:
                 if structural_motion > 0.0
                 else 0.0
             )
-            size = clamp(
+            automatic_size = clamp(
                 0.16 + 0.72 * state.energy + 0.22 * state.motion
-                + 0.38 * (effective.travel_size - 1.0)
                 + structural_motion * self._structure_confidence
                 + transition_expansion,
                 0.12,
                 1.0,
             )
-            size *= effective.travel_size
-        # Density controls how much of each routine cycle is actively moving,
-        # independent of its speed and travel. During the remainder the path
-        # holds its last valid point instead of restarting or choosing another
-        # routine, preserving the phrase lease.
-        cycle_beats = max(0.25, tuning.cycle_beats)
-        cycle_start = math.floor(beat_position / cycle_beats) * cycle_beats
-        active_beats = cycle_beats * effective.activity_density
-        beat_position = min(
-            beat_position,
-            cycle_start + max(0.02, active_beats),
-        )
+            # Energy decides how much motion the music calls for; the travel
+            # axis decides how much of the calibrated room envelope to use.
+            # Blending the two keeps soft sections restrained while giving an
+            # explicit movement command visible authority. The former formula
+            # attenuated travel twice and made positive input hard to see.
+            size = clamp(
+                0.55 * automatic_size
+                + 0.45 * effective.travel_size,
+                0.12,
+                1.0,
+            )
         pan_normalized, tilt_normalized = normalized_position(
             decision.routine,
             beat_position,
@@ -2170,28 +2232,6 @@ class PerformanceRuntime:
             tuning,
             size=size,
         )
-        if (
-            decision.routine == "opposing_chase"
-            and observation.beat_confidence >= 0.20
-            and len(self.fixtures) > 1
-        ):
-            # The motion portion of a chase must exchange sides on the same
-            # beat clock used by its color/dimmer handoff. Map the musical
-            # left/right anchors through the existing tuning and calibration
-            # envelope below; do not introduce another mechanical limit.
-            beat_number = math.floor(max(0.0, beat_position) + 1e-6)
-            side = (
-                1.0
-                if (beat_number + index) % 2
-                else -1.0
-            )
-            pan_normalized = clamp(
-                tuning.pan_center
-                + side * tuning.pan_size * clamp(size, 0.0, 1.0) * 0.5,
-                0.0,
-                1.0,
-            )
-
         calibration = fixture.calibration
         # Motion paths use room semantics: 0→1 means left→right and low→high.
         # A fixture whose captured DMX order runs in the other direction must
@@ -2224,6 +2264,89 @@ class PerformanceRuntime:
             aim_error_deg=0.0,
             branch="performance-envelope",
         )
+
+    def _continuous_motion_beat(
+        self, observation: MusicalObservation
+    ) -> float:
+        """Advance mover phase without multiplying time by a changing BPM.
+
+        ``timestamp * current_bpm`` changes the entire history whenever the
+        tempo estimate moves, so even a small BPM correction teleports every
+        routine to another point on its curve. This clock integrates tempo,
+        limits tempo slew, and gently follows the audio beat phase instead.
+        Calling it more than once for one observation is idempotent, which is
+        required because both movers share this clock.
+        """
+
+        timestamp = float(observation.timestamp_s)
+        if self._motion_clock_s is None or timestamp < self._motion_clock_s:
+            self._motion_clock_s = timestamp
+            self._motion_clock_bpm = clamp(
+                float(observation.bpm or 120.0), 40.0, 240.0
+            )
+            self._motion_phase = (
+                (observation.bar_phase % 1.0) * 4.0
+                if observation.beat_confidence >= 0.20
+                else 0.0
+            )
+            return self._motion_phase
+        if timestamp == self._motion_clock_s:
+            return self._motion_phase
+
+        elapsed = max(0.0, timestamp - self._motion_clock_s)
+        self._motion_clock_s = timestamp
+        requested_bpm = clamp(
+            float(observation.bpm or self._motion_clock_bpm), 40.0, 240.0
+        )
+        # Tempo may legitimately change, but an analyzer correction must alter
+        # velocity rather than position. Twelve BPM per second is responsive
+        # without transmitting frame-to-frame estimator wobble to the motors.
+        maximum_change = 12.0 * elapsed
+        self._motion_clock_bpm += clamp(
+            requested_bpm - self._motion_clock_bpm,
+            -maximum_change,
+            maximum_change,
+        )
+        self._motion_phase += elapsed * self._motion_clock_bpm / 60.0
+
+        if observation.beat_confidence >= 0.35:
+            measured_bar_beat = (observation.bar_phase % 1.0) * 4.0
+            current_bar_beat = self._motion_phase % 4.0
+            phase_error = (
+                (measured_bar_beat - current_bar_beat + 2.0) % 4.0
+            ) - 2.0
+            # Correct at no more than 0.12 beat/second. This keeps long-term
+            # beat alignment without turning a phase reacquisition into a
+            # visible direction change.
+            correction_limit = 0.12 * elapsed
+            correction = clamp(
+                phase_error * 0.10 * observation.beat_confidence,
+                -correction_limit,
+                correction_limit,
+            )
+            self._motion_phase += correction
+        return self._motion_phase
+
+    def _continuous_motion_path_beat(
+        self,
+        observation: MusicalObservation,
+        speed_multiplier: float,
+    ) -> float:
+        """Integrate routine velocity on top of the continuous audio clock."""
+
+        source_phase = self._continuous_motion_beat(observation)
+        if self._motion_path_source_phase is None:
+            self._motion_path_source_phase = source_phase
+            self._motion_path_phase = source_phase
+            return self._motion_path_phase
+        source_delta = max(
+            0.0, source_phase - self._motion_path_source_phase
+        )
+        self._motion_path_source_phase = source_phase
+        self._motion_path_phase += source_delta * clamp(
+            speed_multiplier, 0.25, 2.0
+        )
+        return self._motion_path_phase
 
     def _rate_limit(
         self,

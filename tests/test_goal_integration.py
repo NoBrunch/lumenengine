@@ -171,7 +171,12 @@ class GoalIntegrationTests(unittest.TestCase):
             max(int(result["feedback_occurrences"]) for result in results),
             12,
         )
-        self.assertIsNotNone(runtime._pending_feedback_biases)
+        self.assertIsNone(runtime._pending_feedback_biases)
+        self.assertEqual(after_snapshot["replan_pending_lanes"], [])
+        self.assertGreater(
+            max(runtime._feedback_travel_size.values(), default=0.0),
+            0.0,
+        )
         events = self.application._choreography_model.state_dict()["events"]
         mover_events = [
             event for event in events.values()

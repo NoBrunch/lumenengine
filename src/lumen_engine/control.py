@@ -2214,7 +2214,6 @@ class LumenApplication:
                     if self._feedback_refresh_requested == target:
                         break
                     target = self._feedback_refresh_requested
-                lanes = set(self._feedback_refresh_lanes)
                 self._feedback_refresh_lanes.clear()
             try:
                 self._rebuild_feedback_biases()
@@ -2225,7 +2224,11 @@ class LumenApplication:
                 if runtime is not None:
                     runtime.replace_feedback(
                         biases,
-                        replan_lanes=lanes,
+                        # Ordinary feedback adjusts the current performance
+                        # characteristics. It must not terminate a mover or
+                        # center sequence; learned routine preferences are
+                        # considered when that sequence ends naturally.
+                        replan_lanes=(),
                     )
                 with self._feedback_refresh_condition:
                     self._feedback_refresh_error = None
@@ -5909,7 +5912,7 @@ class LumenApplication:
             if current_runtime is not None and not refresh_live:
                 current_runtime.replace_feedback(
                     biases,
-                    replan_lanes=refresh_lanes,
+                    replan_lanes=(),
                 )
         return {
             "feedback_id": feedback_id,
@@ -6541,7 +6544,7 @@ class LumenApplication:
             if runtime is not None and not refresh_live:
                 runtime.replace_feedback(
                     biases,
-                    replan_lanes=refresh_lanes,
+                    replan_lanes=(),
                 )
         return {
             "deleted": True,

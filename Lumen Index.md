@@ -245,6 +245,13 @@ the authored path fits; **Too fast** means the physical output would be
 rate-limited and the visible shape could deform. Increase Cycle length or
 reduce the affected travel until the indicator clears.
 
+Rehearsal and Live use the same continuous mover path clock. Tempo estimates,
+motion speed, and activity density change the path's future velocity; they do
+not recalculate its accumulated position. This prevents a BPM correction or
+feedback change from jumping a mover to another point in every routine. A
+routine inside the saved calibration envelope is resolved directly and cannot
+lose a DMX frame because an unrelated room target is unreachable.
+
 Edits are applied to Virtual or Live rehearsal immediately and stored in the
 private `state/motion-routines.json` file. Movers and Center have separate
 tuning records for each semantic routine name. An edit therefore affects future
@@ -496,9 +503,12 @@ Use Memory → Recent teaching moments → Undo, or use **Undo last** on the rem
 page for that browser's most recent contribution. Lumen deletes the event,
 rebuilds the decayed/confidence-weighted profile, removes that event from the
 event-backed choreography learner, replays the remaining learning events, and
-replaces the running runtime's feedback profile. The currently leased phrase
-is still allowed to finish. Sequence-editor revisions and placement deletions
-have their own history-backed undo and do not depend on feedback undo.
+replaces the running runtime's feedback profile. Literal characteristics such
+as travel, speed, density, and brightness update without replacing the
+currently leased routine; the fixture rate limiter keeps the adjustment
+continuous. Learned routine ranking changes are considered at a natural
+sequence boundary. Sequence-editor revisions and placement deletions have
+their own history-backed undo and do not depend on feedback undo.
 
 ### Semantic routines and palette families
 
@@ -1522,8 +1532,9 @@ runbook before treating any Git checkout as operational.
   sample clock remains authoritative for all synchronous output.
 - Desktop and mobile song teaching store group-scoped ordered sequences with
   participant provenance. Concurrent feedback is idempotent per client event,
-  distinguishes listener agreement from repeated urgency, and applies learned
-  changes only at a phrase boundary.
+  distinguishes listener agreement from repeated urgency, and never interrupts
+  the active routine for ordinary characteristic feedback. An explicit
+  Preferred action may revise the next eligible phrase.
 - Sequence and placement edits use revision snapshots, soft deletion, and
   history-backed undo. Audio Laboratory exposes cached structure provenance,
   per-lane active plans, confidence, pending feedback, and applied evidence.
@@ -1625,3 +1636,13 @@ runbook before treating any Git checkout as operational.
   strobe behavior remain immediate. Mover strobe channels remain zero unless
   an eligible duration-bounded rehearsal or authored choreography cue permits
   them; positive feedback alone cannot manufacture such a cue.
+- Mover paths use a continuous audio-derived phase clock. BPM, speed, and
+  density changes alter velocity without rewriting accumulated phase;
+  continuous routines no longer stop at the end of an activity-density window.
+  Calibrated performance paths bypass unrelated spatial-target reachability,
+  guaranteeing one resolved output for each mover on every active frame.
+- Structure establishes the automatic speed, travel, density, and brightness
+  baseline before literal operator feedback is applied. **More movement** can
+  therefore expand the calibrated travel even in a trusted quiet section
+  without requesting a new routine. `opposing_chase` keeps fluid opposing
+  motion while its beam and color alternate on the authoritative beat clock.

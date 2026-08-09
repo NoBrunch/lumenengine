@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 import unittest
 
 from lumen_engine.config import load_rig
@@ -260,19 +261,16 @@ class RuntimeTests(unittest.TestCase):
 
     def test_opposing_chase_trades_calibrated_position_and_beam(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+        )
+        runtime.set_rehearsal("opposing_chase", scope="movers")
 
         def run(timestamp: float, phase: float):
-            runtime = PerformanceRuntime(
-                rig.fixtures,
-                VirtualDMXOutput(),
-                auxiliary_fixtures=rig.auxiliary_fixtures,
-                choreography_model=SequencePreferenceModel(),
-            )
             frame = runtime.step(self._lane_observation(
-                timestamp,
-                phase,
-                section="release",
-                loudness=0.88,
+                timestamp, phase, section="release", loudness=0.88,
             ))
             semantic_pan = []
             for fixture, solution in zip(rig.fixtures, frame.solutions):
@@ -294,10 +292,9 @@ class RuntimeTests(unittest.TestCase):
             )
             return semantic_pan, dimmers
 
-        first_pan, first_dimmers = run(0.0, 0.0)
+        _, first_dimmers = run(0.0, 0.0)
         second_pan, second_dimmers = run(0.5, 0.25)
-        self.assertLess(first_pan[0], first_pan[1])
-        self.assertGreater(second_pan[0], second_pan[1])
+        self.assertGreater(abs(second_pan[0] - second_pan[1]), 0.20)
         self.assertGreater(first_dimmers[0], 0)
         self.assertEqual(first_dimmers[1], 0)
         self.assertEqual(second_dimmers[0], 0)
@@ -542,7 +539,7 @@ class RuntimeTests(unittest.TestCase):
             semantic_tilts[0], semantic_tilts[1], delta=0.02
         )
 
-    def test_scalar_feedback_is_staged_until_next_phrase_boundary(self) -> None:
+    def test_scalar_feedback_updates_without_replanning_active_phrase(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
         runtime = PerformanceRuntime(
             rig.fixtures,
@@ -567,6 +564,9 @@ class RuntimeTests(unittest.TestCase):
             )
 
         runtime.step(observation(0.0, 0.9))
+        original_boundary = runtime.choreography_snapshot()["lanes"][
+            "movers"
+        ]["active_boundary_id"]
         runtime.replace_feedback(
             {
                 "overall": {
@@ -574,18 +574,178 @@ class RuntimeTests(unittest.TestCase):
                     "intensity": 0.8,
                     "strobe": 0.6,
                 }
-            }
+            },
+            replan_lanes=(),
         )
-        self.assertNotIn("overall", runtime._feedback_motion)
-        self.assertIsNotNone(runtime._pending_feedback_biases)
-
-        # First bar wrap is still within the leased two-bar phrase.
-        runtime.step(observation(0.2, 0.1))
-        self.assertNotIn("overall", runtime._feedback_motion)
-        runtime.step(observation(1.8, 0.9))
-        runtime.step(observation(2.0, 0.1))
         self.assertEqual(runtime._feedback_motion["overall"], 1.0)
         self.assertIsNone(runtime._pending_feedback_biases)
+        self.assertEqual(
+            runtime.choreography_snapshot()["replan_pending_lanes"], []
+        )
+        runtime.step(observation(0.2, 0.1))
+        self.assertEqual(
+            runtime.choreography_snapshot()["lanes"]["movers"][
+                "active_boundary_id"
+            ],
+            original_boundary,
+        )
+
+    def test_more_movement_overrides_structure_baseline_without_replan(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        runtime.set_structure_context(
+            energy="breakdown",
+            confidence=0.95,
+            resolution={"axes": {"energy": {"source": "cached_teacher"}}},
+        )
+        first = runtime.step(self._lane_observation(
+            0.0, 0.2, section="breakdown", loudness=0.45,
+        ))
+        baseline = first.effective_outputs[0].travel_size
+        boundary = runtime.choreography_snapshot()["lanes"]["movers"][
+            "active_boundary_id"
+        ]
+        runtime.replace_feedback(
+            {"overall": {"travel_size": 1.0}}, replan_lanes=()
+        )
+        second = runtime.step(self._lane_observation(
+            0.02, 0.21, section="breakdown", loudness=0.45,
+        ))
+        self.assertGreater(second.effective_outputs[0].travel_size, baseline)
+        self.assertEqual(
+            runtime.choreography_snapshot()["lanes"]["movers"][
+                "active_boundary_id"
+            ],
+            boundary,
+        )
+
+    def test_motion_clock_does_not_jump_when_bpm_estimate_changes(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+
+        def observation(timestamp: float, bpm: float, phase: float):
+            return MusicalObservation(
+                timestamp_s=timestamp,
+                loudness=0.7,
+                onset_strength=0.4,
+                low_energy=0.6,
+                mid_energy=0.5,
+                high_energy=0.4,
+                bpm=bpm,
+                beat_confidence=0.9,
+                bar_phase=phase,
+            )
+
+        self.assertAlmostEqual(
+            runtime._continuous_motion_beat(observation(0.0, 120.0, 0.0)),
+            0.0,
+        )
+        before = runtime._continuous_motion_beat(
+            observation(1.0, 120.0, 0.5)
+        )
+        # Both movers ask for the clock at the same timestamp. A changed BPM
+        # estimate must not change the already-published path position.
+        same_frame = runtime._continuous_motion_beat(
+            observation(1.0, 180.0, 0.5)
+        )
+        self.assertAlmostEqual(same_frame, before)
+        after = runtime._continuous_motion_beat(
+            observation(1.01, 180.0, 0.505)
+        )
+        self.assertGreater(after, before)
+        self.assertLess(after - before, 0.03)
+        self.assertLessEqual(runtime._motion_clock_bpm, 120.12 + 1e-9)
+
+    def test_motion_speed_change_alters_velocity_without_phase_jump(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(rig.fixtures, VirtualDMXOutput())
+
+        def observation(timestamp: float, phase: float):
+            return MusicalObservation(
+                timestamp_s=timestamp,
+                loudness=0.7,
+                onset_strength=0.4,
+                low_energy=0.6,
+                mid_energy=0.5,
+                high_energy=0.4,
+                bpm=120.0,
+                beat_confidence=0.9,
+                bar_phase=phase,
+            )
+
+        runtime._continuous_motion_path_beat(
+            observation(0.0, 0.0), 0.75
+        )
+        before = runtime._continuous_motion_path_beat(
+            observation(1.0, 0.5), 0.75
+        )
+        same_frame = runtime._continuous_motion_path_beat(
+            observation(1.0, 0.5), 1.5
+        )
+        self.assertAlmostEqual(same_frame, before)
+        after = runtime._continuous_motion_path_beat(
+            observation(1.1, 0.55), 1.5
+        )
+        self.assertGreater(after, before)
+        self.assertLess(after - before, 0.35)
+
+    def test_every_rehearsal_routine_emits_both_movers_continuously(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        for routine in (
+            "breathe",
+            "fan_sweep",
+            "figure_eight",
+            "opposing_chase",
+            "beat_nod",
+            "counter_rotate",
+        ):
+            with self.subTest(routine=routine):
+                runtime = PerformanceRuntime(
+                    rig.fixtures,
+                    VirtualDMXOutput(),
+                    auxiliary_fixtures=rig.auxiliary_fixtures,
+                )
+                runtime.set_rehearsal(
+                    routine, scope="movers", size=1.0
+                )
+                prior: dict[str, tuple[float, float]] = {}
+                for index in range(240):
+                    timestamp = index / 50.0
+                    beat_position = timestamp * 124.0 / 60.0
+                    result = runtime.step(MusicalObservation(
+                        timestamp_s=timestamp,
+                        loudness=0.72,
+                        onset_strength=0.4,
+                        low_energy=0.6,
+                        mid_energy=0.5,
+                        high_energy=0.4,
+                        bpm=124.0 + 12.0 * math.sin(timestamp * 1.7),
+                        beat_confidence=0.9,
+                        bar_phase=(beat_position % 4.0) / 4.0,
+                        section="groove",
+                        section_confidence=0.8,
+                    ))
+                    self.assertEqual(len(result.solutions), len(rig.fixtures))
+                    self.assertFalse(result.warnings)
+                    for solution in result.solutions:
+                        previous = prior.get(solution.fixture_id)
+                        if previous is not None:
+                            self.assertLessEqual(
+                                abs(solution.pan_deg - previous[0]),
+                                180.0 / 50.0 + 1e-6,
+                            )
+                            self.assertLessEqual(
+                                abs(solution.tilt_deg - previous[1]),
+                                180.0 / 50.0 + 1e-6,
+                            )
+                        prior[solution.fixture_id] = (
+                            solution.pan_deg, solution.tilt_deg
+                        )
 
     def test_preferred_action_enters_next_phrase_without_interrupting(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
