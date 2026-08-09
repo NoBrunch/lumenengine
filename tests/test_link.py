@@ -835,6 +835,58 @@ class LinkTests(unittest.TestCase):
         job = next(item for item in store.list_analysis_jobs() if item["id"] == job_id)
         self.assertNotIn("execution_target", job["payload"])
 
+    def test_incompatible_worker_is_named_and_enable_returns_update_instruction(self):
+        store = SongMemoryStore(self.root / "revision-mismatch.sqlite3")
+        state_root = self.root / "revision-mismatch"
+        state_root.mkdir(parents=True)
+        (state_root / "secret").write_bytes(SECRET)
+        (state_root / "config.json").write_text(
+            json.dumps(
+                {
+                    "endpoint": "http://127.0.0.1:1",
+                    "secret_file": "secret",
+                    "enabled": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "revision-mismatch-research",
+            state_root=state_root,
+            config_path=state_root / "config.json",
+        )
+        local_contracts = {
+            EDMFORMER_JOB: {**TEST_CONTRACT, "code_revision": "local-revision"},
+            SONGFORMER_JOB: {**SONG_TEST_CONTRACT, "code_revision": "local-revision"},
+            STUDENT_TRAIN_JOB: {**STUDENT_TEST_CONTRACT, "code_revision": "local-revision"},
+        }
+        remote_contracts = {
+            job_type: {**contract, "code_revision": "remote-revision"}
+            for job_type, contract in local_contracts.items()
+        }
+        coordinator._local_contract_cache = local_contracts
+        coordinator.remote_status = {
+            "authenticated": True,
+            "capabilities": {
+                "supported_job_types": list(remote_contracts),
+                "job_contracts": remote_contracts,
+            },
+        }
+
+        status = coordinator.status()
+        self.assertEqual(status["connection"]["state"], "incompatible")
+        self.assertIn("remote-", status["connection"]["detail"])
+        self.assertIn("local-r", status["setup"]["next_action"])
+        self.assertIn("git pull --ff-only", status["setup"]["commands"])
+
+        with patch.object(coordinator, "_poll_health"):
+            with self.assertRaisesRegex(RuntimeError, "Update and restart"):
+                coordinator.control("enable")
+        self.assertFalse(
+            json.loads((state_root / "config.json").read_text())["enabled"]
+        )
+
     def test_coordinator_routes_mixed_teachers_one_at_a_time(self):
         store = SongMemoryStore(self.root / "mixed-route.sqlite3")
         edm_id = store.enqueue_analysis_job(

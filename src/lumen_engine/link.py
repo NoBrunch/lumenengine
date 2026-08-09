@@ -2231,6 +2231,38 @@ class LumenLinkCoordinator:
                     job_type, allow_contract_scan=True
                 )
         elif action in {"enable", "pause", "resume", "disable"}:
+            if action == "enable":
+                if not self.can_import():
+                    raise RuntimeError(
+                        "Stop Live before enabling the offline compute link"
+                    )
+                # Enable is also a fresh authenticated compatibility check. A
+                # button press must not claim success while an old worker
+                # revision gates every compute contract.
+                self._poll_health()
+                compatible = {
+                    job_type: self._remote_is_compatible(
+                        job_type, allow_contract_scan=True
+                    )
+                    for job_type in SUPPORTED_JOB_TYPES
+                }
+                if not any(compatible.values()):
+                    remote_contracts = (
+                        ((self.remote_status or {}).get("capabilities") or {})
+                        .get("job_contracts") or {}
+                    )
+                    remote_revisions = {
+                        str((remote_contracts.get(job_type) or {}).get("code_revision") or "")
+                        for job_type in SUPPORTED_JOB_TYPES
+                    }
+                    remote_revision = next(
+                        (value for value in remote_revisions if value), "unknown"
+                    )
+                    raise RuntimeError(
+                        "Threadripper authenticated, but its compute contract "
+                        f"is incompatible (worker code {remote_revision[:7]}). "
+                        "Update and restart the worker, then Test Connection again."
+                    )
             value = _read_json(self.config_path) if self.config_path.is_file() else {}
             value.setdefault("endpoint", DEFAULT_LINK_ENDPOINT)
             value.setdefault("secret_file", "secret")
@@ -3425,6 +3457,23 @@ class LumenLinkCoordinator:
             for job_type in SUPPORTED_JOB_TYPES
         }
         any_compatible = any(compatibility.values())
+        remote_contracts = (
+            ((self.remote_status or {}).get("capabilities") or {})
+            .get("job_contracts") or {}
+        )
+        local_revisions = {
+            str((self._local_contract_cache.get(job_type) or {}).get("code_revision") or "")
+            for job_type in SUPPORTED_JOB_TYPES
+            if isinstance(self._local_contract_cache.get(job_type), dict)
+        }
+        remote_revisions = {
+            str((remote_contracts.get(job_type) or {}).get("code_revision") or "")
+            for job_type in SUPPORTED_JOB_TYPES
+            if isinstance(remote_contracts.get(job_type), dict)
+        }
+        local_revision = next((value for value in local_revisions if value), "")
+        remote_revision = next((value for value in remote_revisions if value), "")
+        compatibility_detail = None
         if not configuration.secret:
             setup_state = "needs_secret"
             next_action = (
@@ -3435,9 +3484,24 @@ class LumenLinkCoordinator:
             next_action = "Check the direct cable, WSL service, and firewall."
         elif self.remote_status and not any_compatible:
             setup_state = "incompatible"
-            next_action = (
-                "Update both computers to the same clean code and model assets."
-            )
+            if local_revision and remote_revision and local_revision != remote_revision:
+                compatibility_detail = (
+                    f"Authenticated worker code {remote_revision[:7]} does not "
+                    f"match Lumen code {local_revision[:7]}."
+                )
+                next_action = (
+                    f"Update the Threadripper worker from {remote_revision[:7]} "
+                    f"to {local_revision[:7]}, restart it, then Test Connection."
+                )
+            else:
+                compatibility_detail = (
+                    "Authenticated worker model or preprocessing assets do not "
+                    "match Lumen's compute contract."
+                )
+                next_action = (
+                    "Reconfigure and verify the Threadripper worker, then Test "
+                    "Connection again."
+                )
         elif not configuration.enabled:
             setup_state = "ready_to_enable"
             next_action = "The verified link is ready to enable."
@@ -3455,7 +3519,7 @@ class LumenLinkCoordinator:
             "configured": bool(configuration.secret),
             "enabled": configuration.enabled,
             "paused": configuration.paused,
-            "connection": {"state": "ready" if any_compatible else ("error" if self.last_error else "offline"), "authenticated": bool(self.remote_status and not self.last_error), "latency_ms": self.latency_ms, "last_seen_unix_ms": int(self.last_seen * 1000) if self.last_seen else None, "error": self.last_error, "endpoint": configuration.endpoint, "address": configuration.endpoint.removeprefix("http://").removeprefix("https://"), "compatibility_by_job_type": compatibility},
+            "connection": {"state": "ready" if any_compatible else ("error" if self.last_error else ("incompatible" if self.remote_status else "offline")), "authenticated": bool(self.remote_status and not self.last_error), "latency_ms": self.latency_ms, "last_seen_unix_ms": int(self.last_seen * 1000) if self.last_seen else None, "error": self.last_error, "detail": compatibility_detail, "endpoint": configuration.endpoint, "address": configuration.endpoint.removeprefix("http://").removeprefix("https://"), "compatibility_by_job_type": compatibility},
             "local_node": {**_node_resources(), "address": "192.168.50.2"},
             "remote_node": {**((self.remote_status or {}).get("node") or {}), "address": configuration.endpoint.removeprefix("http://").removeprefix("https://")},
             "capabilities": (self.remote_status or {}).get("capabilities", {"supported_job_types": [], "gated_job_types": {job_type: "awaiting authenticated compatible health" for job_type in SUPPORTED_JOB_TYPES}, "job_contracts": {}}),
@@ -3474,15 +3538,20 @@ class LumenLinkCoordinator:
                     "Threadripper 192.168.50.1 ↔ Lumen 192.168.50.2"
                 ),
                 "port": 8765,
-                "commands": [
-                    "./scripts/lumen-link status",
-                    "./scripts/lumen-link test",
-                    (
-                        "git status --short"
-                        if setup_state == "incompatible"
-                        else "./scripts/lumen-link setup"
-                    ),
-                ],
+                "commands": (
+                    [
+                        "cd ~/lumenengine",
+                        "./scripts/lumen-link-wsl stop",
+                        "git pull --ff-only",
+                        "./scripts/lumen-link-wsl configure --apply && ./scripts/lumen-link-wsl verify && ./scripts/lumen-link-wsl start",
+                    ]
+                    if setup_state == "incompatible"
+                    else [
+                        "./scripts/lumen-link status",
+                        "./scripts/lumen-link test",
+                        "./scripts/lumen-link setup",
+                    ]
+                ),
             },
         }
         with self.lock:

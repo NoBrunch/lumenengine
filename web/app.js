@@ -2354,7 +2354,7 @@ function renderLink(link = {}) {
   const state = rawState === "online" ? "ready" : rawState;
   const stateClass = ["ready", "testing", "degraded", "error"].includes(state)
     ? state
-    : "offline";
+    : state === "incompatible" ? "degraded" : "offline";
   const authenticated = Boolean(connection.authenticated);
   const latency = Number(connection.latency_ms);
   const statusLabel = link.paused
@@ -2377,6 +2377,7 @@ function renderLink(link = {}) {
   const connectionParts = [];
   if (authenticated) connectionParts.push("authenticated");
   if (Number.isFinite(latency)) connectionParts.push(`${Math.round(latency)} ms`);
+  if (connection.detail) connectionParts.push(String(connection.detail));
   if (connection.error) connectionParts.push(String(connection.error));
   setText(
     "link-connection-detail",
@@ -2627,9 +2628,10 @@ function renderLink(link = {}) {
   if (testButton) testButton.disabled = app.linkRefreshing || !link.configured || state === "testing";
   const enableButton = $("link-enable-button");
   if (enableButton) {
-    enableButton.disabled = app.linkRefreshing || (
-      !link.enabled && (!link.configured || !workerCompatible)
-    );
+    // Keep Enable clickable for an authenticated but incompatible worker. The
+    // server performs a fresh check and returns the exact update instruction;
+    // a silently disabled control made revision drift look like a dead UI.
+    enableButton.disabled = app.linkRefreshing || (!link.enabled && !link.configured);
     enableButton.textContent = link.enabled ? "Disable link" : "Enable link";
     enableButton.classList.toggle("danger", Boolean(link.enabled));
     enableButton.classList.toggle("primary", !link.enabled);
@@ -2637,7 +2639,7 @@ function renderLink(link = {}) {
       ? "Return queued automatic EDMFormer work to local eligibility. An active remote process is allowed to finish."
       : workerCompatible
         ? "Enable automatic EDMFormer dispatch to this verified worker."
-        : "Test a provisioned, revision-compatible worker before enabling offload.";
+        : setup.next_action || "Test a provisioned, revision-compatible worker before enabling offload.";
   }
   const pauseButton = $("link-pause-button");
   if (pauseButton) {

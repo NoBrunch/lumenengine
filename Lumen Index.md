@@ -1104,6 +1104,13 @@ coordinator. It routes one eligible automatic job at a time. Disabling returns
 unstarted jobs to local eligibility while an active remote job drains to its
 verified result.
 
+An authenticated worker with a different code or asset contract is reported
+as **INCOMPATIBLE**, not Offline. The dashboard shows both short revisions and
+the exact WSL update/restart commands. **Enable link** remains interactive in
+that state so it can return the specific mismatch instead of behaving like a
+dead button; it will not enable dispatch until at least one current job
+contract verifies.
+
 The worker advertises `teacher.edmformer`, `teacher.songformer`, and
 `student.train`; held-out evaluation is part of the training job rather than a
 separate job type. The deployment procedure is
