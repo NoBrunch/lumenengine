@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -252,6 +253,7 @@ class SpotifyWebAPI:
     """Small Web API client for Lumen's private Spotify Connect console."""
 
     _playlist_cache: dict[str, tuple[float, Any]] = {}
+    _playlist_items_cache: dict[str, tuple[float, Any]] = {}
 
     def __init__(
         self,
@@ -267,21 +269,33 @@ class SpotifyWebAPI:
         query: str = "",
         playlist_id: str = "",
     ) -> dict[str, Any]:
-        playback = self._request("/me/player")
+        # Resolve one token, then fetch the independent player/profile/device
+        # resources concurrently.  They used to run serially, so normal WAN
+        # latency was paid three times before the console could paint.
+        token = self.token_supplier()
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            playback_future = executor.submit(
+                self._request, "/me/player", token_override=token
+            )
+            devices_future = executor.submit(
+                self._request, "/me/player/devices", token_override=token
+            )
+            profile_future = executor.submit(
+                self._request, "/me", token_override=token
+            )
+            playback = playback_future.result()
+            devices_payload = devices_future.result() or {}
+            try:
+                profile_payload = profile_future.result() or {}
+            except RuntimeError as error:
+                # Profile identity is decorative; do not make a temporary /me
+                # rate limit prevent playback metadata and device controls.
+                if "rate limited" not in str(error).lower():
+                    raise
+                profile_payload = {}
         self.last_playback_payload = (
             playback if isinstance(playback, dict) else None
         )
-        devices_payload = self._request("/me/player/devices") or {}
-        try:
-            profile_payload = self._request("/me") or {}
-        except RuntimeError as error:
-            # Profile identity is decorative; do not make a temporary /me
-            # rate limit prevent playback metadata and device controls from
-            # appearing in the console.
-            if "rate limited" not in str(error).lower():
-                raise
-            profile_payload = {}
-        token = self.token_supplier()
         granted = set(token.scope.split())
         library_scopes = {
             "playlist-read-private",
@@ -310,14 +324,14 @@ class SpotifyWebAPI:
             "observed_at_unix_ms": round(time.time() * 1000),
         }
         if library_authorized:
-            token_key = self.token_supplier().access_token[-16:]
+            token_key = token.access_token[-16:]
             cached_playlists = self._playlist_cache.get(token_key)
             if cached_playlists and time.time() - cached_playlists[0] < 120.0:
                 playlists_payload = cached_playlists[1]
             else:
                 try:
                     playlists_payload = self._request(
-                        "/me/playlists", query={"limit": 50, "offset": 0},
+                        "/me/playlists", query={"limit": 50, "offset": 0}, token_override=token,
                     ) or {}
                     self._playlist_cache[token_key] = (time.time(), playlists_payload)
                 except RuntimeError as error:
@@ -345,14 +359,23 @@ class SpotifyWebAPI:
                 None,
             )
             try:
-                items_payload = self._request(
-                    f"/playlists/{quote(safe_playlist_id)}/items",
-                    query={
-                        "limit": 50,
-                        "offset": 0,
-                        "additional_types": "track",
-                    },
-                ) or {}
+                item_cache_key = f"{token.access_token[-16:]}:{safe_playlist_id}"
+                cached_items = self._playlist_items_cache.get(item_cache_key)
+                if cached_items and time.time() - cached_items[0] < 120.0:
+                    items_payload = cached_items[1]
+                else:
+                    items_payload = self._request(
+                        f"/playlists/{quote(safe_playlist_id)}/items",
+                        query={
+                            "limit": 50,
+                            "offset": 0,
+                            "additional_types": "track",
+                        },
+                        token_override=token,
+                    ) or {}
+                    self._playlist_items_cache[item_cache_key] = (
+                        time.time(), items_payload
+                    )
                 result["playlist_tracks"] = [
                     spotify_track_summary(item)
                     for entry in items_payload.get("items", [])
@@ -369,7 +392,7 @@ class SpotifyWebAPI:
         if query.strip():
             search = self._request(
                 "/search",
-                query={"q": query.strip(), "type": "track", "limit": 10},
+                query={"q": query.strip(), "type": "track", "limit": 10}, token_override=token,
             ) or {}
             tracks = search.get("tracks", {})
             if isinstance(tracks, dict):
@@ -452,8 +475,9 @@ class SpotifyWebAPI:
         method: str = "GET",
         query: dict[str, object] | None = None,
         body: dict[str, object] | None = None,
+        token_override: SpotifyToken | None = None,
     ) -> Any:
-        token = self.token_supplier()
+        token = token_override or self.token_supplier()
         url = f"{SPOTIFY_API}{path}"
         if query:
             encoded = urlencode(

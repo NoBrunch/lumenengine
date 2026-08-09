@@ -499,6 +499,46 @@ class FixtureOutputTests(unittest.TestCase):
         self.assertEqual(first.get_channel(0, 3), second.get_channel(0, 3))
         self.assertNotEqual(first.get_channel(0, 4), second.get_channel(0, 4))
 
+    def test_side_arm_speed_feedback_does_not_speed_center_body(self) -> None:
+        fixture = ProfileFixturePatch(
+            fixture_id="multi",
+            name="Multi",
+            profile_key="generic_multi_effect_19ch",
+            universe=0,
+            address=1,
+            position_m=Vec3(0, 0, 2),
+            housing_rotation=EulerXYZ(),
+        )
+        observation = MusicalObservation(
+            timestamp_s=1.0, loudness=0.8, onset_strength=0.3,
+            low_energy=0.5, mid_energy=0.4, high_energy=0.2,
+            beat_confidence=0.9, bpm=120.0,
+        )
+        tuning = CenterMotionTuning(
+            relationship="synchronized", laser_mode="off",
+            color_pattern="palette", emitter_pattern="both",
+        )
+        normal = DMXFrame()
+        faster_arms = DMXFrame()
+        apply_auxiliary_fixture(
+            normal, fixture, decision(), observation,
+            motion_tuning=tuning, motion_beat_position=1.3,
+        )
+        apply_auxiliary_fixture(
+            faster_arms, fixture, decision(), observation,
+            motion_tuning=tuning, motion_beat_position=1.3,
+            side_arm_speed_feedback=0.8,
+        )
+        self.assertEqual(
+            normal.get_channel(0, 1), faster_arms.get_channel(0, 1)
+        )
+        self.assertNotEqual(
+            normal.get_channel(0, 3), faster_arms.get_channel(0, 3)
+        )
+        self.assertNotEqual(
+            normal.get_channel(0, 4), faster_arms.get_channel(0, 4)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

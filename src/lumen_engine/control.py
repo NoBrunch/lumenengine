@@ -189,6 +189,40 @@ REHEARSAL_ROUTINES: tuple[dict[str, str], ...] = (
     },
 )
 REHEARSAL_ROUTINE_IDS = frozenset(item["id"] for item in REHEARSAL_ROUTINES)
+GESTURE_IDS = (
+    "hold", "breathe", "converge", "expand", "sweep", "pulse", "release",
+)
+DEFAULT_GESTURE_MOVEMENTS: dict[str, tuple[str, ...]] = {
+    # A fresh installation preserves the complete authored candidate pool.
+    # The editor becomes a constraint only after the operator deliberately
+    # narrows a gesture, so adding this feature cannot silently change a rig
+    # whose movement had already been tuned and validated.
+    gesture: tuple(item["id"] for item in REHEARSAL_ROUTINES)
+    for gesture in GESTURE_IDS
+}
+
+
+def _normalized_gesture_movements(
+    payload: Any,
+) -> dict[str, tuple[str, ...]]:
+    source = payload if isinstance(payload, dict) else {}
+    normalized: dict[str, tuple[str, ...]] = {}
+    for gesture in GESTURE_IDS:
+        raw = source.get(gesture, DEFAULT_GESTURE_MOVEMENTS[gesture])
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError(f"movements for {gesture} must be a list")
+        routines = tuple(
+            dict.fromkeys(
+                str(item).strip().lower() for item in raw
+                if str(item).strip().lower() in REHEARSAL_ROUTINE_IDS
+            )
+        )
+        if not routines:
+            raise ValueError(
+                f"gesture {gesture} must have at least one movement"
+            )
+        normalized[gesture] = routines
+    return normalized
 
 
 @dataclass(slots=True)
@@ -229,7 +263,7 @@ class RehearsalControls:
     bpm: float = 120.0
     intensity: float = 0.68
     size: float = 1.0
-    palette: str = "party_vivid"
+    palette: str = "auto"
     strobe: float = 0.0
     isolate: bool = True
     tour: bool = False
@@ -289,23 +323,29 @@ class GatedOutput:
         self.output = output
         self.controls = controls
         self.last_frame = DMXFrame()
+        self.last_transmitted_frame = DMXFrame()
         self.frame_count = 0
 
     def send(self, frame: DMXFrame) -> None:
         self.last_frame = frame.copy()
         self.frame_count += 1
         if self.controls.blackout:
-            self.output.send(DMXFrame())
+            transmitted = DMXFrame()
+            self.last_transmitted_frame = transmitted
+            self.output.send(transmitted)
         else:
+            self.last_transmitted_frame = frame.copy()
             self.output.send(frame)
 
     def refresh_gate(self) -> None:
         if self.controls.blackout:
+            self.last_transmitted_frame = DMXFrame()
             if isinstance(self.output, OpenDmxUsbOutput):
                 self.output.blackout()
             else:
                 self.output.send(DMXFrame())
         else:
+            self.last_transmitted_frame = self.last_frame.copy()
             self.output.send(self.last_frame)
 
     def close(self) -> None:
@@ -460,6 +500,9 @@ class LumenApplication:
         self._runtime: PerformanceRuntime | None = None
         self.controls = OperatorControls()
         self.rehearsal = RehearsalControls()
+        self.gesture_movements = _normalized_gesture_movements(
+            self._settings.get("gesture_movements", {})
+        )
         group_motion_tunings = self._load_motion_tunings()
         self.motion_tunings = group_motion_tunings.movers
         self.center_motion_tunings = group_motion_tunings.center
@@ -638,7 +681,9 @@ class LumenApplication:
         self._spotify_last_command: dict[str, Any] | None = None
         self._spotify_console_cache: dict[str, Any] = {}
         self._spotify_console_cached_at: dict[str, float] = {}
+        self._spotify_playback_cached_at: dict[str, float] = {}
         self._spotify_console_lock = threading.Lock()
+        self._spotify_token_lock = threading.Lock()
         self._spotify_rate_limited_until = 0.0
         self._feedback_biases: dict[str, dict[str, Any]] = {}
         self._calibration_overrides: dict[str, dict[str, float]] = {}
@@ -659,7 +704,10 @@ class LumenApplication:
         self._control_queue_drops = 0
         self._control_ticks = 0
         self._control_interpolated_ticks = 0
+        self._control_coalesced_frames = 0
         self._control_maximum_late_ms = 0.0
+        self._control_last_interval_ms = 0.0
+        self._control_maximum_jitter_ms = 0.0
         self._tempo_diagnostics: dict[str, Any] = {}
         self._live_pipeline_timing: dict[str, Any] = {
             "packets": 0,
@@ -1790,6 +1838,20 @@ class LumenApplication:
                         ),
                         "parameters": {
                             "beat_sync": step.get("beat_sync", 1.0),
+                            "motion_speed": step.get("motion_speed", 0.5),
+                            "travel_size": step.get("travel_size", 1.0),
+                            "activity_density": step.get(
+                                "activity_density", 1.0
+                            ),
+                            "brightness": step.get("brightness"),
+                            "strobe_enabled": step.get(
+                                "strobe_enabled",
+                                float(step.get("strobe", 0.0)) > 0,
+                            ),
+                            "strobe_rate": step.get(
+                                "strobe_rate", step.get("strobe", 0.0)
+                            ),
+                            "cue_timing": step.get("cue_timing", 1.0),
                         },
                     }
                     for step in steps
@@ -1841,8 +1903,8 @@ class LumenApplication:
             "pick_it_up": {"activity_density": 0.35},
             "faster": {"motion_speed": 0.28},
             "slower": {"motion_speed": -0.28},
-            "faster_side_arms": {"motion_speed": 0.18},
-            "slower_side_arms": {"motion_speed": -0.18},
+            "faster_side_arms": {"side_arm_speed": 0.28},
+            "slower_side_arms": {"side_arm_speed": -0.28},
             "too_bright": {"brightness": -0.25},
             "dimmer": {"brightness": -0.25},
             "too_dim": {"brightness": 0.25},
@@ -1895,6 +1957,22 @@ class LumenApplication:
             "faster strobe", "faster flash", "slower strobe", "slower flash",
         ):
             motion_text = motion_text.replace(phrase, "")
+        if any(term in motion_text for term in (
+            "faster side arms", "speed up side arms", "faster arms",
+        )):
+            adjust("side_arm_speed", 0.18)
+            for phrase in (
+                "faster side arms", "speed up side arms", "faster arms",
+            ):
+                motion_text = motion_text.replace(phrase, "")
+        if any(term in motion_text for term in (
+            "slower side arms", "slow side arms", "slower arms",
+        )):
+            adjust("side_arm_speed", -0.18)
+            for phrase in (
+                "slower side arms", "slow side arms", "slower arms",
+            ):
+                motion_text = motion_text.replace(phrase, "")
         if any(term in motion_text for term in (
             "slower", "too fast", "slow movement", "move slowly",
         )):
@@ -1977,6 +2055,7 @@ class LumenApplication:
         """Reconstruct preferences with recency decay and agreement confidence."""
         literal_axes = (
             "motion_speed",
+            "side_arm_speed",
             "travel_size",
             "activity_density",
             "brightness",
@@ -2648,11 +2727,14 @@ class LumenApplication:
                     }
                     for solution in frame.solutions
                 ],
-                # These are the final fixture-local bytes from the same frame
-                # that was handed to the DMX output.  Keeping them beside the
-                # semantic decision closes the audit path from heard music to
-                # effective fixture state without reopening the USB adapter.
-                "fixture_dmx": self._fixture_dmx_snapshot(frame),
+                # `fixture_dmx` is the post-gate physical frame (including a
+                # blackout); the resolved copy preserves what choreography
+                # produced before the transport boundary.
+                "fixture_dmx": self._fixture_dmx_snapshot(
+                    item.get("transmitted_dmx", frame.dmx)
+                ),
+                "resolved_fixture_dmx": self._fixture_dmx_snapshot(frame),
+                "timing": deepcopy(item.get("timing", {})),
                 "effective_outputs": [
                     output.as_dict() for output in frame.effective_outputs
                 ],
@@ -3001,6 +3083,8 @@ class LumenApplication:
                     control_queue.get_nowait()
                 except queue.Empty:
                     continue
+                else:
+                    control_queue.task_done()
                 with self._live_state_lock:
                     self._control_queue_drops += 1
                 continue
@@ -3020,60 +3104,76 @@ class LumenApplication:
         errors: list[BaseException],
         capture_config: AudioCaptureConfig,
     ) -> None:
-        """React immediately to analysis and bridge genuine gaps at 30 Hz."""
+        """Publish one coalesced state on a fixed 30 Hz show clock.
 
-        fallback_period_s = 1.0 / 30.0
-        packet_period_s = (
-            capture_config.chunk_frames / capture_config.sample_rate
-        )
-        stale_threshold_s = max(
-            fallback_period_s, packet_period_s * 1.25
-        )
-        fallback_at = time.monotonic() + stale_threshold_s
+        PCM analysis remains authoritative and processes every source packet.
+        The output scheduler consumes the newest available result at each
+        deadline instead of replaying a FIFO burst faster than real time.
+        """
+
+        control_period_s = 1.0 / 30.0
+        next_tick_at = time.monotonic()
+        previous_tick_started: float | None = None
         active: _AnalyzedControlFrame | None = None
+        pending: list[_AnalyzedControlFrame] = []
         try:
             while not self._stop.is_set():
-                if analysis_finished.is_set() and control_queue.empty():
+                if (
+                    analysis_finished.is_set()
+                    and control_queue.empty()
+                    and not pending
+                ):
                     return
-                newest: _AnalyzedControlFrame | None = None
-                # The 30 Hz clock is faster than the 23.4 Hz PCM source. Keep
-                # ordinary arecord/CPU bursts in FIFO order so no beat or
-                # structural evidence is discarded. Collapse only a genuinely
-                # stale backlog that already exceeds a quarter second.
-                if control_queue.qsize() > 8:
-                    while control_queue.qsize() > 2:
-                        try:
-                            newest = control_queue.get_nowait()
-                        except queue.Empty:
-                            break
-                        with self._live_state_lock:
-                            self._control_queue_drops += 1
-                timeout = max(0.0, fallback_at - time.monotonic())
-                try:
-                    newest = control_queue.get(timeout=timeout)
-                except queue.Empty:
-                    newest = None
+                now = time.monotonic()
+                if now < next_tick_at:
+                    try:
+                        pending.append(control_queue.get(
+                            timeout=next_tick_at - now
+                        ))
+                        continue
+                    except queue.Empty:
+                        pass
+
+                # The deadline has arrived. Drain every result already ready,
+                # then use only the latest semantic state. Discontinuity flags,
+                # PCM accounting and recorder alignment are aggregated across
+                # the coalesced packet group.
+                while True:
+                    try:
+                        pending.append(control_queue.get_nowait())
+                    except queue.Empty:
+                        break
                 with self._live_state_lock:
                     self._control_queue_depth = control_queue.qsize()
-                fresh_analysis = newest is not None
-                if newest is not None:
-                    active = newest
-                    late_ms = 0.0
-                    fallback_at = time.monotonic() + stale_threshold_s
-                else:
-                    now = time.monotonic()
-                    late_ms = max(0.0, (now - fallback_at) * 1000.0)
-                    fallback_at = now + fallback_period_s
+                tick_started = time.monotonic()
+                tick_interval_ms = (
+                    0.0
+                    if previous_tick_started is None
+                    else (tick_started - previous_tick_started) * 1000.0
+                )
+                previous_tick_started = tick_started
+                late_ms = max(0.0, (tick_started - next_tick_at) * 1000.0)
+                next_tick_at += control_period_s
+                if next_tick_at <= tick_started:
+                    # Do not replay missed show ticks. Resume from the next
+                    # real deadline and report the lateness diagnostically.
+                    next_tick_at = tick_started + control_period_s
+                fresh_analysis = bool(pending)
+                coalesced = pending
+                pending = []
+                if fresh_analysis:
+                    active = coalesced[-1]
                 if active is None:
                     continue
 
-                if fresh_analysis and active.timeline_discontinuity:
+                if fresh_analysis and any(
+                    item.timeline_discontinuity for item in coalesced
+                ):
                     runtime.notify_timeline_discontinuity()
-                if fresh_analysis and active.audio_discontinuity:
+                if fresh_analysis and any(
+                    item.audio_discontinuity for item in coalesced
+                ):
                     runtime.notify_audio_discontinuity()
-                # Even a fresh FIFO result may have waited through a short
-                # burst. Resolve its phase on the authoritative source clock
-                # so output does not deliberately reproduce queue latency.
                 observation = self._extrapolate_control_observation(
                     active.observation, capture_config
                 )
@@ -3101,7 +3201,20 @@ class LumenApplication:
                     audio_metrics=(
                         active.audio_metrics if fresh_analysis else None
                     ),
-                    audio_bytes=(active.audio_bytes if fresh_analysis else 0),
+                    audio_bytes=(
+                        sum(item.audio_bytes for item in coalesced)
+                        if fresh_analysis else 0
+                    ),
+                    audio_packet_count=(
+                        len(coalesced) if fresh_analysis else 1
+                    ),
+                    audio_frame_count=(
+                        sum(
+                            item.audio_metrics.frame_count
+                            for item in coalesced
+                        )
+                        if fresh_analysis else None
+                    ),
                     training_audio_frame=(
                         active.training_audio_frame
                         if fresh_analysis
@@ -3129,9 +3242,20 @@ class LumenApplication:
                     self._control_ticks += 1
                     if not fresh_analysis:
                         self._control_interpolated_ticks += 1
+                    self._control_coalesced_frames += max(
+                        0, len(coalesced) - 1
+                    )
                     self._control_maximum_late_ms = max(
                         self._control_maximum_late_ms, late_ms
                     )
+                    if tick_interval_ms > 0.0:
+                        self._control_last_interval_ms = tick_interval_ms
+                        self._control_maximum_jitter_ms = max(
+                            self._control_maximum_jitter_ms,
+                            abs(tick_interval_ms - control_period_s * 1000.0),
+                        )
+                for _item in coalesced:
+                    control_queue.task_done()
         except BaseException as error:
             errors.append(error)
             self._stop.set()
@@ -3340,13 +3464,14 @@ class LumenApplication:
         }
 
     def _fixture_dmx_snapshot(
-        self, frame: RuntimeFrame
+        self, frame: RuntimeFrame | DMXFrame
     ) -> list[dict[str, Any]]:
+        dmx = frame.dmx if isinstance(frame, RuntimeFrame) else frame
         result: list[dict[str, Any]] = []
         for fixture in (*self.rig.fixtures, *self.rig.auxiliary_fixtures):
             profile = party_parrot_profile(fixture.profile_key)
             footprint = profile.dmx_footprint if profile is not None else 1
-            universe = frame.dmx.universe_data(fixture.universe)
+            universe = dmx.universe_data(fixture.universe)
             start = fixture.address - 1
             result.append(
                 {
@@ -3444,6 +3569,8 @@ class LumenApplication:
         *,
         audio_metrics: AudioInputMetrics | None = None,
         audio_bytes: int = 0,
+        audio_packet_count: int = 1,
+        audio_frame_count: int | None = None,
         training_audio_frame: int | None = None,
         raw_observation: MusicalObservation | None = None,
     ) -> None:
@@ -3464,6 +3591,8 @@ class LumenApplication:
         trace_controls = replace(self.controls)
         trace_structure_model: dict[str, Any] | None = None
         trace_structure_resolution: dict[str, Any] = {}
+        trace_timing: dict[str, Any] = {}
+        trace_transmitted_dmx = frame.dmx
         runtime: PerformanceRuntime | None = None
         trace_choreography_snapshot: dict[str, Any] | None = None
         with self._live_state_lock:
@@ -3473,8 +3602,12 @@ class LumenApplication:
                     self._audio_capture_started_at = packet_time
                 self._audio_last_packet_at = packet_time
                 self._audio_packet_times.append(packet_time)
-                self._audio_packets += 1
-                self._audio_frames += audio_metrics.frame_count
+                self._audio_packets += max(1, int(audio_packet_count))
+                self._audio_frames += (
+                    audio_metrics.frame_count
+                    if audio_frame_count is None
+                    else max(0, int(audio_frame_count))
+                )
                 self._audio_bytes += audio_bytes
                 self._audio_metrics = audio_metrics
             if audio_metrics is not None or training_audio_frame is not None:
@@ -3484,18 +3617,50 @@ class LumenApplication:
             self._runtime_choreography_snapshot = (
                 current_choreography_snapshot
             )
-            if (
+            # The 30 Hz control clock deliberately publishes interpolated
+            # frames between analyzer observations. Those ticks reuse the
+            # latest measured dBFS instead of inventing -120 dBFS. Recording
+            # freshness and age alongside it preserves a true 10 Hz / 24 s
+            # chart while keeping analyzer latency diagnosable.
+            measured_metrics = (
+                audio_metrics
+                if audio_metrics is not None
+                else self._audio_metrics
+            )
+            has_physical_measurement = self._audio_packets > 0
+            history_has_source = has_physical_measurement or self.engine_mode in {
+                "demo", "rehearsal"
+            }
+            if history_has_source and (
                 self._last_analysis_history_at is None
-                or observation.timestamp_s - self._last_analysis_history_at >= 0.095
+                or observation.timestamp_s - self._last_analysis_history_at >= 0.099
             ):
-                self._last_analysis_history_at = observation.timestamp_s
+                if self._last_analysis_history_at is None:
+                    self._last_analysis_history_at = observation.timestamp_s
+                elif (
+                    observation.timestamp_s - self._last_analysis_history_at
+                    > 1.0
+                ):
+                    self._last_analysis_history_at = observation.timestamp_s
+                else:
+                    self._last_analysis_history_at += 0.1
                 self._analysis_history.append(
                     {
                         "timestamp_s": observation.timestamp_s,
                         "dbfs": (
-                            audio_metrics.dbfs
-                            if audio_metrics is not None
-                            else -120.0
+                            measured_metrics.dbfs
+                            if has_physical_measurement
+                            else None
+                        ),
+                        "input_fresh": audio_metrics is not None,
+                        "input_age_ms": (
+                            max(
+                                0.0,
+                                observation.timestamp_s
+                                - measured_metrics.timestamp_s,
+                            ) * 1000.0
+                            if has_physical_measurement
+                            else None
                         ),
                         "loudness": observation.loudness,
                         "onset": observation.onset_strength,
@@ -3509,6 +3674,33 @@ class LumenApplication:
                         "routine": frame.decision.routine,
                     }
                 )
+                diagnostic_now = time.monotonic()
+                source_packet_at = self._audio_capture_diagnostics.get(
+                    "last_packet_monotonic_s"
+                )
+                self._audio_age_history.append({
+                    "monotonic_s": round(diagnostic_now, 3),
+                    "source_age_ms": (
+                        None if source_packet_at is None else round(
+                            max(
+                                0.0,
+                                diagnostic_now - float(source_packet_at),
+                            ) * 1000.0,
+                            3,
+                        )
+                    ),
+                    "processed_age_ms": (
+                        None if self._audio_last_packet_at is None else round(
+                            max(
+                                0.0,
+                                diagnostic_now - self._audio_last_packet_at,
+                            ) * 1000.0,
+                            3,
+                        )
+                    ),
+                    "queue_depth": self._audio_queue_depth,
+                    "control_queue_depth": self._control_queue_depth,
+                })
             if (
                 self._last_trace_timestamp is None
                 or observation.timestamp_s - self._last_trace_timestamp >= 0.48
@@ -3524,6 +3716,51 @@ class LumenApplication:
                 trace_structure_model = self._student_prediction
                 trace_structure_resolution = self._effective_structure
                 runtime = active_runtime
+                if active_runtime is not None:
+                    effective_frame = getattr(
+                        active_runtime.output,
+                        "last_transmitted_frame",
+                        frame.dmx,
+                    )
+                    if isinstance(effective_frame, DMXFrame):
+                        trace_transmitted_dmx = effective_frame.copy()
+                diagnostic_now = time.monotonic()
+                source_packet_at = self._audio_capture_diagnostics.get(
+                    "last_packet_monotonic_s"
+                )
+                trace_timing = {
+                    "control_tick_kind": (
+                        "fresh_analysis"
+                        if audio_metrics is not None else "interpolated"
+                    ),
+                    "source_age_ms": (
+                        None if source_packet_at is None else round(
+                            max(0.0, diagnostic_now - float(source_packet_at))
+                            * 1000.0,
+                            3,
+                        )
+                    ),
+                    "processed_age_ms": (
+                        None if self._audio_last_packet_at is None else round(
+                            max(0.0, diagnostic_now - self._audio_last_packet_at)
+                            * 1000.0,
+                            3,
+                        )
+                    ),
+                    "capture_queue_depth": self._audio_queue_depth,
+                    "control_queue_depth": self._control_queue_depth,
+                    "control_ticks": self._control_ticks,
+                    "control_interpolated_ticks": self._control_interpolated_ticks,
+                    "control_coalesced_frames": self._control_coalesced_frames,
+                    "control_last_interval_ms": round(
+                        self._control_last_interval_ms, 3
+                    ),
+                    "control_maximum_jitter_ms": round(
+                        self._control_maximum_jitter_ms, 3
+                    ),
+                    "trace_queue_depth": self._trace_queue.qsize(),
+                    "trace_queue_drops": self._trace_queue_drops,
+                }
             gesture = frame.decision.gesture.value
             if gesture != self._last_gesture:
                 self._last_gesture = gesture
@@ -3563,6 +3800,8 @@ class LumenApplication:
                         "choreography_snapshot": (
                             trace_choreography_snapshot
                         ),
+                        "transmitted_dmx": trace_transmitted_dmx,
+                        "timing": trace_timing,
                     }
                 )
             except queue.Full:
@@ -3662,7 +3901,10 @@ class LumenApplication:
         self._control_queue_drops = 0
         self._control_ticks = 0
         self._control_interpolated_ticks = 0
+        self._control_coalesced_frames = 0
         self._control_maximum_late_ms = 0.0
+        self._control_last_interval_ms = 0.0
+        self._control_maximum_jitter_ms = 0.0
         self._tempo_diagnostics = {}
         self._live_pipeline_timing = {
             "packets": 0,
@@ -3690,24 +3932,19 @@ class LumenApplication:
             else deepcopy(self._audio_capture_diagnostics)
         )
         source_age_ms = capture_diagnostics.get("last_packet_age_ms")
-        self._audio_age_history.append(
-            {
-                "monotonic_s": round(now, 3),
-                "source_age_ms": (
-                    None
-                    if source_age_ms is None
-                    else round(float(source_age_ms), 3)
-                ),
-                "processed_age_ms": (
-                    None
-                    if processed_age_ms is None
-                    else round(float(processed_age_ms), 3)
-                ),
-                "queue_depth": self._audio_queue_depth,
-            }
-        )
         packet_rate_hz = 0.0
-        if len(self._audio_packet_times) >= 2:
+        source_frames = int(capture_diagnostics.get("source_frames") or 0)
+        source_packets = int(capture_diagnostics.get("packets_read") or 0)
+        source_config = getattr(
+            getattr(active_capture, "source", None),
+            "config",
+            AudioCaptureConfig(),
+        )
+        if source_frames > 0 and source_packets > 0:
+            packet_rate_hz = source_packets / (
+                source_frames / source_config.sample_rate
+            )
+        elif len(self._audio_packet_times) >= 2:
             elapsed = self._audio_packet_times[-1] - self._audio_packet_times[0]
             if elapsed > 0:
                 packet_rate_hz = (
@@ -3802,16 +4039,23 @@ class LumenApplication:
             "capture_queue_delay_ms": self._audio_queue_delay_ms,
             "capture_queue": capture_diagnostics,
             "control_clock": {
-                "mode": "analysis_event_driven_with_sample_clock_bridge",
+                "mode": "fixed_rate_coalesced_audio_state",
                 "rate_hz": 30.0,
                 "fallback_rate_hz": 30.0,
                 "queue_depth": self._control_queue_depth,
                 "maximum_queue_depth": self._control_queue_max_depth,
-                "coalesced_frames": self._control_queue_drops,
+                "coalesced_frames": self._control_coalesced_frames,
+                "dropped_frames": self._control_queue_drops,
                 "ticks": self._control_ticks,
                 "interpolated_ticks": self._control_interpolated_ticks,
                 "maximum_late_ms": round(
                     self._control_maximum_late_ms, 3
+                ),
+                "last_interval_ms": round(
+                    self._control_last_interval_ms, 3
+                ),
+                "maximum_jitter_ms": round(
+                    self._control_maximum_jitter_ms, 3
                 ),
                 "timing_authority": "audio_sample_clock",
             },
@@ -3856,6 +4100,7 @@ class LumenApplication:
             choreography_model=self._choreography_model,
             motion_tunings=self.motion_tunings,
             center_motion_tunings=self.center_motion_tunings,
+            gesture_movements=self.gesture_movements,
         )
         runtime.replace_feedback(self._feedback_biases)
         runtime.set_media_context(
@@ -4048,10 +4293,6 @@ class LumenApplication:
                         ),
                     )
                 if "color_studio" in payload:
-                    if self._thread is not None and self._thread.is_alive():
-                        raise RuntimeError(
-                            "stop Live or Rehearsal before editing Color Studio"
-                        )
                     raw = payload["color_studio"]
                     if not isinstance(raw, dict):
                         raise ValueError("color_studio must be an object")
@@ -4077,7 +4318,24 @@ class LumenApplication:
                     )
                     normalized = color_library_snapshot()
                     self._settings["color_studio"] = normalized
+                    if self._runtime is not None:
+                        self._runtime.invalidate_color_latches()
                     self._add_event("control", "Color Studio saved")
+                if "gesture_movements" in payload:
+                    associations = _normalized_gesture_movements(
+                        payload["gesture_movements"]
+                    )
+                    self.gesture_movements = associations
+                    self._settings["gesture_movements"] = {
+                        gesture: list(routines)
+                        for gesture, routines in associations.items()
+                    }
+                    if self._runtime is not None:
+                        self._runtime.set_gesture_movements(associations)
+                    self._add_event(
+                        "rehearsal",
+                        "Gesture movement associations saved",
+                    )
                 settings = dict(self._settings)
                 self._status_sequence += 1
             self._save_settings(settings)
@@ -4102,6 +4360,10 @@ class LumenApplication:
             "training_path": str(self.training_root),
             "color_studio": color_studio,
             "palette_families": sorted(PALETTE_FAMILIES),
+            "gesture_movements": {
+                gesture: list(routines)
+                for gesture, routines in self.gesture_movements.items()
+            },
         }
 
     def export_training_data(self) -> dict[str, Any]:
@@ -5251,6 +5513,15 @@ class LumenApplication:
         with self._spotify_console_lock:
             return self._spotify_console_locked(query, playlist_id)
 
+    def _spotify_valid_token(self):
+        """Resolve/refresh the one local token without cache-write races."""
+
+        with self._spotify_token_lock:
+            return SpotifyOAuthPKCE(
+                client_id=self.spotify_client_id,
+                cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
+            ).valid_token()
+
     def _spotify_console_locked(
         self,
         query: str = "",
@@ -5280,7 +5551,15 @@ class LumenApplication:
         cache_key = f"{query[:200]}|{playlist_id[:128]}"
         cached_at = self._spotify_console_cached_at.get(cache_key, 0.0)
         cache_age = max(0.0, time.time() - cached_at)
-        if cache_key in self._spotify_console_cache and cache_age < 1.0:
+        playback_age = max(
+            0.0,
+            time.time() - self._spotify_playback_cached_at.get(cache_key, 0.0),
+        )
+        if (
+            cache_key in self._spotify_console_cache
+            and cache_age < 20.0
+            and playback_age < 3.0
+        ):
             return deepcopy(self._spotify_console_cache[cache_key])
         if time.time() < self._spotify_rate_limited_until and cache_key in self._spotify_console_cache:
             cached = deepcopy(self._spotify_console_cache[cache_key])
@@ -5288,12 +5567,8 @@ class LumenApplication:
             cached["message"] = "Spotify is rate limited; showing the last known player state."
             return cached
         try:
-            oauth = SpotifyOAuthPKCE(
-                client_id=self.spotify_client_id,
-                cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
-            )
-            client = SpotifyWebAPI(oauth.valid_token)
-            if cache_key in self._spotify_console_cache and cache_age < 60.0:
+            client = SpotifyWebAPI(self._spotify_valid_token)
+            if cache_key in self._spotify_console_cache and cache_age < 20.0:
                 # Playback is the only console data that normally changes from
                 # second to second.  Reuse profile, device and library data so
                 # a responsive player does not repeatedly enumerate all of
@@ -5334,7 +5609,10 @@ class LumenApplication:
                     ),
                 }
             self._spotify_console_cache[cache_key] = deepcopy(console)
-            self._spotify_console_cached_at[cache_key] = time.time()
+            refreshed_at = time.time()
+            self._spotify_playback_cached_at[cache_key] = refreshed_at
+            if cache_key not in self._spotify_console_cached_at or cache_age >= 20.0:
+                self._spotify_console_cached_at[cache_key] = refreshed_at
             return console
         except Exception as error:
             if "rate limited" in str(error).lower() and cache_key in self._spotify_console_cache:
@@ -5354,12 +5632,8 @@ class LumenApplication:
         action = str(payload.get("action", "")).strip().lower()
         if not action:
             raise ValueError("Spotify action is required")
-        oauth = SpotifyOAuthPKCE(
-            client_id=self.spotify_client_id,
-            cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
-        )
         try:
-            SpotifyWebAPI(oauth.valid_token).command(action, payload)
+            SpotifyWebAPI(self._spotify_valid_token).command(action, payload)
         except Exception as error:
             with self._lock:
                 self._spotify_error = str(error)
@@ -5383,8 +5657,10 @@ class LumenApplication:
             self._add_event("media", f"Spotify control: {action}")
             self._status_sequence += 1
         with self._spotify_console_lock:
-            self._spotify_console_cache.clear()
-            self._spotify_console_cached_at.clear()
+            # Preserve library/search content; only playback is invalid after
+            # a transport command. The next console read is therefore one
+            # player request rather than a complete account/library rebuild.
+            self._spotify_playback_cached_at.clear()
         return {"accepted": True, "action": action}
 
     def _remember_spotify_payload(
@@ -5590,7 +5866,12 @@ class LumenApplication:
         raw_fixture_id = payload.get("fixture_id")
         fixture_id = str(raw_fixture_id).strip() if raw_fixture_id is not None else None
         group_id = str(payload.get("group_id", "")).strip() or None
-        participant_id = str(payload.get("participant_id", "")).strip() or None
+        raw_participant_id = payload.get("participant_id")
+        participant_id = (
+            None
+            if raw_participant_id is None
+            else str(raw_participant_id).strip() or None
+        )
         participant_name = (
             str(payload.get("participant_name", "")).strip() or None
         )
@@ -6379,7 +6660,12 @@ class LumenApplication:
         feedback_id = int(payload.get("feedback_id", 0))
         if feedback_id < 1:
             raise ValueError("feedback_id is required")
-        participant_id = str(payload.get("participant_id", "")).strip() or None
+        raw_participant_id = payload.get("participant_id")
+        participant_id = (
+            None
+            if raw_participant_id is None
+            else str(raw_participant_id).strip() or None
+        )
         with self._feedback_lock:
             existing = next(
                 (
@@ -6765,12 +7051,21 @@ class LumenApplication:
         if not client_id or not DEFAULT_SPOTIFY_TOKEN.exists():
             return
         try:
-            oauth = SpotifyOAuthPKCE(
-                client_id=client_id,
-                cache=SpotifyTokenCache(DEFAULT_SPOTIFY_TOKEN),
-            )
-            media = SpotifyNowPlayingProvider(oauth.valid_token).now_playing()
-            self._remember_media_identity(media)
+            client = SpotifyWebAPI(self._spotify_valid_token)
+            playback_payload = client.playback()
+            self._remember_spotify_payload(playback_payload)
+            playback_summary = spotify_playback_summary(playback_payload)
+            observed_at = time.time()
+            # Live has one authoritative network poll. Every desktop/phone
+            # console reads this shared playback snapshot instead of issuing
+            # its own staggered request.
+            with self._spotify_console_lock:
+                for cache_key, console in self._spotify_console_cache.items():
+                    console["playback"] = deepcopy(playback_summary)
+                    console["observed_at_unix_ms"] = round(
+                        observed_at * 1000
+                    )
+                    self._spotify_playback_cached_at[cache_key] = observed_at
             with self._lock:
                 self._spotify_error = None
         except Exception as error:
@@ -7318,6 +7613,10 @@ class LumenApplication:
             "rehearsal": {
                 **asdict(self.rehearsal),
                 "routines": list(REHEARSAL_ROUTINES),
+                "gesture_movements": {
+                    gesture: list(routines)
+                    for gesture, routines in self.gesture_movements.items()
+                },
                 "motion_editor": self._motion_editor_snapshot(),
             },
             "audio": self._audio_snapshot_unlocked(running),
@@ -7674,7 +7973,9 @@ class LumenHTTPServer(ThreadingHTTPServer):
         # browsers need the same display generation; recomputing it once per
         # socket can starve audio analysis on this six-core machine. This
         # cache is deliberately owned by the HTTP layer, never the live clock,
-        # and remains fresh enough for a smooth 30 Hz operator display.
+        # and matches the dashboard's 10 Hz poll cadence. Phase-shifted phones
+        # therefore share one immutable generation instead of multiplying
+        # JSON/GIL work inside the show process.
         self._status_body_lock = threading.Lock()
         self._status_body_cached_at: dict[bool, float] = {}
         self._status_body_cache: dict[bool, bytes] = {}
@@ -7691,7 +7992,7 @@ class LumenHTTPServer(ThreadingHTTPServer):
                 - self._status_body_cached_at.get(
                     include_analysis_history, 0.0
                 )
-                < 1.0 / 30.0
+                < 0.09
             ):
                 return self._status_body_cache[include_analysis_history]
             body = json.dumps(

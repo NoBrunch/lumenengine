@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 from lumen_engine.dmx import DMXFrame
@@ -50,6 +51,8 @@ def configure_color_library(
 ) -> None:
     """Install validated operator colors for the current Lumen process."""
 
+    global _CUSTOM_COLORS, _CUSTOM_PALETTES
+
     def parse(value: str) -> tuple[float, float, float] | None:
         raw = str(value).strip().lstrip("#")
         if len(raw) != 6:
@@ -73,10 +76,11 @@ def configure_color_library(
         entries = tuple(rgb for item in values if (rgb := parse(str(item))) is not None)
         if entries:
             parsed_palettes[key] = entries[:16]
-    _CUSTOM_COLORS.clear()
-    _CUSTOM_COLORS.update(parsed_colors)
-    _CUSTOM_PALETTES.clear()
-    _CUSTOM_PALETTES.update(parsed_palettes)
+    # Copy-on-write keeps every runtime frame on either the old complete
+    # registry or the new complete registry. A concurrent save can never show
+    # the resolver a transient empty palette library.
+    _CUSTOM_COLORS = parsed_colors
+    _CUSTOM_PALETTES = parsed_palettes
 
 
 def color_library_snapshot() -> dict[str, object]:
@@ -377,6 +381,7 @@ def apply_auxiliary_fixture(
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
     motion_speed: float = 0.5,
+    side_arm_speed_feedback: float = 0.0,
     travel_size: float = 1.0,
     activity_density: float = 1.0,
     strobe_feedback: float = 0.0,
@@ -387,8 +392,9 @@ def apply_auxiliary_fixture(
     color_activity: float = 1.0,
     enabled: bool = True,
     motion_tuning: MotionTuning | CenterMotionTuning | None = None,
-    motion_timestamp_s: float | None = None,
+    motion_beat_position: float | None = None,
     latched_rgb: tuple[float, float, float] | None = None,
+    latched_secondary_rgb: tuple[float, float, float] | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -402,6 +408,7 @@ def apply_auxiliary_fixture(
             idle_amount,
             motion_feedback,
             motion_speed,
+            side_arm_speed_feedback,
             travel_size,
             activity_density,
             strobe_feedback,
@@ -412,8 +419,9 @@ def apply_auxiliary_fixture(
             color_activity,
             enabled,
             motion_tuning,
-            motion_timestamp_s,
+            motion_beat_position,
             latched_rgb,
+            latched_secondary_rgb,
         )
         return
     dimmer = profile.channels.get("dimmer")
@@ -435,6 +443,7 @@ def _apply_generic_multi_effect(
     idle_amount: float = 0.0,
     motion_feedback: float = 0.0,
     motion_speed: float = 0.5,
+    side_arm_speed_feedback: float = 0.0,
     travel_size: float = 1.0,
     activity_density: float = 1.0,
     strobe_feedback: float = 0.0,
@@ -445,8 +454,9 @@ def _apply_generic_multi_effect(
     color_activity: float = 1.0,
     enabled: bool = True,
     motion_tuning: MotionTuning | CenterMotionTuning | None = None,
-    motion_timestamp_s: float | None = None,
+    motion_beat_position: float | None = None,
     latched_rgb: tuple[float, float, float] | None = None,
+    latched_secondary_rgb: tuple[float, float, float] | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     assert profile is not None
@@ -508,11 +518,7 @@ def _apply_generic_multi_effect(
                 max(0, min(255, int(value))),
             )
         return
-    timestamp = (
-        decision.timestamp_s
-        if motion_timestamp_s is None
-        else motion_timestamp_s
-    )
+    timestamp = decision.timestamp_s
     motion = decision.expression.motion
     energy = decision.expression.energy
     beat_pulse = 0.0 if observation is None else observation.beat_pulse
@@ -542,10 +548,9 @@ def _apply_generic_multi_effect(
         else observation.bpm
     )
     musical_beat = (
-        timestamp
-        * resolved_bpm
-        / 60.0
-        * speed_multiplier
+        timestamp * resolved_bpm / 60.0 * speed_multiplier
+        if motion_beat_position is None
+        else max(0.0, motion_beat_position)
     )
     cycle_start = math.floor(musical_beat / cycle_beats) * cycle_beats
     musical_beat = min(
@@ -560,7 +565,11 @@ def _apply_generic_multi_effect(
             if observation is None or observation.bpm is None
             else observation.bpm
         )
-        free_beat = timestamp * assumed_bpm / 60.0 * speed_multiplier
+        free_beat = (
+            timestamp * assumed_bpm / 60.0 * speed_multiplier
+            if motion_beat_position is None
+            else max(0.0, motion_beat_position)
+        )
         free_start = math.floor(free_beat / 4.0) * 4.0
         free_beat = min(
             free_beat,
@@ -571,7 +580,7 @@ def _apply_generic_multi_effect(
     # Change the gesture every bar: opposing sweeps, circles, alternating
     # arms, and a restrained nod. Motor speed follows energy so the effect
     # visibly settles with the music instead of racing through quiet parts.
-    bar_number = int(timestamp * (observation.bpm or 120.0) / 60.0 / 4.0)
+    bar_number = int(musical_beat / 4.0)
     pattern = {
         "breathe": 4,
         "opposing_chase": 1,
@@ -587,7 +596,7 @@ def _apply_generic_multi_effect(
         0.05,
         1.0,
     )
-    if decision.gesture is Gesture.BREATHE:
+    if decision.routine == "breathe":
         motion_scale *= 0.38
     # Use the detected bar phase when available so the compound fixture is
     # locked to the same beat grid as the movers instead of free-running from
@@ -595,7 +604,7 @@ def _apply_generic_multi_effect(
     motion_phase = (
         pattern_phase * math.tau
         if beat_confidence >= 0.12
-        else timestamp * (observation.bpm or 120.0) / 60.0 * math.tau / 4.0
+        else musical_beat * math.tau / 4.0
     )
     if pattern == 0:  # chase: each arm follows the other by a quarter cycle
         body_motion, arm_1_motion, arm_2_motion = math.sin(motion_phase), math.sin(motion_phase), math.sin(motion_phase + math.pi / 2)
@@ -613,6 +622,22 @@ def _apply_generic_multi_effect(
         body_motion, arm_1_motion, arm_2_motion = math.cos(motion_phase), math.sin(motion_phase * .75), -math.sin(motion_phase * .75)
     center_tuning = tuning if isinstance(tuning, CenterMotionTuning) else None
     if center_tuning is not None:
+        arm_rate_multiplier = clamp(
+            1.0 + 0.75 * side_arm_speed_feedback, 0.25, 1.75
+        )
+        center_tuning = replace(
+            center_tuning,
+            arm_1_speed=clamp(
+                center_tuning.arm_1_speed * arm_rate_multiplier,
+                0.125,
+                4.0,
+            ),
+            arm_2_speed=clamp(
+                center_tuning.arm_2_speed * arm_rate_multiplier,
+                0.125,
+                4.0,
+            ),
+        )
         body_motion, arm_1_motion, arm_2_motion = center_motion_coordinates(
             decision.routine,
             musical_beat,
@@ -701,16 +726,19 @@ def _apply_generic_multi_effect(
     else:
         ball_bias = palette_bias + (0.45 if even_beat else -0.45)
         arm_bias = palette_bias + (-0.45 if even_beat else 0.45)
-    ball_rgbw = rgb_to_rgbw(
-        latched_rgb
-        if latched_rgb is not None
-        else expression_rgb(decision, ball_bias, color_activity)
-    )
-    arm_rgbw = rgb_to_rgbw(
-        latched_rgb
-        if latched_rgb is not None
-        else expression_rgb(decision, arm_bias, color_activity)
-    )
+    if latched_rgb is None:
+        ball_rgb = expression_rgb(decision, ball_bias, color_activity)
+        arm_rgb = expression_rgb(decision, arm_bias, color_activity)
+    elif color_pattern in {"opposed", "alternate"}:
+        secondary = latched_secondary_rgb or latched_rgb
+        if color_pattern == "alternate" and not even_beat:
+            ball_rgb, arm_rgb = secondary, latched_rgb
+        else:
+            ball_rgb, arm_rgb = latched_rgb, secondary
+    else:
+        ball_rgb = arm_rgb = latched_rgb
+    ball_rgbw = rgb_to_rgbw(ball_rgb)
+    arm_rgbw = rgb_to_rgbw(arm_rgb)
     contrast = beat_pulse * (0.45 + 0.45 * activity)
     ball_scale = clamp(
         0.92 + (0.18 if even_beat else -0.72) * contrast,

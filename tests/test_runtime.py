@@ -107,6 +107,54 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Selected at a new", movers["reason"])
         self.assertIn("Selected at a new", center["reason"])
 
+    def test_feedback_learns_from_effective_fixture_dmx_by_lane(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+        )
+        for index in range(8):
+            runtime.step(self._lane_observation(
+                index / 30.0, (index / 15.0) % 1.0
+            ))
+        learning = runtime.learn_choreography_feedback(
+            label="more_like_this",
+            value=1.0,
+            scope="overall",
+        )
+        self.assertIsNotNone(learning)
+        assert learning is not None
+        movers = learning["lanes"]["movers"]["effective_dmx"]
+        center = learning["lanes"]["center"]["effective_dmx"]
+        self.assertGreater(movers["sample_count"], 0)
+        self.assertGreater(center["sample_count"], 0)
+        self.assertGreater(movers["intensity"], 0.0)
+        self.assertGreater(center["movement"], 0.0)
+
+    def test_gesture_association_constrains_generated_sequences(self) -> None:
+        rig = load_rig("config/party-parrot-active.json")
+        runtime = PerformanceRuntime(
+            rig.fixtures,
+            VirtualDMXOutput(),
+            auxiliary_fixtures=rig.auxiliary_fixtures,
+            choreography_model=SequencePreferenceModel(),
+            gesture_movements={
+                gesture: ("fan_sweep",)
+                for gesture in (
+                    "hold", "breathe", "converge", "expand",
+                    "sweep", "pulse", "release",
+                )
+            },
+        )
+        runtime.step(self._lane_observation(0.0, 0.0))
+        snapshot = runtime.choreography_snapshot()
+        self.assertEqual(
+            snapshot["lanes"]["movers"]["active_step"]["routine"],
+            "fan_sweep",
+        )
+
     def test_effective_output_trace_exposes_literal_feedback_axes(self) -> None:
         rig = load_rig("config/party-parrot-active.json")
         runtime = PerformanceRuntime(

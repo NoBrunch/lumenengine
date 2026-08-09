@@ -1670,7 +1670,10 @@ input[type="range"]::-moz-range-thumb {
 .palette-swatch input { accent-color: #73d3c3; }
 .color-add-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
 .color-add-row input[type="text"], .color-add-row input:not([type]) { min-width: 0; flex: 1; }
-.color-add-row input[type="color"] { width: 42px; height: 32px; padding: 2px; }
+.color-add-row #color-value-input { width: 86px; font-family: var(--font-mono); text-transform: uppercase; }
+.color-add-row #color-selected-preview { width: 34px; height: 30px; flex: 0 0 34px; border: 1px solid rgba(255,255,255,.45); border-radius: 3px; }
+.color-wheel-editor canvas { display: block; width: min(100%, 360px); height: auto; border: 1px solid #355053; border-radius: 4px; background: #071012; cursor: crosshair; touch-action: none; }
+.color-wheel-editor > label { display: grid; gap: 5px; max-width: 360px; margin-top: 10px; color: #8fa3a0; }
 .color-studio-grid small { display: block; color: #718681; margin-top: 9px; line-height: 1.4; }
 @media (max-width: 800px) { .color-studio-grid { grid-template-columns: 1fr; } }
 
@@ -1682,6 +1685,21 @@ input[type="range"]::-moz-range-thumb {
   border-bottom: 1px solid rgba(120, 160, 154, .18);
 }
 .center-motion-preview canvas { width: 100%; height: 170px; display: block; grid-column: 1 / -1; border: 1px solid rgba(117,164,158,.18); border-radius: 4px; }
+.gesture-movement-panel { grid-column: 1 / -1; }
+.gesture-movement-editor { display: grid; grid-template-columns: minmax(180px, .35fr) minmax(420px, 1fr); gap: 12px; padding: 12px; }
+.gesture-movement-editor > label { display: grid; align-content: start; gap: 6px; color: #8fa3a0; }
+.gesture-movement-editor fieldset { min-width: 0; margin: 0; border: 1px solid #30484a; }
+.gesture-movement-options { display: grid; grid-template-columns: repeat(3, minmax(135px, 1fr)); gap: 7px; }
+.gesture-movement-option { display: flex; align-items: center; gap: 7px; border: 1px solid #324b4d; border-radius: 3px; padding: 8px; background: #101d20; color: #9fb4b0; cursor: pointer; }
+.gesture-movement-option input { width: auto; accent-color: #69cfc2; }
+.gesture-movement-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; }
+.calibration-center-preview-panel { grid-column: 1 / -1; min-height: 280px; }
+.calibration-center-motion-preview { max-width: 720px; margin: 12px; }
+.calibration-center-motion-preview canvas { height: 230px; }
+@media (max-width: 800px) {
+  .gesture-movement-editor { grid-template-columns: 1fr; }
+  .gesture-movement-options { grid-template-columns: 1fr 1fr; }
+}
 
 .center-motion-preview span,
 .center-motion-preview p {
@@ -2149,6 +2167,7 @@ input[type="range"]::-moz-range-thumb {
 .motion-path-legend .mover-a { color: #68d9cd; }
 .motion-path-legend .mover-b { color: #d7a85e; }
 .motion-editor-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; align-content: start; }
+.motion-editor-body > .motion-editor-controls { grid-column: 1 / -1; }
 .motion-editor-controls label { display: grid; gap: 5px; color: #8fa3a0; font-size: 11px; }
 .motion-editor-controls label > span { display: flex; justify-content: space-between; gap: 8px; }
 .motion-editor-controls output { color: var(--cyan); font: 11px var(--font-mono); }

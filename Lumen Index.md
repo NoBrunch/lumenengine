@@ -98,6 +98,15 @@ The Audio laboratory provides proof that the PC is receiving audio rather than
 merely running a visual demo. It displays the waveform, frequency bands, onset
 strength, beat lock, packet counts, and input diagnostics.
 
+The **24-second interpretation history fix** is the named repair that separates
+fresh physical input measurements from the 30 Hz interpolated lighting-control
+clock. The trace advances at its intended 10 Hz and carries the most recent
+physical dBFS measurement between analyzer frames, recording whether each point
+is fresh and its measurement age. Interpolated control frames are no longer
+painted as `-120 dBFS`, so the graph cannot manufacture rhythmic input dropouts
+between healthy ALSA packets. Demo and Rehearsal may still display expression
+history, but mark physical input as unavailable rather than silent.
+
 The **Rhythm lock** panel separates the published BPM from the clock source,
 spectral candidate, spectral lock, and octave decision. Tempo search covers
 72–200 BPM. When a slow autocorrelation peak also has strong intervening
@@ -202,7 +211,8 @@ show. Open workspace **2 — Rehearsal** and use the Movement Lab as follows:
 3. Choose Both movers, Center effect, or Whole rig. The movers are intentionally
    treated as one choreographic group; individual-mover selection is not part of
    the rehearsal vocabulary.
-4. Adjust tempo, movement size, intensity, palette, and strobe. The generated
+4. Adjust tempo, movement size, intensity, palette, and strobe. **Automatic**
+   is the default Palette Family. The generated
    clock is exact, so motion differences are not obscured by live beat analysis.
 5. Use Previous/Next for individual routines or Tour to advance every eight
    beats.
@@ -214,6 +224,9 @@ Motion Studio edits the actual routine generator while Rehearsal is running.
 Its trajectory display uses horizontal position for normalized pan and vertical
 position for normalized tilt. Cyan is the first mover; amber is the second.
 The moving markers indicate the current point in the selected cycle.
+The Movers trajectory and Center body/arm schematic remain visible together;
+the Editing selector changes the controls being edited, not whether the other
+fixture group's movement can be observed.
 
 Editable values are:
 
@@ -260,6 +273,20 @@ edited group. Rehearsal tempo, audition scale, intensity, strobe, palette, and
 scope are temporary audition controls and do not rewrite the routine. **Reset
 this group's routine** restores only the selected group/routine defaults. Scope
 isolation explicitly zeros fixtures outside the selected mover/center group.
+
+### Gesture Movement Editor
+
+The Rehearsal-only Gesture Movement Editor associates expression gestures such
+as Breathe, Sweep, Pulse, and Release with one or more authored movement
+routines. **Add selected movement** associates the routine currently selected
+in Movement Lab. **Edit selected movement** opens that routine in Motion Studio,
+where Movers and Center retain separate characteristics. **Save associations**
+persists the map locally and updates a running engine without restarting it.
+
+These associations constrain Lumen's generated choreography candidates when it
+calls that gesture. An exact song-timeline sequence remains authoritative, so a
+general gesture association cannot erase a cue deliberately authored for one
+recording and position.
 
 Auditioning, adjusting, or touring routines does **not** teach the model. A
 routine name is also not permanently associated with a section: the same
@@ -380,10 +407,11 @@ during sustained silence.
 
 ### Color Studio and color latching
 
-The Room & rig page includes Color Studio. Solid colors are named hexadecimal
-RGB values and can be selected directly during fixture calibration or
-Rehearsal. Custom palettes are optional collections of those colors for Live
-development; they are not required for a fixture test.
+Color Studio exists only in Rehearsal. Its Paint-style hue/saturation wheel and
+brightness bar produce a named hexadecimal solid color. Saved solids can be
+selected directly during fixture calibration or Rehearsal. Custom palette
+families are optional collections of those colors for Live development; they
+are not required for a fixture test. Automatic remains the default family.
 
 During Live, Lumen latches one resolved RGB color per fixture lane for the
 active choreography lease. The lease normally lasts 16 beats or longer. Energy
@@ -398,6 +426,9 @@ Motion Studio's Center multi-effect view includes an animated schematic of the
 body and both independent arms. It is a visual model of the configured cycle,
 travel, rate, phase, and direction—not a camera image of the physical fixture.
 The actual fixture profile and DMX channel mapping remain authoritative.
+Room & rig repeats this same schematic using the currently selected Rehearsal
+routine and saved Center tuning, providing a movement reference during room and
+fixture calibration without duplicating the editor.
 
 ## Feedback and learning
 
@@ -1174,10 +1205,13 @@ playlist/search browsing history, plus Refresh player.
 
 During Live, current-track identity is polled independently from the audio path
 at a two-second cadence. The active Spotify/remote page refreshes playback at a
-five-second cadence; profile, device, and library results are reused for up to
-one minute while playback alone is refreshed. Concurrent browsers share the
-same serialized result. This keeps phone sessions responsive without allowing
-Spotify network latency or rate limits into the line-in/DMX timing path.
+five-second cadence and advances the displayed position locally between API
+answers. Play/pause and seek paint optimistically, then reconcile with Spotify.
+The independent player, device, and profile requests run concurrently; profile,
+device, playlist, and selected-playlist item results are cached while playback
+alone is refreshed. Concurrent browsers share the same serialized result. This
+keeps phone sessions responsive without allowing Spotify network latency or
+rate limits into the line-in/DMX timing path.
 
 ## 3D room interaction
 
@@ -1456,6 +1490,11 @@ runbook before treating any Git checkout as operational.
   Movers expose calibrated path geometry and relationships; Center exposes
   body, both arms, emitters, colors, laser, strip, hardware strobe, intensity,
   and blackout accent.
+- **Gesture Movement Editor**: Rehearsal control that associates an expression
+  gesture with allowed generated movement routines while preserving exact-song
+  choreography authority.
+- **24-second interpretation history fix**: Repair that prevents interpolated
+  lighting-control frames from appearing as physical audio silence.
 - **Fixture relationship**: Exact phase/direction arrangement among movers,
   such as synchronized, opposed, mirrored, chased, or counter-direction.
 - **Runtime**: The live loop connecting observation, decision, targeting, and
@@ -1554,13 +1593,13 @@ runbook before treating any Git checkout as operational.
   reports an external worker, avoids competing Live/training processes,
   recovers dead leases while polling, and loads newly activated models while
   idle.
-- Audio analysis and live choreography run as separate pipelines. Every real
-  analysis result is consumed in FIFO order immediately; if analysis is late,
-  a 30-Hz control clock advances beat and bar phase from the authoritative
-  physical sample count and keeps DMX motion current. It does not invent new
-  spectral or structural evidence. Source-capture age and processed-analysis
-  age are reported separately, so the interface distinguishes `PCM SOURCE
-  STALLED` from `ANALYSIS PIPELINE STALLED`.
+- Audio analysis and live choreography run as separate pipelines. A fixed
+  30-Hz show clock coalesces any burst of completed analyzer frames to the
+  newest musical state instead of rapidly replaying stale FIFO states. It
+  advances beat and bar phase from authoritative physical sample timing but
+  does not invent spectral or structural evidence. Source-capture age,
+  processed-analysis age, show-clock interval/jitter, queue depth, and
+  coalescing counts remain separately diagnosable.
 - The browser's 10-Hz live-status loop does not wait for system scans, research
   summaries, teaching history, Spotify requests, or other database-heavy
   panels. Those refresh independently at slower rates, and unchanged status,
@@ -1579,8 +1618,8 @@ runbook before treating any Git checkout as operational.
 - Only Audio Laboratory requests the rolling 240-point analysis history. Other
   desktop and mobile pages retain the same 10-Hz live cadence without decoding
   and transferring that unused scope payload on every poll.
-- Multiple browsers share one serialized technical-status generation at up to
-  30 Hz. A room full of phones therefore does not rebuild the 3D solution,
+- Multiple browsers share one serialized technical-status generation at the
+  dashboard's 10-Hz cadence. A room full of phones therefore does not rebuild the 3D solution,
   analysis history, DMX heatmap, and training state once per network request.
   This display cache is isolated from the audio and control locks.
 - The local HTTP console accepts a 128-connection pending burst, preventing the
@@ -1646,3 +1685,32 @@ runbook before treating any Git checkout as operational.
   therefore expand the calibrated travel even in a trusted quiet section
   without requesting a new routine. `opposing_chase` keeps fluid opposing
   motion while its beam and color alternate on the authoritative beat clock.
+- **24-second interpretation history fix:** the Audio Laboratory stores 240
+  measurements on an absolute 10-Hz grid. Interpolated show ticks retain the
+  latest measured dBFS and are marked with their physical-input age; they no
+  longer draw false dropouts. The source/processed age history is sampled by
+  the internal clock rather than browser requests.
+- Rehearsal defaults to Automatic color selection. Its Color Studio provides a
+  hue/saturation wheel, brightness, reusable solid colors, and named palette
+  families. Color libraries replace atomically and invalidate active color
+  latches, so a save cannot expose a partial palette or leave an old solid
+  color running.
+- Rehearsal Motion Studio displays Movers paths and the center fixture's body
+  plus two independently phased arms. Gesture Movement Editor associates an
+  allowed movement pool with each expression gesture; Lumen ranks complete,
+  measure-aligned choices from that pool rather than treating unordered checks
+  as a forced sequence. Room & Rig shows the same saved center-routine
+  reference and explicitly distinguishes it from live DMX position.
+- Stable cue colors are latched per fixture role, not shared as one hue across
+  the entire rig. This preserves a solid beam while allowing deliberate mover
+  exchanges and center ball/arm contrast.
+- Feedback learning now receives normalized semantic samples decoded from the
+  post-gate fixture frame. Movement, intensity, strobe, color change, and
+  blackout evidence therefore describe what the rig actually emitted after
+  choreography, feedback, smoothing, color latching, fixture encoding, and
+  operator blackout.
+- Spotify uses one refresh-locked token path and one authoritative background
+  playback poll. Desktop and phone consoles consume the shared state; static
+  profile/device/library data refreshes independently, and an operator search
+  or navigation request queued behind an automatic refresh is replayed instead
+  of being discarded.

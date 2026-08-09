@@ -387,7 +387,7 @@
                   <label><span>Audition scale <output id="rehearsal-size-value">100%</output></span><input id="rehearsal-size" type="range" min="0" max="100" step="1" value="100"></label>
                   <label><span>Intensity <output id="rehearsal-intensity-value">68%</output></span><input id="rehearsal-intensity" type="range" min="0" max="100" step="1" value="68"></label>
                   <label><span>Strobe <output id="rehearsal-strobe-value">Off</output></span><input id="rehearsal-strobe" type="range" min="0" max="100" step="1" value="0"></label>
-                  <label><span>Palette</span><select id="rehearsal-palette"><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
+                  <label><span>Palette family</span><select id="rehearsal-palette"><option value="auto" selected>Automatic</option><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
                   <label class="check-control"><input id="rehearsal-isolate" type="checkbox" checked><span>Darken fixtures outside selected scope</span></label>
                 </div>
                 <button id="rehearsal-start" class="rehearsal-start">Start selected routine</button>
@@ -400,7 +400,7 @@
                     <canvas id="motion-path-canvas"></canvas>
                     <div class="motion-path-legend"><span class="mover-a">Mover A</span><span class="mover-b">Mover B</span><span>Pan ↔ · Tilt ↕</span></div>
                   </div>
-                  <div id="motion-center-preview" class="center-motion-preview hidden">
+                  <div id="motion-center-preview" class="center-motion-preview">
                     <canvas id="center-motion-canvas" aria-label="Animated center fixture motion preview"></canvas>
                     <div><span>Body</span><b id="center-preview-body">Musical rotation</b></div>
                     <div><span>Arm 1</span><b id="center-preview-arm-1">Independent</b></div>
@@ -498,6 +498,36 @@
                 <div id="sequence-steps" class="sequence-steps"></div>
                 <div class="sequence-editor-actions"><button id="sequence-add-step">+ Add step</button><button id="sequence-save-here" class="primary">Save complete cue sequence at this position</button><button id="sequence-clear">New blank sequence</button><button id="sequence-undo-history" disabled>Undo last edit/delete</button></div>
                 <div class="sequence-history"><h4>Saved for this song</h4><div id="sequence-history-list" class="sequence-history-list"></div></div>
+              </section>
+              <section class="panel gesture-movement-panel">
+                <div class="panel-titlebar"><h3>Gesture Movement Editor</h3><span id="gesture-movement-status" class="panel-note">Live associations</span></div>
+                <p class="control-help">Choose the movement routines Lumen may use when its expression engine calls a gesture. Select a movement card above to edit that routine’s Movers or Center characteristics in Motion Studio.</p>
+                <div class="gesture-movement-editor">
+                  <label><span>Gesture</span><select id="gesture-movement-gesture"><option value="hold">Hold</option><option value="breathe">Breathe</option><option value="converge">Converge</option><option value="expand">Expand</option><option value="sweep">Sweep</option><option value="pulse">Pulse</option><option value="release">Release</option></select></label>
+                  <fieldset><legend>Associated movements</legend><div id="gesture-movement-options" class="gesture-movement-options"></div></fieldset>
+                  <div class="gesture-movement-actions"><button id="gesture-movement-add" type="button">+ Add selected movement</button><button id="gesture-movement-edit" type="button">Edit selected movement</button><button id="gesture-movement-save" type="button" class="primary">Save associations</button></div>
+                </div>
+              </section>
+              <section class="panel color-studio-panel">
+                <div class="panel-titlebar"><h3>Color Studio</h3><span id="color-studio-status" class="panel-note">Solid fixture colors</span></div>
+                <p class="control-help">Create solid colors and palette families here in Rehearsal. Pick a hue and saturation from the wheel, set its brightness on the bar, then name and save it.</p>
+                <div class="color-studio-grid">
+                  <div class="color-wheel-editor">
+                    <h4>Color wheel</h4>
+                    <canvas id="color-wheel-canvas" width="360" height="240" aria-label="Hue and saturation color wheel"></canvas>
+                    <label><span>Brightness</span><input id="color-brightness-input" type="range" min="0" max="100" step="1" value="100"></label>
+                    <div class="color-add-row"><input id="color-name-input" placeholder="Color name" maxlength="48"><input id="color-value-input" type="text" value="#00a8a8" maxlength="7" aria-label="Selected hexadecimal color"><i id="color-selected-preview" style="background:#00a8a8"></i><button id="color-add-button" class="compact-button">Add color</button></div>
+                    <h4>Saved solid colors</h4>
+                    <div id="solid-color-list" class="solid-color-list"></div>
+                  </div>
+                  <div>
+                    <h4>Palette family</h4>
+                    <label><span>Palette name</span><input id="palette-name-input" placeholder="Garage cool" maxlength="48"></label>
+                    <div id="palette-color-picker" class="palette-color-picker"></div>
+                    <button id="palette-save-button" class="compact-button primary">Save palette</button>
+                    <small>Automatic remains the default. A saved solid color can be selected directly for fixture and movement testing.</small>
+                  </div>
+                </div>
               </section>
               <section class="panel rehearsal-guide-panel">
                 <div class="panel-titlebar"><h3>Rehearsal workflow</h3></div>
@@ -647,22 +677,11 @@
                   </fieldset>
                 </form>
               </section>
-              <section class="panel color-studio-panel">
-                <div class="panel-titlebar"><h3>Color Studio</h3><span id="color-studio-status" class="panel-note">Solid fixture colors</span></div>
-                <p class="control-help">Create named solid colors for calibration and rehearsal. A solid selection is latched for the cue; intensity can still change without changing hue.</p>
-                <div class="color-studio-grid">
-                  <div>
-                    <h4>Solid colors</h4>
-                    <div id="solid-color-list" class="solid-color-list"></div>
-                    <div class="color-add-row"><input id="color-name-input" placeholder="Name" maxlength="48"><input id="color-value-input" type="color" value="#00a8a8"><button id="color-add-button" class="compact-button">Add color</button></div>
-                  </div>
-                  <div>
-                    <h4>Palette editor</h4>
-                    <label><span>Palette name</span><input id="palette-name-input" placeholder="Garage cool" maxlength="48"></label>
-                    <div id="palette-color-picker" class="palette-color-picker"></div>
-                    <button id="palette-save-button" class="compact-button primary">Save palette</button>
-                    <small>Palettes are optional for Live; choose a solid color when testing a fixture or motion.</small>
-                  </div>
+              <section class="panel calibration-center-preview-panel">
+                <div class="panel-titlebar"><h3>Center Fixture Movement</h3><span class="panel-note">Saved routine reference</span></div>
+                <div class="center-motion-preview calibration-center-motion-preview">
+                  <canvas id="calibration-center-motion-canvas" aria-label="Center fixture movement during room and rig calibration"></canvas>
+                  <p>This is a reference animation of the currently selected Rehearsal routine—not live DMX position. It keeps the saved body and independent arm motion visible while configuring the room and rig.</p>
                 </div>
               </section>
             </div>

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import queue
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -20,9 +21,10 @@ from lumen_engine.control import (
     OperatorControls,
     OperatorExpressionEngine,
     RehearsalControls,
+    _AnalyzedControlFrame,
     _rehearsal_observation,
 )
-from lumen_engine.audio import AudioInputMetrics
+from lumen_engine.audio import AudioCaptureConfig, AudioInputMetrics
 from lumen_engine.choreography import (
     ChoreographySequence,
     ChoreographyStep,
@@ -402,6 +404,20 @@ class ControlApplicationTests(unittest.TestCase):
                 self.application._feedback_biases["overall"]["motion"],
                 0.0,
             )
+
+    def test_feedback_undo_accepts_ui_null_participant_scope(self) -> None:
+        created = self.application.add_feedback({
+            "label": "great_timing",
+            "value": 1,
+            "scope": "overall",
+            "participant_id": "listener-null-undo",
+            "client_event_id": "listener-null-undo-event",
+        })
+        removed = self.application.delete_feedback({
+            "feedback_id": created["feedback_id"],
+            "participant_id": None,
+        })
+        self.assertTrue(removed["deleted"])
 
     def test_feedback_persistence_never_holds_audio_publication_lock(
         self,
@@ -1087,6 +1103,7 @@ class ControlApplicationTests(unittest.TestCase):
 
     def test_rehearsal_controls_validate_and_clamp(self) -> None:
         controls = RehearsalControls()
+        self.assertEqual(controls.palette, "auto")
         controls.patch({
             "routine": "fan_sweep", "scope": "center", "output": "virtual",
             "bpm": 900, "size": -2, "intensity": 2, "strobe": 0.4,
@@ -1098,6 +1115,172 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertEqual(controls.intensity, 1.0)
         with self.assertRaises(ValueError):
             controls.patch({"routine": "not-a-routine"})
+
+    def test_interpolated_control_ticks_do_not_create_input_dropouts(self) -> None:
+        runtime = self.application._runtime_for_rig(
+            GatedOutput(VirtualDMXOutput(), self.application.controls)
+        )
+        self.application.engine_mode = "live"
+        first = MusicalObservation(
+            timestamp_s=1.0, loudness=0.5, onset_strength=0.2,
+            low_energy=0.4, mid_energy=0.3, high_energy=0.2,
+            bpm=120.0, section="groove", section_confidence=0.7,
+        )
+        metrics = replace(
+            AudioInputMetrics.silence(timestamp_s=1.0),
+            frame_count=2048, rms=0.12, dbfs=-18.4, peak=0.3,
+        )
+        self.application._accept_runtime_frame(
+            first, runtime.step(first), audio_metrics=metrics,
+        )
+        interpolated = replace(first, timestamp_s=1.12, loudness=0.52)
+        self.application._accept_runtime_frame(
+            interpolated, runtime.step(interpolated),
+        )
+        history = list(self.application._analysis_history)
+        runtime.close()
+        self.assertEqual(len(history), 2)
+        self.assertEqual([item["dbfs"] for item in history], [-18.4, -18.4])
+        self.assertTrue(history[0]["input_fresh"])
+        self.assertFalse(history[1]["input_fresh"])
+        self.assertAlmostEqual(history[1]["input_age_ms"], 120.0)
+
+    def test_analysis_history_is_a_true_twenty_four_second_window(self) -> None:
+        runtime = self.application._runtime_for_rig(
+            GatedOutput(VirtualDMXOutput(), self.application.controls)
+        )
+        self.application.engine_mode = "live"
+        first = MusicalObservation(
+            timestamp_s=5.0, loudness=0.5, onset_strength=0.2,
+            low_energy=0.4, mid_energy=0.3, high_energy=0.2,
+            bpm=120.0, section="groove", section_confidence=0.7,
+        )
+        metrics = replace(
+            AudioInputMetrics.silence(timestamp_s=5.0),
+            frame_count=2048, rms=0.12, dbfs=-18.4, peak=0.3,
+        )
+        rendered = runtime.step(first)
+        for index in range(241):
+            observation = replace(first, timestamp_s=5.0 + index * 0.1)
+            self.application._accept_runtime_frame(
+                observation,
+                rendered,
+                audio_metrics=metrics if index == 0 else None,
+            )
+        history = list(self.application._analysis_history)
+        runtime.close()
+        self.assertEqual(len(history), 240)
+        self.assertAlmostEqual(
+            history[-1]["timestamp_s"] - history[0]["timestamp_s"],
+            23.9,
+            places=6,
+        )
+        self.assertTrue(all(item["dbfs"] == -18.4 for item in history))
+
+    def test_live_show_clock_coalesces_analyzer_burst_to_newest_state(self) -> None:
+        control_queue: queue.Queue[_AnalyzedControlFrame] = queue.Queue(16)
+        analysis_finished = threading.Event()
+        errors: list[BaseException] = []
+        metrics = replace(
+            AudioInputMetrics.silence(timestamp_s=1.0),
+            frame_count=2048, rms=0.12, dbfs=-18.4, peak=0.3,
+        )
+        for index in range(6):
+            observation = MusicalObservation(
+                timestamp_s=1.0 + index * 0.04,
+                loudness=0.2 + index * 0.1,
+                onset_strength=0.2,
+                low_energy=0.4,
+                mid_energy=0.3,
+                high_energy=0.2,
+                bpm=120.0,
+                section="groove",
+            )
+            control_queue.put(_AnalyzedControlFrame(
+                observation=observation,
+                raw_observation=observation,
+                audio_metrics=replace(
+                    metrics, timestamp_s=observation.timestamp_s
+                ),
+                audio_bytes=4096,
+                training_audio_frame=index * 2048,
+                runtime_context={},
+                analysis_started_perf_s=time.perf_counter(),
+                analysis_stages_ms={},
+            ))
+        analysis_finished.set()
+
+        class RuntimeProbe:
+            def __init__(self) -> None:
+                self.observations: list[MusicalObservation] = []
+
+            def set_structure_context(self, **_values) -> None:
+                return
+
+            def step(self, observation: MusicalObservation):
+                self.observations.append(observation)
+                return object()
+
+            def notify_audio_discontinuity(self) -> None:
+                return
+
+            def notify_timeline_discontinuity(self) -> None:
+                return
+
+        runtime = RuntimeProbe()
+        with (
+            patch.object(self.application, "_accept_runtime_frame") as accept,
+            patch.object(self.application, "_refresh_recalled_choreography"),
+            patch.object(self.application, "_record_live_pipeline_timing"),
+        ):
+            self.application._run_live_control_clock(
+                runtime,  # type: ignore[arg-type]
+                control_queue,
+                analysis_finished,
+                errors,
+                AudioCaptureConfig(),
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(runtime.observations), 1)
+        self.assertAlmostEqual(runtime.observations[0].loudness, 0.7)
+        self.assertEqual(accept.call_args.kwargs["audio_packet_count"], 6)
+        self.assertEqual(control_queue.unfinished_tasks, 0)
+
+    def test_pcm_rate_uses_source_packets_not_coalesced_show_updates(self) -> None:
+        self.application.engine_mode = "live"
+        self.application._audio_capture_diagnostics = {
+            "packets_read": 240,
+            "source_frames": 240 * 2048,
+            "last_packet_age_ms": 5.0,
+        }
+        self.application._audio_packets = 80
+        status = self.application._audio_snapshot_unlocked(True)
+        self.assertAlmostEqual(
+            status["packet_rate_hz"], 48_000 / 2048, places=6
+        )
+
+    def test_gesture_movement_editor_persists_live_associations(self) -> None:
+        result = self.application.patch_settings({
+            "gesture_movements": {
+                "hold": ["breathe"],
+                "breathe": ["breathe"],
+                "converge": ["fan_sweep"],
+                "expand": ["figure_eight"],
+                "sweep": ["counter_rotate"],
+                "pulse": ["beat_nod", "opposing_chase"],
+                "release": ["counter_rotate"],
+            }
+        })
+        self.assertEqual(
+            result["settings"]["gesture_movements"]["sweep"],
+            ["counter_rotate"],
+        )
+        self.assertEqual(
+            self.application.gesture_movements["release"],
+            ("counter_rotate",),
+        )
+        saved = json.loads(self.application.settings_path.read_text())
+        self.assertEqual(saved["gesture_movements"]["pulse"], ["beat_nod", "opposing_chase"])
 
     def test_motion_editor_persists_and_updates_runtime(self) -> None:
         status = self.application.patch_motion_routine({
@@ -1936,7 +2119,7 @@ class ControlApplicationTests(unittest.TestCase):
                 self.assertEqual(first, second)
                 self.assertEqual(snapshot.call_count, 1)
 
-                time.sleep(0.04)
+                time.sleep(0.10)
                 server.status_body()
                 self.assertEqual(snapshot.call_count, 2)
 

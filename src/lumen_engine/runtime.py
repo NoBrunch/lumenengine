@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, replace
 from copy import deepcopy
 import math
@@ -13,6 +14,7 @@ from lumen_engine.choreography import (
     CHOREOGRAPHY_LANES,
     ChoreographySequence,
     ChoreographyStep,
+    DmxHistorySample,
     FeedbackSignal,
     MusicalContext,
     ParallelBoundarySequencePlanner,
@@ -52,6 +54,7 @@ from lumen_engine.spatial import (
     TargetingSolution,
     UnreachableTargetError,
 )
+from lumen_engine.profiles import party_parrot_profile
 
 
 def _blend(current: float, target: float | str, amount: float) -> float:
@@ -63,6 +66,7 @@ class FeedbackCharacteristics:
     """Literal feedback axes resolved for one fixture/context."""
 
     motion_speed: float = 0.0
+    side_arm_speed: float = 0.0
     travel_size: float = 0.0
     activity_density: float = 0.0
     brightness: float = 0.0
@@ -75,6 +79,7 @@ class FeedbackCharacteristics:
     def as_dict(self) -> dict[str, float]:
         return {
             "motion_speed": self.motion_speed,
+            "side_arm_speed": self.side_arm_speed,
             "travel_size": self.travel_size,
             "activity_density": self.activity_density,
             "brightness": self.brightness,
@@ -94,6 +99,7 @@ class EffectiveCueOutput:
     fixture_id: str
     routine: str
     motion_speed: float
+    side_arm_speed: float
     travel_size: float
     activity_density: float
     brightness: float
@@ -112,6 +118,7 @@ class EffectiveCueOutput:
             "fixture_id": self.fixture_id,
             "routine": self.routine,
             "motion_speed": self.motion_speed,
+            "side_arm_speed": self.side_arm_speed,
             "travel_size": self.travel_size,
             "activity_density": self.activity_density,
             "brightness": self.brightness,
@@ -149,6 +156,7 @@ class PerformanceRuntime:
         choreography_model: SequencePreferenceModel | None = None,
         motion_tunings: dict[str, MotionTuning] | None = None,
         center_motion_tunings: dict[str, CenterMotionTuning] | None = None,
+        gesture_movements: dict[str, tuple[str, ...]] | None = None,
     ) -> None:
         self.fixtures = fixtures
         self.output = output
@@ -164,6 +172,7 @@ class PerformanceRuntime:
         self._audio_quiet_since_s: float | None = None
         self._audio_idle_amount = 0.0
         self._feedback_motion_speed: dict[str, float] = {}
+        self._feedback_side_arm_speed: dict[str, float] = {}
         self._feedback_travel_size: dict[str, float] = {}
         self._feedback_activity_density: dict[str, float] = {}
         self._feedback_brightness: dict[str, float] = {}
@@ -178,6 +187,10 @@ class PerformanceRuntime:
         self._feedback_palette: dict[str, float] = {}
         self._gesture_preferences: dict[str, dict[str, float]] = {}
         self._routine_preferences: dict[str, dict[str, float]] = {}
+        self._gesture_movements = {
+            str(gesture): tuple(str(routine) for routine in routines)
+            for gesture, routines in (gesture_movements or {}).items()
+        }
         self._pending_feedback_biases: dict[str, dict[str, float]] | None = None
         self._pending_replan_lanes: set[str] = set()
         self._feedback_lock = threading.RLock()
@@ -191,6 +204,10 @@ class PerformanceRuntime:
         self._motion_clock_bpm = 120.0
         self._motion_path_phase = 0.0
         self._motion_path_source_phase: float | None = None
+        self._lane_motion_path_phase = {lane: 0.0 for lane in CHOREOGRAPHY_LANES}
+        self._lane_motion_path_source_phase: dict[str, float | None] = {
+            lane: None for lane in CHOREOGRAPHY_LANES
+        }
         self._calibration_overrides: dict[str, dict[str, float]] = {}
         self._active_song_id: int | None = None
         self._active_section: str | None = None
@@ -252,6 +269,11 @@ class PerformanceRuntime:
         self._latched_colors: dict[str, tuple[float, float, float]] = {}
         self._boundary_changed_lanes: set[str] = set()
         self._lane_handoff_started_s: dict[str, float] = {}
+        # Semantic samples are decoded from the final fixture frame, after
+        # choreography, feedback, smoothing, latching and profile encoding.
+        # They let feedback describe what the rig actually emitted rather
+        # than merely the sequence Lumen intended to perform.
+        self._dmx_history: deque[DmxHistorySample] = deque(maxlen=1536)
 
     def set_rehearsal(
         self,
@@ -302,6 +324,26 @@ class PerformanceRuntime:
         if center_tunings is not None:
             self._center_motion_tunings = dict(center_tunings)
 
+    def set_gesture_movements(
+        self, associations: dict[str, tuple[str, ...]]
+    ) -> None:
+        """Replace operator-authored gesture-to-movement associations.
+
+        Associations constrain only Lumen's generated candidate pool. Exact
+        song choreography remains authoritative and is never discarded by a
+        general gesture configuration.
+        """
+
+        self._gesture_movements = {
+            str(gesture): tuple(str(routine) for routine in routines)
+            for gesture, routines in associations.items()
+        }
+
+    def invalidate_color_latches(self) -> None:
+        """Resolve edited Color Studio values on the next fixture frame."""
+
+        self._latched_colors.clear()
+
     def set_media_context(self, song_id: int | None, section: str | None = None, artist: str | None = None) -> None:
         """Set the identity/section used when resolving learned preferences."""
         if song_id != self._active_song_id:
@@ -351,6 +393,10 @@ class PerformanceRuntime:
         self._motion_clock_bpm = 120.0
         self._motion_path_phase = 0.0
         self._motion_path_source_phase = None
+        self._lane_motion_path_phase = {lane: 0.0 for lane in CHOREOGRAPHY_LANES}
+        self._lane_motion_path_source_phase = {
+            lane: None for lane in CHOREOGRAPHY_LANES
+        }
         if self._choreography_planner is not None:
             self._choreography_planner.release()
         self._active_choreography_step = None
@@ -376,6 +422,7 @@ class PerformanceRuntime:
         self._latched_colors.clear()
         self._boundary_changed_lanes.clear()
         self._lane_handoff_started_s.clear()
+        self._dmx_history.clear()
         for lane in CHOREOGRAPHY_LANES:
             self._consumed_recalled_sequence_ids[lane].clear()
         self._activate_pending_feedback()
@@ -555,6 +602,7 @@ class PerformanceRuntime:
         if not selections:
             return None
         receipts = []
+        receipts_by_lane: dict[str, Any] = {}
         preferred_by_lane: dict[str, ChoreographySequence | None] = {}
         for lane, selection in selections.items():
             lane_occurrences = max(
@@ -598,7 +646,7 @@ class PerformanceRuntime:
             # through feedback biases. Only the explicit Preferred Action
             # interface is allowed to create a named choreography candidate.
             preferred_by_lane[lane] = preferred
-            receipts.append(model.learn(
+            lane_receipt = model.learn(
                 CapturedChoreographyExample(
                     context=context,
                     performed=selection.sequence,
@@ -612,6 +660,7 @@ class PerformanceRuntime:
                         created_unix_ms=created_unix_ms,
                     ),),
                     preferred=preferred,
+                    dmx_history=self._recent_dmx_history(lane),
                 ),
                 event_id=(
                     (event_ids_by_lane or {}).get(lane)
@@ -620,7 +669,9 @@ class PerformanceRuntime:
                 ),
                 lane=lane,
                 lifetime=lifetime,
-            ))
+            )
+            receipts.append(lane_receipt)
+            receipts_by_lane[lane] = lane_receipt
         receipt = receipts[-1]
         # Metric feedback teaches how the completed choice was received; it
         # does not call a replacement routine. Only the explicit Preferred
@@ -654,6 +705,14 @@ class PerformanceRuntime:
                         preferred_by_lane[lane].as_dict()
                         if preferred_by_lane[lane] is not None else None
                     ),
+                    "effective_dmx": {
+                        "sample_count": receipts_by_lane[lane].dmx_summary.sample_count,
+                        "intensity": receipts_by_lane[lane].dmx_summary.intensity,
+                        "movement": receipts_by_lane[lane].dmx_summary.movement,
+                        "strobe": receipts_by_lane[lane].dmx_summary.strobe,
+                        "color_change": receipts_by_lane[lane].dmx_summary.color_change,
+                        "blackout_ratio": receipts_by_lane[lane].dmx_summary.blackout_ratio,
+                    },
                 }
                 for lane, selection in selections.items()
             },
@@ -704,6 +763,7 @@ class PerformanceRuntime:
         strobe_delta: float = 0.0,
         palette_delta: float = 0.0,
         motion_speed_delta: float = 0.0,
+        side_arm_speed_delta: float = 0.0,
         travel_size_delta: float | None = None,
         activity_density_delta: float = 0.0,
         brightness_delta: float | None = None,
@@ -721,6 +781,7 @@ class PerformanceRuntime:
                 strobe_delta=strobe_delta,
                 palette_delta=palette_delta,
                 motion_speed_delta=motion_speed_delta,
+                side_arm_speed_delta=side_arm_speed_delta,
                 travel_size_delta=(
                     motion_delta
                     if travel_size_delta is None else travel_size_delta
@@ -752,6 +813,7 @@ class PerformanceRuntime:
         strobe_delta: float,
         palette_delta: float,
         motion_speed_delta: float = 0.0,
+        side_arm_speed_delta: float = 0.0,
         travel_size_delta: float | None = None,
         activity_density_delta: float = 0.0,
         brightness_delta: float | None = None,
@@ -765,6 +827,7 @@ class PerformanceRuntime:
         key = fixture_id if scope == "fixture" and fixture_id else "overall"
         deltas = (
             (self._feedback_motion_speed, motion_speed_delta),
+            (self._feedback_side_arm_speed, side_arm_speed_delta),
             (
                 self._feedback_travel_size,
                 motion_delta if travel_size_delta is None else travel_size_delta,
@@ -834,6 +897,7 @@ class PerformanceRuntime:
         self, biases: dict[str, dict[str, float]]
     ) -> None:
         self._feedback_motion_speed.clear()
+        self._feedback_side_arm_speed.clear()
         self._feedback_travel_size.clear()
         self._feedback_activity_density.clear()
         self._feedback_brightness.clear()
@@ -856,6 +920,7 @@ class PerformanceRuntime:
                 strobe_delta=bias.get("strobe", 0.0),
                 palette_delta=bias.get("palette", 0.0),
                 motion_speed_delta=bias.get("motion_speed", bias.get("speed", 0.0)),
+                side_arm_speed_delta=bias.get("side_arm_speed", 0.0),
                 travel_size_delta=bias.get("travel_size", bias.get("motion", 0.0)),
                 activity_density_delta=bias.get("activity_density", bias.get("density", 0.0)),
                 brightness_delta=bias.get("brightness", bias.get("intensity", 0.0)),
@@ -1069,7 +1134,43 @@ class PerformanceRuntime:
                     ),
                 )
             )
-            if self._choreography_model is not None and not recalled_candidates:
+            associated = tuple(dict.fromkeys(
+                self._gesture_movements.get(decision.gesture.value, ())
+            ))
+            known_routines = frozenset(self._motion_tunings)
+            gesture_constrained = bool(
+                not recalled_candidates
+                and associated
+                and frozenset(associated) != known_routines
+            )
+            if gesture_constrained:
+                # A deliberately narrowed mapping is literal: every step in
+                # the generated phrase comes from the movements associated
+                # with this gesture. Exact-song recall remains above this
+                # branch and learned candidates cannot append an unassociated
+                # routine after the filter.
+                candidates = [
+                    ChoreographySequence(
+                        sequence_id=(
+                            f"gesture-{decision.gesture.value}-{lane}-{routine}"
+                        ),
+                        source="operator_gesture_mapping_v1",
+                        steps=(ChoreographyStep(
+                            start_beat=0.0,
+                            duration_beats=16.0,
+                            fixture_scope=lane,
+                            routine=routine,
+                            intensity=context.energy,
+                            strobe=0.0,
+                        ),),
+                    )
+                    for routine in associated
+                ]
+            if (
+                self._choreography_model is not None
+                and not recalled_candidates
+                and not gesture_constrained
+            ):
                 known = {
                     sequence.semantic_signature for sequence in candidates
                 }
@@ -1089,6 +1190,7 @@ class PerformanceRuntime:
                 boundary_id=boundary_id,
                 context=context,
                 candidates=candidates,
+                recent_dmx=self._recent_dmx_history(lane),
             )
             if not selection.held_for_boundary:
                 if selection.sequence in recalled_candidates:
@@ -1107,13 +1209,20 @@ class PerformanceRuntime:
                     0.0 if origin is None
                     else max(0.0, absolute_beat - origin)
                 )
-            self._active_choreography_steps[lane] = _sequence_step_at(
+            previous_step = self._active_choreography_steps[lane]
+            next_step = _sequence_step_at(
                 selection.sequence,
                 min(
                     elapsed,
                     max(0.0, selection.sequence.end_beat - 1e-6),
                 ),
             )
+            if (
+                previous_step is not None
+                and previous_step.routine != next_step.routine
+            ):
+                self._boundary_changed_lanes.add(lane)
+            self._active_choreography_steps[lane] = next_step
             active_step = self._active_choreography_steps[lane]
             self._active_step_elapsed_beats[lane] = max(
                 0.0,
@@ -1188,6 +1297,7 @@ class PerformanceRuntime:
 
             return FeedbackCharacteristics(
                 motion_speed=total(self._feedback_motion_speed),
+                side_arm_speed=total(self._feedback_side_arm_speed),
                 travel_size=total(self._feedback_travel_size),
                 activity_density=total(self._feedback_activity_density),
                 brightness=total(self._feedback_brightness),
@@ -1302,6 +1412,7 @@ class PerformanceRuntime:
             fixture_id=fixture_id,
             routine=decision.routine if applies else "breathe",
             motion_speed=speed,
+            side_arm_speed=feedback.side_arm_speed,
             travel_size=travel,
             activity_density=density,
             brightness=brightness,
@@ -1420,10 +1531,12 @@ class PerformanceRuntime:
         decision: PerformanceDecision,
         palette_bias: float,
         color_activity: float,
+        *,
+        role: str = "base",
     ) -> tuple[float, float, float]:
         """Return the fixture's held color for the current cue lease."""
 
-        key = f"{lane}:{fixture_id}"
+        key = f"{lane}:{fixture_id}:{role}"
         if key not in self._latched_colors or lane in self._boundary_changed_lanes:
             self._latched_colors[key] = expression_rgb(
                 decision, palette_bias, color_activity
@@ -1670,7 +1783,11 @@ class PerformanceRuntime:
                 "movers",
                 fixture.fixture_id,
                 fixture_decision,
-                feedback.palette,
+                feedback.palette + (
+                    0.70 * (1 if index % 2 == 0 else -1)
+                    if fixture_decision.routine == "opposing_chase"
+                    else 0.0
+                ),
                 effective.color_activity,
             )
             try:
@@ -1965,6 +2082,14 @@ class PerformanceRuntime:
                 feedback.palette,
                 effective.color_activity,
             )
+            latched_secondary_rgb = self._latched_color_for(
+                "center",
+                fixture.fixture_id,
+                fixture_decision,
+                feedback.palette + 0.70,
+                effective.color_activity,
+                role="secondary",
+            )
             if (
                 rehearsal_step is not None
                 and self._rehearsal_isolate
@@ -1981,6 +2106,7 @@ class PerformanceRuntime:
                 idle_amount=idle_amount,
                 motion_feedback=feedback.activity_density,
                 motion_speed=effective.motion_speed,
+                side_arm_speed_feedback=effective.side_arm_speed,
                 travel_size=effective.travel_size,
                 activity_density=effective.activity_density,
                 strobe_feedback=feedback.strobe_enabled,
@@ -1997,20 +2123,27 @@ class PerformanceRuntime:
                 motion_tuning=self._center_motion_tunings.get(
                     fixture_decision.routine
                 ),
-                motion_timestamp_s=(
-                    None
-                    if rehearsal_step is None
-                    or self._rehearsal_phase_origin_s is None
-                    else max(
-                        0.0,
-                        observation.timestamp_s
-                        - self._rehearsal_phase_origin_s,
-                    )
+                motion_beat_position=self._continuous_motion_path_beat(
+                    observation,
+                    (0.5 + effective.motion_speed)
+                    * (0.82 + 0.18 * effective.activity_density),
+                    lane="center",
                 ),
                 latched_rgb=latched_rgb,
+                latched_secondary_rgb=latched_secondary_rgb,
             )
 
         self.output.send(frame)
+        transmitted_frame = getattr(
+            self.output, "last_transmitted_frame", frame
+        )
+        if not isinstance(transmitted_frame, DMXFrame):
+            transmitted_frame = frame
+        self._record_dmx_history(
+            transmitted_frame,
+            solutions,
+            beat=self._motion_phase,
+        )
         self._effective_outputs = {
             item.fixture_id: item for item in effective_outputs
         }
@@ -2022,6 +2155,130 @@ class PerformanceRuntime:
             warnings=tuple(warnings),
             effective_outputs=tuple(effective_outputs),
         )
+
+    def _recent_dmx_history(
+        self,
+        lane: str,
+        *,
+        limit: int = 240,
+        maximum_samples: int = 32,
+    ) -> tuple[DmxHistorySample, ...]:
+        """Return a time-spanning, compact physical-output window.
+
+        Raw fixture state is sampled at the show rate. Persisting every sample
+        in every reversible feedback event would make simultaneous listener
+        bursts grow and serialize a multi-megabyte model under the Python GIL.
+        Even spacing preserves the complete four-to-eight-second trajectory
+        while bounding one lane's durable evidence to 32 semantic points.
+        """
+
+        prefix = f"{lane}:"
+        rows = [
+            sample
+            for sample in reversed(self._dmx_history)
+            if sample.fixture_scope.startswith(prefix)
+        ][:limit]
+        rows.reverse()
+        if len(rows) <= maximum_samples:
+            return tuple(rows)
+        indexes = {
+            round(index * (len(rows) - 1) / (maximum_samples - 1))
+            for index in range(maximum_samples)
+        }
+        return tuple(rows[index] for index in sorted(indexes))
+
+    def _record_dmx_history(
+        self,
+        frame: DMXFrame,
+        solutions: Iterable[TargetingSolution],
+        *,
+        beat: float,
+    ) -> None:
+        """Decode the effective fixture frame into learner-safe semantics."""
+
+        by_fixture = {item.fixture_id: item for item in solutions}
+        for fixture in self.fixtures:
+            profile = party_parrot_profile(fixture.profile_key)
+            channels = {} if profile is None else profile.channels
+
+            def value(name: str, fallback: int | None = None) -> int:
+                relative = channels.get(name, fallback)
+                if relative is None:
+                    return 0
+                return frame.get_channel(
+                    fixture.universe, fixture.address + relative - 1
+                )
+
+            solution = by_fixture.get(fixture.fixture_id)
+            calibration = fixture.calibration
+            pan = tilt = None
+            if solution is not None:
+                pan = clamp(
+                    (solution.pan_deg - calibration.pan_min_deg)
+                    / (calibration.pan_max_deg - calibration.pan_min_deg),
+                    0.0,
+                    1.0,
+                )
+                tilt = clamp(
+                    (solution.tilt_deg - calibration.tilt_min_deg)
+                    / (calibration.tilt_max_deg - calibration.tilt_min_deg),
+                    0.0,
+                    1.0,
+                )
+            red, green, blue, white = (
+                value("red"), value("green"), value("blue"), value("white")
+            )
+            self._dmx_history.append(DmxHistorySample(
+                beat=max(0.0, beat),
+                fixture_scope=f"movers:{fixture.fixture_id}",
+                dimmer=value("dimmer", fixture.dimmer_channel) / 255.0,
+                pan=pan,
+                tilt=tilt,
+                strobe=value("strobe") / 255.0,
+                color=(
+                    min(1.0, (red + white) / 255.0),
+                    min(1.0, (green + white) / 255.0),
+                    min(1.0, (blue + white) / 255.0),
+                ),
+            ))
+
+        for fixture in self.auxiliary_fixtures:
+            profile = party_parrot_profile(fixture.profile_key)
+            if profile is None:
+                continue
+            channels = profile.channels
+
+            def value(name: str) -> int:
+                relative = channels.get(name)
+                if relative is None:
+                    return 0
+                return frame.get_channel(
+                    fixture.universe, fixture.address + relative - 1
+                )
+
+            ball = tuple(value(f"magic_ball_{name}") for name in (
+                "red", "green", "blue", "white"
+            ))
+            arms = tuple(value(f"arm_beams_{name}") for name in (
+                "red", "green", "blue", "white"
+            ))
+            combined = tuple(max(ball[index], arms[index]) for index in range(4))
+            self._dmx_history.append(DmxHistorySample(
+                beat=max(0.0, beat),
+                fixture_scope=f"center:{fixture.fixture_id}",
+                dimmer=value("master_dimmer") / 255.0,
+                strobe=value("strobe") / 255.0,
+                color=(
+                    min(1.0, (combined[0] + combined[3]) / 255.0),
+                    min(1.0, (combined[1] + combined[3]) / 255.0),
+                    min(1.0, (combined[2] + combined[3]) / 255.0),
+                ),
+                auxiliary_motion=(
+                    value("body_rotation") / 255.0,
+                    value("arm_1_motor") / 255.0,
+                    value("arm_2_motor") / 255.0,
+                ),
+            ))
 
     def _smoothed_mover_brightness(
         self,
@@ -2331,22 +2588,33 @@ class PerformanceRuntime:
         self,
         observation: MusicalObservation,
         speed_multiplier: float,
+        *,
+        lane: str = "movers",
     ) -> float:
         """Integrate routine velocity on top of the continuous audio clock."""
 
+        if lane not in CHOREOGRAPHY_LANES:
+            raise ValueError(f"unknown motion-clock lane {lane!r}")
         source_phase = self._continuous_motion_beat(observation)
-        if self._motion_path_source_phase is None:
-            self._motion_path_source_phase = source_phase
-            self._motion_path_phase = source_phase
-            return self._motion_path_phase
+        previous_source = self._lane_motion_path_source_phase[lane]
+        if previous_source is None:
+            self._lane_motion_path_source_phase[lane] = source_phase
+            self._lane_motion_path_phase[lane] = source_phase
+            if lane == "movers":
+                self._motion_path_source_phase = source_phase
+                self._motion_path_phase = source_phase
+            return self._lane_motion_path_phase[lane]
         source_delta = max(
-            0.0, source_phase - self._motion_path_source_phase
+            0.0, source_phase - previous_source
         )
-        self._motion_path_source_phase = source_phase
-        self._motion_path_phase += source_delta * clamp(
+        self._lane_motion_path_source_phase[lane] = source_phase
+        self._lane_motion_path_phase[lane] += source_delta * clamp(
             speed_multiplier, 0.25, 2.0
         )
-        return self._motion_path_phase
+        if lane == "movers":
+            self._motion_path_source_phase = source_phase
+            self._motion_path_phase = self._lane_motion_path_phase[lane]
+        return self._lane_motion_path_phase[lane]
 
     def _rate_limit(
         self,

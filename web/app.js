@@ -34,6 +34,7 @@ const app = {
   disconnected: false,
   pollCount: 0,
   spotifyRefreshing: false,
+  spotifyPendingRefresh: null,
   spotifyFetchedAt: 0,
   spotifyPlaylistId: "",
   spotifyTransferDeviceId: "",
@@ -48,6 +49,10 @@ const app = {
   motionTimer: null,
   motionEditorScope: null,
   colorPaletteDraft: [],
+  colorWheel: { hue: 180, saturation: 1, brightness: 0.66 },
+  gestureMovementRenderKey: "",
+  gestureMovementDrafts: {},
+  gestureMovementDirty: false,
   participantId: null,
   participantName: "",
   feedbackReceipts: [],
@@ -572,6 +577,7 @@ async function initialize() {
   renderSequenceDraft();
   updateClock();
   window.setInterval(updateClock, 1000);
+  window.setInterval(updateSpotifyProgressDisplay, 250);
   window.requestAnimationFrame(drawCenterMotion);
   try {
     app.bootstrap = await api("/api/bootstrap");
@@ -626,8 +632,8 @@ async function pollStatus() {
     ) void refreshLink(false);
     const researchRunning = Boolean(app.bootstrap?.research?.worker?.running);
     if (app.page === "audio" && app.pollCount % (researchRunning ? 50 : 300) === 0) void refreshResearch();
-    const spotifyRefreshPolls = (app.page === "music" || app.remote) ? 50 : 100;
-    if (app.pollCount % spotifyRefreshPolls === 0 && app.system?.spotify?.token_present) {
+    const spotifyVisible = app.page === "music" || app.remote;
+    if (spotifyVisible && app.pollCount % 50 === 0 && app.system?.spotify?.token_present) {
       refreshSpotifyConsole(false);
     }
   } catch {
@@ -753,6 +759,29 @@ function renderRehearsal(rehearsal = {}) {
   if ($("rehearsal-start")) $("rehearsal-start").disabled = running;
   if ($("rehearsal-stop")) $("rehearsal-stop").disabled = !running;
   renderMotionEditor(rehearsal.motion_editor || {});
+  renderGestureMovements(rehearsal);
+}
+
+function renderGestureMovements(rehearsal = app.status?.rehearsal || {}) {
+  const gesture = $("gesture-movement-gesture")?.value || "hold";
+  const associations = rehearsal.gesture_movements
+    || app.bootstrap?.settings?.gesture_movements || {};
+  const selected = new Set(
+    app.gestureMovementDrafts[gesture] || associations[gesture] || []
+  );
+  const routines = rehearsal.routines || [];
+  const options = $("gesture-movement-options");
+  const renderKey = JSON.stringify([gesture, [...selected].sort(), routines.map((routine) => routine.id)]);
+  if (options && app.gestureMovementRenderKey !== renderKey) {
+    options.innerHTML = routines.map((routine) => `<label class="gesture-movement-option"><input type="checkbox" value="${escapeHtml(routine.id)}" ${selected.has(routine.id) ? "checked" : ""}><span>${escapeHtml(routine.name)}</span><button type="button" data-edit-gesture-routine="${escapeHtml(routine.id)}" title="Edit ${escapeHtml(routine.name)} in Motion Studio">Edit</button></label>`).join("");
+    app.gestureMovementRenderKey = renderKey;
+  }
+  setText(
+    "gesture-movement-status",
+    app.gestureMovementDirty
+      ? "UNSAVED ASSOCIATION CHANGES"
+      : `${label(gesture)} · ${selected.size} movement${selected.size === 1 ? "" : "s"}`,
+  );
 }
 
 function colorStudioSettings() {
@@ -766,7 +795,7 @@ function renderColorOptions(selected = "") {
   const families = settings.palette_families || ["auto", "party_vivid", "midnight_teal", "cool", "warm", "magenta_blue", "cyan_violet", "red_amber"];
   const colors = colorStudioSettings().colors || {};
   const options = [
-    ...families.map((value) => [value, label(value)]),
+    ...families.map((value) => [value, value === "auto" ? "Automatic" : label(value)]),
     ...Object.keys(colors).map((value) => [value, `Solid · ${label(value)}`]),
   ];
   const existing = options.map(([value, name]) => `<option value="${escapeHtml(value)}">${escapeHtml(name)}</option>`).join("");
@@ -796,6 +825,85 @@ function renderColorStudio(settings = app.bootstrap?.settings || {}) {
   const paletteNames = Object.keys(palettes);
   setText("color-studio-status", `${Object.keys(colors).length} solid colors · ${paletteNames.length} custom palettes`);
   renderColorOptions(app.status?.rehearsal?.palette || "");
+  drawColorWheel();
+}
+
+function hsvToRgb(hue, saturation, value) {
+  const h = ((Number(hue) % 360) + 360) % 360 / 60;
+  const chroma = clamp(saturation) * clamp(value);
+  const x = chroma * (1 - Math.abs((h % 2) - 1));
+  const offset = clamp(value) - chroma;
+  const rgb = h < 1 ? [chroma, x, 0]
+    : h < 2 ? [x, chroma, 0]
+      : h < 3 ? [0, chroma, x]
+        : h < 4 ? [0, x, chroma]
+          : h < 5 ? [x, 0, chroma] : [chroma, 0, x];
+  return rgb.map((channel) => Math.round((channel + offset) * 255));
+}
+
+function rgbHex(rgb) {
+  return `#${rgb.map((channel) => Math.max(0, Math.min(255, channel)).toString(16).padStart(2, "0")).join("")}`;
+}
+
+function selectedWheelHex() {
+  const value = Number($("color-brightness-input")?.value ?? app.colorWheel.brightness * 100) / 100;
+  app.colorWheel.brightness = clamp(value);
+  return rgbHex(hsvToRgb(app.colorWheel.hue, app.colorWheel.saturation, app.colorWheel.brightness));
+}
+
+function updateSelectedWheelColor() {
+  const hex = selectedWheelHex();
+  if ($("color-value-input") && document.activeElement !== $("color-value-input")) $("color-value-input").value = hex;
+  if ($("color-selected-preview")) $("color-selected-preview").style.background = hex;
+}
+
+function drawColorWheel() {
+  const canvas = $("color-wheel-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  const cx = width / 2;
+  const cy = height / 2;
+  const radius = Math.min(width, height) / 2 - 12;
+  const image = ctx.createImageData(width, height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const distance = Math.hypot(dx, dy);
+      const index = (y * width + x) * 4;
+      if (distance <= radius) {
+        const hue = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+        const [red, green, blue] = hsvToRgb(hue, distance / radius, app.colorWheel.brightness);
+        image.data[index] = red; image.data[index + 1] = green; image.data[index + 2] = blue; image.data[index + 3] = 255;
+      } else {
+        image.data[index] = 7; image.data[index + 1] = 16; image.data[index + 2] = 18; image.data[index + 3] = 255;
+      }
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  const angle = app.colorWheel.hue * Math.PI / 180;
+  const markerRadius = app.colorWheel.saturation * radius;
+  const markerX = cx + Math.cos(angle) * markerRadius;
+  const markerY = cy + Math.sin(angle) * markerRadius;
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(markerX, markerY, 6, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = "#061012"; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(markerX, markerY, 8, 0, Math.PI * 2); ctx.stroke();
+  updateSelectedWheelColor();
+}
+
+function selectColorWheelPoint(event) {
+  const canvas = $("color-wheel-canvas");
+  if (!canvas) return;
+  const bounds = canvas.getBoundingClientRect();
+  const x = (event.clientX - bounds.left) * canvas.width / bounds.width;
+  const y = (event.clientY - bounds.top) * canvas.height / bounds.height;
+  const dx = x - canvas.width / 2;
+  const dy = y - canvas.height / 2;
+  const radius = Math.min(canvas.width, canvas.height) / 2 - 12;
+  app.colorWheel.hue = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+  app.colorWheel.saturation = clamp(Math.hypot(dx, dy) / radius);
+  drawColorWheel();
 }
 
 async function saveColorStudio(payload) {
@@ -811,6 +919,29 @@ async function saveColorStudio(payload) {
   }
 }
 
+async function saveGestureMovements() {
+  const gesture = $("gesture-movement-gesture")?.value || "hold";
+  const selected = $$("#gesture-movement-options input:checked").map((input) => input.value);
+  if (!selected.length) return toast("Choose at least one movement", `${label(gesture)} needs one movement association.`, "error");
+  const current = app.bootstrap?.settings?.gesture_movements || app.status?.rehearsal?.gesture_movements || {};
+  app.gestureMovementDrafts[gesture] = selected;
+  const associations = { ...current, ...app.gestureMovementDrafts };
+  const emptyGesture = Object.entries(associations).find(([, routines]) => !routines?.length);
+  if (emptyGesture) return toast("Every gesture needs a movement", `${label(emptyGesture[0])} has no associated movement.`, "error");
+  try {
+    const result = await api("/api/settings", { method: "POST", body: { gesture_movements: associations } });
+    app.bootstrap.settings = result.settings;
+    app.status = result.status;
+    app.gestureMovementDrafts = {};
+    app.gestureMovementDirty = false;
+    app.gestureMovementRenderKey = "";
+    renderRehearsal(result.status.rehearsal || {});
+    toast("Gesture associations saved", `${label(gesture)} can call ${selected.map(label).join(", ")}.`, "success");
+  } catch (error) {
+    toast("Gesture associations were not saved", error.message, "error");
+  }
+}
+
 function renderMotionEditor(editor = {}) {
   if (!app.motionEditorScope) app.motionEditorScope = editor.scope || "movers";
   const scope = app.motionEditorScope;
@@ -821,9 +952,7 @@ function renderMotionEditor(editor = {}) {
     scopeSelect.value = scope;
   }
   $("motion-mover-controls")?.classList.toggle("hidden", scope !== "movers");
-  $("motion-mover-preview")?.classList.toggle("hidden", scope !== "movers");
   $("motion-center-controls")?.classList.toggle("hidden", scope !== "center");
-  $("motion-center-preview")?.classList.toggle("hidden", scope !== "center");
   const controls = {
     "motion-cycle": values.cycle_beats,
     "motion-pan-size": Number(values.pan_size) * 100,
@@ -903,7 +1032,7 @@ function renderMotionEditor(editor = {}) {
   ), 0);
   setText("motion-velocity-status", scope === "center" ? "CENTER CONTROLS" : scopedEditor.velocity_feasible === false ? `TOO FAST · ${Math.round(worst * 100)}%` : `VELOCITY OK · ${Math.round(worst * 100)}%`);
   $("motion-velocity-status")?.classList.toggle("warn", scopedEditor.velocity_feasible === false);
-  if (scope === "movers") drawMotionPath(scopedEditor.paths || []);
+  drawMotionPath(editor.groups?.movers?.paths || scopedEditor.paths || []);
 }
 
 function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || []) {
@@ -952,13 +1081,18 @@ function drawMotionPath(paths = app.status?.rehearsal?.motion_editor?.paths || [
 }
 
 function drawCenterMotion() {
-  const canvas = $("center-motion-canvas");
-  if (!canvas || $("motion-center-preview")?.classList.contains("hidden")) return;
+  const values = app.status?.rehearsal?.motion_editor?.groups?.center?.values || {};
+  const now = performance.now() / 1000;
+  drawCenterFixtureMotion($("center-motion-canvas"), values, now);
+  drawCenterFixtureMotion($("calibration-center-motion-canvas"), values, now);
+  window.requestAnimationFrame(drawCenterMotion);
+}
+
+function drawCenterFixtureMotion(canvas, values, t) {
+  if (!canvas || canvas.offsetParent === null) return;
   const configured = configureCanvas(canvas);
   if (!configured) return;
   const { context: ctx, width, height } = configured;
-  const values = app.status?.rehearsal?.motion_editor?.groups?.center?.values || {};
-  const t = performance.now() / 1000;
   const cycle = Math.max(1, Number(values.cycle_beats || 8));
   const beat = t * Number(app.status?.rehearsal?.bpm || 120) / 60;
   const phase = (beat / cycle) * Math.PI * 2;
@@ -969,6 +1103,10 @@ function drawCenterMotion() {
   ctx.beginPath(); ctx.arc(cx, cy, radius * 1.65, 0, Math.PI * 2); ctx.stroke();
   ctx.fillStyle = "#c9e5df"; ctx.beginPath(); ctx.arc(cx, cy, radius * .38, 0, Math.PI * 2); ctx.fill();
   const body = Number(values.body_travel ?? .75), arm1 = Number(values.arm_1_travel ?? .85), arm2 = Number(values.arm_2_travel ?? .85);
+  const bodyAngle = phase
+    * Number(values.body_speed || 1)
+    * Number(values.body_direction || 1)
+    + Number(values.body_phase || 0) * Math.PI * 2;
   const rates = [Number(values.arm_1_speed || 1), Number(values.arm_2_speed || 1)];
   const phases = [Number(values.arm_1_phase || 0) * Math.PI * 2, Number(values.arm_2_phase || 0) * Math.PI * 2];
   const dirs = [Number(values.arm_1_direction || 1), Number(values.arm_2_direction || 1)];
@@ -982,10 +1120,18 @@ function drawCenterMotion() {
     ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
     ctx.fillStyle = colors[index]; ctx.beginPath(); ctx.arc(ex, ey, radius * .22, 0, Math.PI * 2); ctx.fill();
   });
+  const bodyRadius = radius * (1 + body * .45);
   ctx.strokeStyle = "rgba(210,232,225,.55)"; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.arc(cx, cy, radius * (1 + body * .45), 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, bodyRadius, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = "#c9e5df"; ctx.lineWidth = Math.max(2, radius * .1);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(
+    cx + Math.cos(bodyAngle) * bodyRadius,
+    cy + Math.sin(bodyAngle) * bodyRadius * .55,
+  );
+  ctx.stroke();
   ctx.fillStyle = "#718681"; ctx.font = "10px DejaVu Sans Mono"; ctx.fillText("BODY + ARM 1 + ARM 2", 10, height - 10);
-  window.requestAnimationFrame(drawCenterMotion);
 }
 
 function motionFormValues() {
@@ -1681,7 +1827,6 @@ function captureLiveCue(lane) {
 function renderStatus() {
   const status = app.status;
   if (!status) return;
-  renderColorStudio(app.bootstrap?.settings || {});
   const engine = status.engine;
   const controls = status.controls;
   const observation = status.observation;
@@ -3007,13 +3152,6 @@ function renderMedia(media, observation) {
   setWidth("nav-progress", progress);
   setWidth("remote-track-progress", progress);
   setText("remote-feedback-time", position !== null && position !== undefined ? `At ${formatTime(position)}` : "This moment");
-  if (media?.provider === "spotify") {
-    setText("spotify-position", formatTime(position));
-    setText("spotify-duration", formatTime(duration));
-    if ($("spotify-seek") && document.activeElement !== $("spotify-seek")) {
-      $("spotify-seek").value = duration ? Math.round(clamp(position / duration) * 1000) : 0;
-    }
-  }
 
   const bpm = observation.bpm ? Number(observation.bpm).toFixed(1) : "—";
   const section = label(observation.section || "waiting");
@@ -3025,7 +3163,12 @@ function renderMedia(media, observation) {
 }
 
 async function refreshSpotifyConsole(showErrors = false, query = null) {
-  if (app.spotifyRefreshing) return;
+  if (app.spotifyRefreshing) {
+    if (query !== null || showErrors || app.spotifyPendingRefresh === null) {
+      app.spotifyPendingRefresh = { showErrors, query };
+    }
+    return;
+  }
   app.spotifyRefreshing = true;
   try {
     const requestedQuery = query === null ? (app.spotify?.query || "") : query;
@@ -3042,6 +3185,11 @@ async function refreshSpotifyConsole(showErrors = false, query = null) {
     if (message) message.textContent = error.message;
   } finally {
     app.spotifyRefreshing = false;
+    const pending = app.spotifyPendingRefresh;
+    app.spotifyPendingRefresh = null;
+    if (pending) window.queueMicrotask(() => refreshSpotifyConsole(
+      pending.showErrors, pending.query,
+    ));
   }
 }
 
@@ -3090,7 +3238,7 @@ function renderSpotifyConsole() {
   setText("spotify-track-title", track.name || "Choose music from Spotify");
   setText("spotify-track-artists", track.artists?.length ? track.artists.join(", ") : "Search below or use your usual Spotify app.");
   setText("spotify-album", track.album || "No active playback");
-  setText("spotify-position", formatTime(playback.progress_ms));
+  setText("spotify-position", formatTime(currentSpotifyProgress()));
   setText("spotify-duration", formatTime(track.duration_ms));
   setText("spotify-device-name", activeDevice?.name ? `${activeDevice.name} · active in Spotify` : "No active Spotify route");
   setText(
@@ -3118,7 +3266,7 @@ function renderSpotifyConsole() {
   if ($("spotify-play-button")) $("spotify-play-button").textContent = playback.is_playing ? "❚❚" : "▶";
   if ($("spotify-seek") && document.activeElement !== $("spotify-seek")) {
     $("spotify-seek").value = track.duration_ms
-      ? Math.round(clamp(Number(playback.progress_ms || 0) / Number(track.duration_ms)) * 1000)
+      ? Math.round(clamp(Number(currentSpotifyProgress() || 0) / Number(track.duration_ms)) * 1000)
       : 0;
   }
 
@@ -3276,6 +3424,26 @@ function renderSpotifyConsole() {
   setText("spotify-diagnostic-note", diagnostics.api_note || "");
 }
 
+function currentSpotifyProgress() {
+  const playback = app.spotify?.playback || {};
+  const duration = Number(playback.track?.duration_ms || 0);
+  const elapsed = playback.is_playing && app.spotifyFetchedAt
+    ? Math.max(0, Date.now() - app.spotifyFetchedAt) : 0;
+  return duration
+    ? Math.min(duration, Number(playback.progress_ms || 0) + elapsed)
+    : Number(playback.progress_ms || 0);
+}
+
+function updateSpotifyProgressDisplay() {
+  if (!app.spotify?.connected) return;
+  const progress = currentSpotifyProgress();
+  const duration = Number(app.spotify?.playback?.track?.duration_ms || 0);
+  setText("spotify-position", formatTime(progress));
+  if ($("spotify-seek") && document.activeElement !== $("spotify-seek")) {
+    $("spotify-seek").value = duration ? Math.round(clamp(progress / duration) * 1000) : 0;
+  }
+}
+
 function renderRemoteSpotify(spotify) {
   const playback = spotify.playback || {};
   const track = playback.track || {};
@@ -3296,13 +3464,23 @@ function selectedSpotifyDeviceId() {
 }
 
 async function spotifyCommand(action, values = {}) {
+  const playback = app.spotify?.playback;
+  if (playback) {
+    const progress = currentSpotifyProgress();
+    if (action === "play") playback.is_playing = true;
+    if (action === "pause") playback.is_playing = false;
+    if (action === "seek") playback.progress_ms = Number(values.position_ms || 0);
+    else playback.progress_ms = progress;
+    app.spotifyFetchedAt = Date.now();
+    renderSpotifyConsole();
+  }
   try {
     await api("/api/spotify/control", {
       method: "POST",
       body: { action, device_id: selectedSpotifyDeviceId(), ...values },
     });
     if (action === "transfer") app.spotifyTransferDeviceId = "";
-    window.setTimeout(() => refreshSpotifyConsole(false), 350);
+    window.setTimeout(() => refreshSpotifyConsole(false), action === "next" || action === "previous" ? 650 : 350);
   } catch (error) {
     toast("Spotify command failed", error.message, "error");
     window.setTimeout(() => refreshSpotifyConsole(false), 100);
@@ -4105,15 +4283,21 @@ function drawScope() {
   ctx.shadowColor = "rgba(100, 222, 213, .4)";
   ctx.shadowBlur = 4;
   ctx.beginPath();
-  if (!values.length) {
+  const inputValues = values.filter((sample) => Number.isFinite(Number(sample.dbfs)) && sample.dbfs !== null);
+  if (!inputValues.length) {
     ctx.moveTo(0, height * 0.5);
     ctx.lineTo(width, height * 0.5);
   }
+  let inputStarted = false;
   values.forEach((sample, index) => {
+    if (sample.dbfs === null || sample.dbfs === undefined || !Number.isFinite(Number(sample.dbfs))) {
+      inputStarted = false;
+      return;
+    }
     const value = clamp((Number(sample.dbfs) + 60) / 60);
     const x = index / Math.max(1, values.length - 1) * width;
     const y = height - value * height;
-    if (index === 0) ctx.moveTo(x, y);
+    if (!inputStarted) { ctx.moveTo(x, y); inputStarted = true; }
     else ctx.lineTo(x, y);
   });
   ctx.stroke();
@@ -4604,13 +4788,31 @@ function installHandlers() {
   });
   $("color-add-button")?.addEventListener("click", () => {
     const name = $("color-name-input")?.value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_");
-    const value = $("color-value-input")?.value;
+    const value = $("color-value-input")?.value.trim().toLowerCase();
     if (!name || !value) return toast("Name the color first", "Choose a name and hexadecimal color.", "error");
+    if (!/^#[0-9a-f]{6}$/.test(value)) return toast("Color value is invalid", "Use a six-digit value such as #00a8a8.", "error");
     const studio = colorStudioSettings();
     saveColorStudio({ colors: { ...(studio.colors || {}), [name]: value }, palettes: studio.palettes || {} });
   });
+  let colorWheelDragging = false;
+  $("color-wheel-canvas")?.addEventListener("pointerdown", (event) => {
+    colorWheelDragging = true;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    selectColorWheelPoint(event);
+  });
+  $("color-wheel-canvas")?.addEventListener("pointermove", (event) => {
+    if (colorWheelDragging) selectColorWheelPoint(event);
+  });
+  $("color-wheel-canvas")?.addEventListener("pointerup", () => { colorWheelDragging = false; });
+  $("color-wheel-canvas")?.addEventListener("pointercancel", () => { colorWheelDragging = false; });
+  $("color-brightness-input")?.addEventListener("input", drawColorWheel);
+  $("color-value-input")?.addEventListener("input", (event) => {
+    if (/^#[0-9a-f]{6}$/i.test(event.target.value) && $("color-selected-preview")) {
+      $("color-selected-preview").style.background = event.target.value;
+    }
+  });
   $("palette-color-picker")?.addEventListener("change", () => {
-    app.colorPaletteDraft = $$('[data-page="rig"] #palette-color-picker input:checked').map((input) => input.value);
+    app.colorPaletteDraft = $$('[data-page="rehearsal"] #palette-color-picker input:checked').map((input) => input.value);
   });
   $("palette-save-button")?.addEventListener("click", () => {
     const name = $("palette-name-input")?.value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_");
@@ -4645,6 +4847,38 @@ function installHandlers() {
     app.motionEditorScope = event.target.value;
     renderMotionEditor(app.status?.rehearsal?.motion_editor || {});
   });
+  $("gesture-movement-gesture")?.addEventListener("change", () => renderGestureMovements());
+  $("gesture-movement-options")?.addEventListener("change", () => {
+    const gesture = $("gesture-movement-gesture")?.value || "hold";
+    app.gestureMovementDrafts[gesture] = $$("#gesture-movement-options input:checked").map((input) => input.value);
+    app.gestureMovementDirty = true;
+    setText("gesture-movement-status", "UNSAVED ASSOCIATION CHANGES");
+  });
+  $("gesture-movement-options")?.addEventListener("click", (event) => {
+    const edit = event.target.closest("[data-edit-gesture-routine]");
+    if (!edit) return;
+    patchRehearsal({ routine: edit.dataset.editGestureRoutine, tour: false });
+    $("motion-editor-scope")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  $("gesture-movement-add")?.addEventListener("click", () => {
+    const routine = app.status?.rehearsal?.routine;
+    const checkbox = $$('#gesture-movement-options input').find((input) => input.value === routine);
+    if (checkbox) {
+      checkbox.checked = true;
+      const gesture = $("gesture-movement-gesture")?.value || "hold";
+      app.gestureMovementDrafts[gesture] = $$("#gesture-movement-options input:checked").map((input) => input.value);
+      app.gestureMovementDirty = true;
+    }
+    setText("gesture-movement-status", `${label($("gesture-movement-gesture")?.value || "hold")} · unsaved changes`);
+  });
+  $("gesture-movement-edit")?.addEventListener("click", () => {
+    const routine = app.status?.rehearsal?.routine;
+    if (!routine) return toast("Choose a movement to edit", "Select a Movement Lab routine first.", "error");
+    patchRehearsal({ routine, tour: false });
+    $("motion-editor-scope")?.focus();
+    $("motion-editor-scope")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  $("gesture-movement-save")?.addEventListener("click", saveGestureMovements);
   $$('[data-center-motion-control]').forEach((input) => {
     input.addEventListener(input.tagName === "SELECT" ? "change" : "input", () => {
       const values = motionFormValues();
