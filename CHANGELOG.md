@@ -12,6 +12,9 @@ result. Git commit history remains the detailed engineering log.
   failures, quarantined stale legacy student snapshots, and re-keyed remote
   transport jobs when a source upgrade changes the immutable manifest for an
   existing canonical job ID.
+- Prevented remotely completed but not-yet-imported jobs from being repeatedly
+  counted as fresh prefill submissions, so serial local result verification no
+  longer collapses a six-slot teacher queue into single-job execution.
 - Replaced the Threadripper CPU meter's one-minute load approximation with
   sampled CPU utilization, shortened Link queue discovery and handoff delays,
   and raised the 48-thread WSL worker default from four to six concurrent

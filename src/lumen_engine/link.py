@@ -2327,6 +2327,11 @@ class LumenLinkCoordinator:
         self._prepared_sources: dict[
             str, list[tuple[dict[str, Any], Path]]
         ] = {}
+        # A prefilled remote job remains locally queued until its result is
+        # claimed and imported. Track that intermediate state explicitly so
+        # completed remote work is not resubmitted and mistaken for new slot
+        # occupancy on every coordinator cycle.
+        self._submitted_local_job_ids: set[str] = set()
         self._queue_summary = {"queued": 0, "bytes_pending": 0}
         self.recent_imports_path = self.state_root / "recent-imports.json"
         self.recent_imports: deque[dict[str, Any]] = deque(maxlen=20)
@@ -2683,6 +2688,8 @@ class LumenLinkCoordinator:
             and (job.get("payload") or {}).get("execution_target") == "threadripper"
             and str(job.get("id") or "") not in occupied_ids
             and str(job.get("id") or "") != active_id
+            and str(job.get("id") or "")
+            not in self._submitted_local_job_ids
             and self._remote_is_compatible(str(job.get("job_type") or ""))
         ]
         candidates.sort(key=lambda item: (-int(item.get("priority") or 0), int(item.get("created_unix_ms") or 0)))
@@ -2694,7 +2701,9 @@ class LumenLinkCoordinator:
             candidates = [job for job in candidates if job.get("job_type") != STUDENT_TRAIN_JOB]
         submitted = 0
         client = self._client()
-        for job in candidates[:capacity]:
+        for job in candidates:
+            if submitted >= capacity:
+                break
             manifest = self._prepared_manifests.get(str(job["id"])) or self._manifest(job, jobs=self._job_snapshot)
             sources = self._prepared_sources.get(str(job["id"])) or self._object_sources(job, manifest, jobs=self._job_snapshot)
             # upload() acquires the standby guard once per chunk so Live can
@@ -2706,11 +2715,23 @@ class LumenLinkCoordinator:
                     chunk_guard=self._standby_guard,
                 )
             with self._standby_guard():
-                manifest = self._submit_manifest(client, job, manifest)
+                manifest, remote = self._submit_manifest(
+                    client, job, manifest
+                )
             self._prepared_manifests[str(job["id"])] = manifest
             self._prepared_sources[str(job["id"])] = sources
-            submitted += 1
-            self._event("prefill", f"submitted {job['id']} to a parallel slot")
+            self._submitted_local_job_ids.add(str(job["id"]))
+            if remote.get("status") in {"queued", "running"}:
+                submitted += 1
+                self._event(
+                    "prefill",
+                    f"submitted {job['id']} to a parallel slot",
+                )
+            elif remote.get("status") == "complete":
+                self._event(
+                    "prefill",
+                    f"found completed remote result for {job['id']}",
+                )
         return submitted
 
     def _submit_manifest(
@@ -2718,12 +2739,12 @@ class LumenLinkCoordinator:
         client: LinkClient,
         job: dict[str, Any],
         manifest: dict[str, Any],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Submit immutably, re-keying a changed manifest after an upgrade."""
 
         try:
-            client.submit(manifest)
-            return manifest
+            state = client.submit(manifest)
+            return manifest, state
         except LinkProtocolError as error:
             if "job ID already has a different manifest" not in str(error):
                 raise
@@ -2734,17 +2755,18 @@ class LumenLinkCoordinator:
             **manifest,
             "job_id": f"{canonical_id}.manifest-{fingerprint}",
         }
-        client.submit(retry_manifest)
+        state = client.submit(retry_manifest)
         self._event(
             "job",
             f"re-keyed {canonical_id} after an immutable manifest conflict",
         )
-        return retry_manifest
+        return retry_manifest, state
 
     def _restore_queued_jobs(self) -> int:
         if not self.can_import():
             return 0
         restored = 0
+        self._submitted_local_job_ids.clear()
         for job in self._refresh_job_snapshot(force=True):
             if (
                 job.get("status") == "queued"
@@ -2976,7 +2998,10 @@ class LumenLinkCoordinator:
                 transferred += int(transfer.get("bytes") or 0)
                 self.active["transferred_bytes"] = transferred
             with self._standby_guard():
-                manifest = self._submit_manifest(client, job, manifest)
+                manifest, _remote_state = self._submit_manifest(
+                    client, job, manifest
+                )
+                self._submitted_local_job_ids.add(str(job["id"]))
                 self.active["manifest"] = manifest
                 self.active.update(stage="remote", progress=0.05)
                 self._persist()
@@ -3043,6 +3068,7 @@ class LumenLinkCoordinator:
                 self.active = None
                 self._prepared_manifests.pop(str(job["id"]), None)
                 self._prepared_sources.pop(str(job["id"]), None)
+                self._submitted_local_job_ids.discard(str(job["id"]))
                 self._job_snapshot_at = 0.0
                 self._persist()
             if self.on_import is not None:

@@ -1140,6 +1140,7 @@ class LinkTests(unittest.TestCase):
                         "compute node returned HTTP 400: job ID already has "
                         "a different manifest"
                     )
+                return {"status": "queued"}
 
         client = ConflictOnceClient()
         job = {"id": "job:canonical"}
@@ -1148,13 +1149,71 @@ class LinkTests(unittest.TestCase):
             "job_id": job["id"],
             "job_type": EDMFORMER_JOB,
         }
-        submitted = coordinator._submit_manifest(client, job, original)
+        submitted, remote = coordinator._submit_manifest(
+            client, job, original
+        )
         self.assertEqual(len(client.manifests), 2)
         self.assertEqual(submitted, client.manifests[-1])
         self.assertTrue(
             submitted["job_id"].startswith("job:canonical.manifest-")
         )
         self.assertEqual(original["job_id"], "job:canonical")
+        self.assertEqual(remote["status"], "queued")
+
+    def test_prefill_skips_completed_results_and_fills_real_slots(self):
+        coordinator = LumenLinkCoordinator(
+            SongMemoryStore(self.root / "prefill.sqlite3"),
+            research_root=self.root / "prefill-research",
+            state_root=self.root / "prefill-state",
+            config_path=self.root / "prefill-state" / "config.json",
+        )
+        coordinator.remote_status = {
+            "capabilities": {"maximum_parallel_jobs": 2},
+            "jobs": [],
+        }
+        coordinator._job_snapshot = [
+            {
+                "id": f"job:prefill:{index}",
+                "job_type": EDMFORMER_JOB,
+                "status": "queued",
+                "priority": 0,
+                "created_unix_ms": index,
+                "payload": {"execution_target": "threadripper"},
+            }
+            for index in range(3)
+        ]
+
+        class PrefillClient:
+            def __init__(self):
+                self.submitted = []
+
+            def submit(self, manifest):
+                self.submitted.append(dict(manifest))
+                return {
+                    "status": (
+                        "complete" if len(self.submitted) == 1 else "queued"
+                    )
+                }
+
+        client = PrefillClient()
+        with patch.object(
+            coordinator, "_remote_is_compatible", return_value=True
+        ), patch.object(
+            coordinator,
+            "_manifest",
+            side_effect=lambda job, jobs=None: {
+                "job_id": job["id"],
+                "objects": [],
+            },
+        ), patch.object(
+            coordinator, "_object_sources", return_value=[]
+        ), patch.object(
+            coordinator, "_client", return_value=client
+        ):
+            self.assertEqual(coordinator._prefill_remote_queue(), 2)
+            self.assertEqual(len(client.submitted), 3)
+            self.assertEqual(coordinator._prefill_remote_queue(), 0)
+            self.assertEqual(len(client.submitted), 3)
 
     def test_student_executor_runs_fixed_child_and_publishes_artifacts(self):
         """Exercise the real Link runner boundary without a model mock."""
