@@ -8,6 +8,10 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Kept authenticated Link health independent from individual job-preparation
+  failures, quarantined stale legacy student snapshots, and re-keyed remote
+  transport jobs when a source upgrade changes the immutable manifest for an
+  existing canonical job ID.
 - Replaced the Threadripper CPU meter's one-minute load approximation with
   sampled CPU utilization, shortened Link queue discovery and handoff delays,
   and raised the 48-thread WSL worker default from four to six concurrent

@@ -1093,6 +1093,69 @@ class LinkTests(unittest.TestCase):
             expected_unique_bytes,
         )
 
+    def test_stale_student_snapshot_fails_only_its_job(self):
+        store = SongMemoryStore(self.root / "stale-student.sqlite3")
+        examples = self.root / "mutable-student.jsonl"
+        examples.write_text('{"recording_id":"one"}\n', encoding="utf-8")
+        job_id = store.enqueue_analysis_job(
+            job_type=STUDENT_TRAIN_JOB,
+            payload={
+                "examples_path": str(examples),
+                "examples_sha256": "0" * 64,
+            },
+        )
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "stale-student-research",
+            state_root=self.root / "stale-student-state",
+            config_path=self.root / "stale-student-state" / "config.json",
+        )
+        coordinator._refresh_job_snapshot(
+            force=True, precompute_students=True
+        )
+        job = next(
+            item for item in store.list_analysis_jobs()
+            if item["id"] == job_id
+        )
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("changed after queueing", job["error"])
+        self.assertIsNone(coordinator.last_error)
+
+    def test_manifest_conflict_rekeys_transport_job_after_upgrade(self):
+        coordinator = LumenLinkCoordinator(
+            SongMemoryStore(self.root / "rekey.sqlite3"),
+            research_root=self.root / "rekey-research",
+            state_root=self.root / "rekey-state",
+            config_path=self.root / "rekey-state" / "config.json",
+        )
+
+        class ConflictOnceClient:
+            def __init__(self):
+                self.manifests = []
+
+            def submit(self, value):
+                self.manifests.append(dict(value))
+                if len(self.manifests) == 1:
+                    raise LinkProtocolError(
+                        "compute node returned HTTP 400: job ID already has "
+                        "a different manifest"
+                    )
+
+        client = ConflictOnceClient()
+        job = {"id": "job:canonical"}
+        original = {
+            "schema": MANIFEST_SCHEMA,
+            "job_id": job["id"],
+            "job_type": EDMFORMER_JOB,
+        }
+        submitted = coordinator._submit_manifest(client, job, original)
+        self.assertEqual(len(client.manifests), 2)
+        self.assertEqual(submitted, client.manifests[-1])
+        self.assertTrue(
+            submitted["job_id"].startswith("job:canonical.manifest-")
+        )
+        self.assertEqual(original["job_id"], "job:canonical")
+
     def test_student_executor_runs_fixed_child_and_publishes_artifacts(self):
         """Exercise the real Link runner boundary without a model mock."""
         spool = LinkSpool(self.root / "student-executor-spool")

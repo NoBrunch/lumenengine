@@ -2513,7 +2513,10 @@ class LumenLinkCoordinator:
             except LinkStandbyRequired:
                 continue
             except Exception as error:
-                self.last_error = str(error)
+                # Health polling owns connection state. A malformed or stale
+                # individual job must remain a job error instead of making a
+                # healthy authenticated Link flash between Ready and Error.
+                self._event("error", f"Link job cycle: {error}")
 
     def _refresh_job_snapshot(
         self, *, force: bool = False, precompute_students: bool = False
@@ -2540,7 +2543,19 @@ class LumenLinkCoordinator:
                     job_id = str(job["id"])
                     if job_id in self._prepared_manifests:
                         continue
-                    manifest = self._manifest(job, jobs=jobs)
+                    try:
+                        manifest = self._manifest(job, jobs=jobs)
+                    except (OSError, ValueError, json.JSONDecodeError) as error:
+                        message = f"Lumen Link preparation failed: {error}"
+                        self.store.update_analysis_job(
+                            job_id,
+                            status="failed",
+                            error=message,
+                        )
+                        job["status"] = "failed"
+                        job["error"] = message
+                        self._event("error", f"{job_id}: {message}")
+                        continue
                     self._prepared_manifests[job_id] = manifest
                     self._prepared_sources[job_id] = self._object_sources(
                         job, manifest, jobs=jobs
@@ -2691,12 +2706,40 @@ class LumenLinkCoordinator:
                     chunk_guard=self._standby_guard,
                 )
             with self._standby_guard():
-                client.submit(manifest)
+                manifest = self._submit_manifest(client, job, manifest)
             self._prepared_manifests[str(job["id"])] = manifest
             self._prepared_sources[str(job["id"])] = sources
             submitted += 1
             self._event("prefill", f"submitted {job['id']} to a parallel slot")
         return submitted
+
+    def _submit_manifest(
+        self,
+        client: LinkClient,
+        job: dict[str, Any],
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Submit immutably, re-keying a changed manifest after an upgrade."""
+
+        try:
+            client.submit(manifest)
+            return manifest
+        except LinkProtocolError as error:
+            if "job ID already has a different manifest" not in str(error):
+                raise
+        canonical_id = str(job["id"])
+        fingerprint_source = {**manifest, "job_id": canonical_id}
+        fingerprint = _sha256_bytes(_json_bytes(fingerprint_source))[:16]
+        retry_manifest = {
+            **manifest,
+            "job_id": f"{canonical_id}.manifest-{fingerprint}",
+        }
+        client.submit(retry_manifest)
+        self._event(
+            "job",
+            f"re-keyed {canonical_id} after an immutable manifest conflict",
+        )
+        return retry_manifest
 
     def _restore_queued_jobs(self) -> int:
         if not self.can_import():
@@ -2933,10 +2976,14 @@ class LumenLinkCoordinator:
                 transferred += int(transfer.get("bytes") or 0)
                 self.active["transferred_bytes"] = transferred
             with self._standby_guard():
-                client.submit(manifest)
+                manifest = self._submit_manifest(client, job, manifest)
+                self.active["manifest"] = manifest
                 self.active.update(stage="remote", progress=0.05)
                 self._persist()
-        remote = client.request("GET", f"/v1/jobs/{job['id']}")
+        # Older persisted coordinator states predate an explicit transport ID
+        # in the saved manifest; their canonical job ID remains the fallback.
+        remote_job_id = str(manifest.get("job_id") or job["id"])
+        remote = client.request("GET", f"/v1/jobs/{remote_job_id}")
         self.active["remote"] = remote
         self.active["stage"] = str(remote.get("stage") or remote.get("status"))
         remote_progress = remote.get("progress")
@@ -2971,7 +3018,9 @@ class LumenLinkCoordinator:
                 self.active["stage"] = "returning"
                 self.active["progress"] = None
                 self._persist()
-                result = client.request("GET", f"/v1/jobs/{job['id']}/result")
+                result = client.request(
+                    "GET", f"/v1/jobs/{remote_job_id}/result"
+                )
                 self.active["stage"] = "importing"
                 self._persist()
                 if job["job_type"] == EDMFORMER_JOB:
@@ -3212,7 +3261,8 @@ class LumenLinkCoordinator:
 
         if (
             result.get("schema") != RESULT_SCHEMA
-            or result.get("job_id") != job["id"]
+            or result.get("job_id")
+            != str(manifest.get("job_id") or job["id"])
             or result.get("job_type") != job["job_type"]
         ):
             raise LinkProtocolError("remote result identity does not match local job")
@@ -3357,7 +3407,8 @@ class LumenLinkCoordinator:
 
         if (
             result.get("schema") != RESULT_SCHEMA
-            or result.get("job_id") != job["id"]
+            or result.get("job_id")
+            != str(manifest.get("job_id") or job["id"])
             or result.get("job_type") != STUDENT_TRAIN_JOB
         ):
             raise LinkProtocolError("remote student result identity is invalid")
