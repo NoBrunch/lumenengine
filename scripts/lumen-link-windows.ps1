@@ -23,6 +23,7 @@ $TaskName = "Lumen Link WSL Network Refresh"
 $ProgramRoot = Join-Path $env:ProgramData "LumenLink"
 $RefreshScript = Join-Path $ProgramRoot "refresh-portproxy.ps1"
 $DashboardShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Lumen Link Dashboard.url"
+$DashboardAddress = "127.0.0.1"
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -93,11 +94,16 @@ function Set-RestrictedFirewallRule {
 }
 
 function Set-PortProxy {
-    param([int]$ListenPort, [int]$ConnectPort, [string]$ConnectAddress)
+    param(
+        [int]$ListenPort,
+        [int]$ConnectPort,
+        [string]$ConnectAddress,
+        [string]$ListenAddress = $ThreadripperAddress
+    )
     netsh interface portproxy delete v4tov4 `
-        listenaddress=$ThreadripperAddress listenport=$ListenPort 2>$null | Out-Null
+        listenaddress=$ListenAddress listenport=$ListenPort 2>$null | Out-Null
     netsh interface portproxy add v4tov4 `
-        listenaddress=$ThreadripperAddress listenport=$ListenPort `
+        listenaddress=$ListenAddress listenport=$ListenPort `
         connectaddress=$ConnectAddress connectport=$ConnectPort | Out-Null
 }
 
@@ -119,6 +125,8 @@ while (`$true) {
     if (-not `$wslAddress) { throw "Could not resolve the WSL address" }
     netsh interface portproxy delete v4tov4 listenaddress=$ThreadripperAddress listenport=$WorkerPort 2>`$null | Out-Null
     netsh interface portproxy add v4tov4 listenaddress=$ThreadripperAddress listenport=$WorkerPort connectaddress=`$wslAddress connectport=$WorkerPort | Out-Null
+    netsh interface portproxy delete v4tov4 listenaddress=$DashboardAddress listenport=$WorkerPort 2>`$null | Out-Null
+    netsh interface portproxy add v4tov4 listenaddress=$DashboardAddress listenport=$WorkerPort connectaddress=`$wslAddress connectport=$WorkerPort | Out-Null
 $sshLines
   } catch { }
   Start-Sleep -Seconds 30
@@ -160,7 +168,7 @@ while (`$true) {
 }
 
 function Install-DashboardShortcut {
-    $content = "[InternetShortcut]`r`nURL=http://${ThreadripperAddress}:$WorkerPort/dashboard`r`n"
+    $content = "[InternetShortcut]`r`nURL=http://${DashboardAddress}:$WorkerPort/dashboard`r`n"
     Set-Content -Path $DashboardShortcut -Value $content -Encoding ASCII
 }
 
@@ -177,6 +185,7 @@ if ($RefreshOnly) {
     if ($effectiveMode -ne "Nat") { exit 0 }
     $wslAddress = Get-WslAddress
     Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress
+    Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress -ListenAddress $DashboardAddress
     if ($EnableSshBootstrap) {
         Set-PortProxy -ListenPort $SshBootstrapPort -ConnectPort 22 -ConnectAddress $wslAddress
     }
@@ -225,6 +234,7 @@ Set-RestrictedFirewallRule -DisplayName $WorkerFirewallName -Port $WorkerPort
 if ($effectiveMode -eq "Nat") {
     $wslAddress = Get-WslAddress
     Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress
+    Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress -ListenAddress $DashboardAddress
     if ($EnableSshBootstrap) {
         Set-PortProxy -ListenPort $SshBootstrapPort -ConnectPort 22 -ConnectAddress $wslAddress
         Set-RestrictedFirewallRule -DisplayName $SshFirewallName -Port $SshBootstrapPort
@@ -233,6 +243,8 @@ if ($effectiveMode -eq "Nat") {
 } else {
     netsh interface portproxy delete v4tov4 `
         listenaddress=$ThreadripperAddress listenport=$WorkerPort 2>$null | Out-Null
+    netsh interface portproxy delete v4tov4 `
+        listenaddress=$DashboardAddress listenport=$WorkerPort 2>$null | Out-Null
     $hyperVCommand = Get-Command New-NetFirewallHyperVRule -ErrorAction SilentlyContinue
     if ($hyperVCommand) {
         if (-not $hyperVCommand.Parameters.ContainsKey("RemoteAddresses")) {
@@ -260,6 +272,6 @@ Write-Host "Lumen Link Windows network applied."
 Write-Host "  Mode:      $effectiveMode"
 Write-Host "  Endpoint:  http://${ThreadripperAddress}:$WorkerPort"
 Write-Host "  Allowed:   $LumenAddress only"
-Write-Host "  Dashboard: http://${ThreadripperAddress}:$WorkerPort/dashboard"
+Write-Host "  Dashboard: http://${DashboardAddress}:$WorkerPort/dashboard"
 Write-Host "  Watchdog:  repairs WSL worker and forwarding every 30 seconds"
 Write-Host "No gateway or DNS was assigned to the direct Ethernet interface."

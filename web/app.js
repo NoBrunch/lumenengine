@@ -627,7 +627,7 @@ async function pollStatus() {
     if (app.pollCount % 600 === 0) void refreshSystemStatus();
     if (app.pollCount % 50 === 0) void refreshSongTeaching();
     if (
-      (app.page === "link" && app.pollCount % 20 === 0)
+      (app.page === "link" && app.pollCount % 10 === 0)
       || (app.remote && app.pollCount % 100 === 0)
     ) void refreshLink(false);
     const researchRunning = Boolean(app.bootstrap?.research?.worker?.running);
@@ -2573,13 +2573,18 @@ function renderLink(link = {}) {
   }
 
   const telemetry = remote.telemetry || remote;
+  const sampledCpuUsage = telemetry.cpu_usage_percent == null
+    ? Number.NaN
+    : Number(telemetry.cpu_usage_percent);
   const cpu = telemetry.cpu || {
     cores: telemetry.cpu_logical,
-    usage: Number(telemetry.cpu_logical) > 0
-      ? Number(telemetry.load_1m || 0) / Number(telemetry.cpu_logical)
-      : 0,
-    model: Number.isFinite(Number(telemetry.load_1m))
-      ? `${Number(telemetry.load_1m).toFixed(1)} load · ${Number(telemetry.cpu_logical || 0)} threads`
+    usage_percent: Number.isFinite(sampledCpuUsage)
+      ? sampledCpuUsage
+      : (Number(telemetry.cpu_logical) > 0
+        ? 100 * Number(telemetry.load_1m || 0) / Number(telemetry.cpu_logical)
+        : 0),
+    model: Number.isFinite(sampledCpuUsage)
+      ? `${Number(telemetry.cpu_logical || 0)} threads · ${Number(telemetry.load_1m || 0).toFixed(1)} load`
       : "Awaiting node",
   };
   const memory = telemetry.memory || {

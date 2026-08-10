@@ -239,13 +239,12 @@ candidate model and evaluation report; the Threadripper cannot activate that
 model. Lumen verifies and imports the artifacts locally, and its existing
 held-out activation rules remain authoritative.
 
-The worker processes one heavy job at a time. This keeps the authenticated
-status service responsive while EDMFormer, SongFormer, and student training
-use their appropriate isolated environments. The default worker ceiling is
-96 GiB on this 128 GiB computer. Exceeding it fails the disposable job instead
-of exhausting Windows and WSL. The general worker ceiling is 24 CPU threads;
-EDMFormer is automatically limited to its validated eight-thread runner
-maximum, while SongFormer and student training may use the wider ceiling.
+The worker processes up to six teacher jobs concurrently. Each EDMFormer job
+is limited to its validated eight-thread runner maximum, filling the 48-thread
+WSL allocation when six are active. SongFormer jobs divide the same allocation
+evenly. Student training still runs alone and may use the full allocation.
+The per-job memory ceiling is 96 GiB on this 128 GiB computer; exceeding it
+fails that disposable job instead of exhausting Windows and WSL.
 
 ## 4. Configure the dedicated Windows Ethernet port
 
@@ -263,6 +262,10 @@ $LinkScript = "\\wsl.localhost\Ubuntu\home\<linux-user>\lumenengine\scripts\lume
 powershell -NoProfile -ExecutionPolicy Bypass -File $LinkScript
 powershell -NoProfile -ExecutionPolicy Bypass -File $LinkScript -Apply -InterfaceAlias "Ethernet 2" -Mode Mirrored
 ```
+
+The second line—the one containing `-Apply`—is the elevated Windows Link
+setup command. Rerunning that same line is safe and refreshes the firewall,
+desktop shortcut, scheduled watchdog, and current WSL forwarding.
 
 This adds `192.168.50.1/24` to only that adapter. It assigns no gateway or DNS.
 It creates a Windows inbound rule permitting TCP 8765 only on
@@ -407,7 +410,7 @@ job's code, teacher/model, preprocessing and ontology contract with the Lumen
 PC before allowing it to be routed.
 
 There is intentionally no per-song offload selector. The coordinator chooses
-eligible automatic jobs and keeps up to four teacher slots supplied. A
+eligible automatic jobs and keeps up to six teacher slots supplied. A
 student-training job waits for the teacher jobs and then runs alone so it may
 use the full Threadripper. Use one job as the first canary:
 
@@ -446,7 +449,7 @@ After applying the Windows setup, open **Lumen Link Dashboard** from the
 Threadripper's Windows desktop, or browse locally to:
 
 ```text
-http://192.168.50.1:8765/dashboard
+http://127.0.0.1:8765/dashboard
 ```
 
 **WORKER ONLINE** means the WSL service and dashboard are responding.

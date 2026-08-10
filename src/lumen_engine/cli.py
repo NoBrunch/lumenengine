@@ -325,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     link_node.add_argument("--max-threads", type=int, default=24)
     link_node.add_argument("--max-memory-gib", type=float, default=96.0)
-    link_node.add_argument("--maximum-parallel-jobs", type=int, default=4)
+    link_node.add_argument("--maximum-parallel-jobs", type=int, default=6)
     link_node.set_defaults(handler=_link_node)
 
     ui = subparsers.add_parser(

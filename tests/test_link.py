@@ -289,8 +289,9 @@ class LinkTests(unittest.TestCase):
         self.assertIn("connection", status)
         self.assertNotIn("manifest", json.dumps(status))
         self.assertNotIn("recording_id", json.dumps(status))
+        self.assertIn("cpu_usage_percent", status["node"])
 
-    def test_threadripper_runs_four_teacher_jobs_concurrently(self):
+    def test_threadripper_runs_six_teacher_jobs_concurrently(self):
         release = threading.Event()
         lock = threading.Lock()
 
@@ -317,17 +318,17 @@ class LinkTests(unittest.TestCase):
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
         self.client.upload(source, digest)
         try:
-            for index in range(4):
+            for index in range(6):
                 self.client.submit(
                     manifest(f"job:parallel:{index}", digest, source.stat().st_size)
                 )
             deadline = time.monotonic() + 3.0
-            while time.monotonic() < deadline and executor.peak < 4:
+            while time.monotonic() < deadline and executor.peak < 6:
                 time.sleep(0.02)
-            self.assertEqual(executor.peak, 4)
+            self.assertEqual(executor.peak, 6)
             health = self.client.health()
-            self.assertEqual(health["maximum_parallel_jobs"], 4)
-            self.assertEqual(health["active_slots"], 4)
+            self.assertEqual(health["maximum_parallel_jobs"], 6)
+            self.assertEqual(health["active_slots"], 6)
         finally:
             release.set()
 

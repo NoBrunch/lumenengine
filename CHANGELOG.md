@@ -8,6 +8,12 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Replaced the Threadripper CPU meter's one-minute load approximation with
+  sampled CPU utilization, shortened Link queue discovery and handoff delays,
+  and raised the 48-thread WSL worker default from four to six concurrent
+  eight-thread teacher jobs. Student training remains exclusive.
+- Made the Windows dashboard shortcut use `127.0.0.1`; NAT setup now maintains
+  a loopback port proxy alongside the dedicated two-PC Link address.
 - Restored musical headroom to the live loudness axis. The former logarithmic
   curve reached 1.0 at ordinary mastered-program levels; the revised curve
   reserves 1.0 for full-scale RMS while physical clipping remains an

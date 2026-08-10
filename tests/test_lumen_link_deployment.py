@@ -26,6 +26,7 @@ class LumenLinkDeploymentTests(unittest.TestCase):
             ["teacher.edmformer", "teacher.songformer", "student.train"],
         )
         self.assertEqual(template["execution"]["gated_job_types"], [])
+        self.assertEqual(template["execution"]["maximum_parallel_jobs"], 6)
         self.assertEqual(
             template["authentication"]["scheme"], "hmac-sha256"
         )
@@ -108,6 +109,7 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn("[switch]$Apply", script)
         self.assertIn('if (-not $Apply)', script)
         self.assertIn("Lumen Link Dashboard.url", script)
+        self.assertIn('$DashboardAddress = "127.0.0.1"', script)
         self.assertIn("Start-Sleep -Seconds 30", script)
         self.assertIn("-RemoteAddress $LumenAddress", script)
         self.assertIn("-LocalAddress $ThreadripperAddress", script)
@@ -134,7 +136,7 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         guide = (ROOT / "docs/lumen-link-wsl-deployment.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("up to four teacher slots", guide)
+        self.assertIn("up to six teacher slots", guide)
         self.assertIn("Other queued", guide)
         self.assertIn("Lumen Link Dashboard", guide)
         self.assertNotIn("select one completed EDM recording", guide)

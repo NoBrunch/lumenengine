@@ -50,6 +50,9 @@ SONGFORMER_JOB = "teacher.songformer"
 STUDENT_TRAIN_JOB = "student.train"
 SONGFORMER_WINDOW_SECONDS = 60
 EDMFORMER_MAX_THREADS = 8
+DEFAULT_PARALLEL_JOBS = 6
+COORDINATOR_POLL_SECONDS = 0.5
+JOB_SNAPSHOT_SECONDS = 2.0
 SONGFORMER_PREPROCESSING_VERSION = (
     f"{SONGFORMER_PREPROCESSING_PREFIX}{SONGFORMER_WINDOW_SECONDS}s:"
     f"{TEACHER_NORMALIZATION_VERSION}"
@@ -913,6 +916,36 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             )
 
 
+_cpu_sample_lock = threading.Lock()
+_cpu_sample: tuple[int, int] | None = None
+
+
+def _cpu_usage_percent() -> float | None:
+    """Return CPU use since the previous telemetry sample from /proc/stat."""
+
+    global _cpu_sample
+    try:
+        fields = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0].split()
+        values = [int(value) for value in fields[1:]]
+        total = sum(values)
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+    except (OSError, ValueError, IndexError):
+        return None
+    with _cpu_sample_lock:
+        previous = _cpu_sample
+        _cpu_sample = (total, idle)
+    if previous is None:
+        return None
+    total_delta = total - previous[0]
+    idle_delta = idle - previous[1]
+    if total_delta <= 0:
+        return None
+    return max(
+        0.0,
+        min(100.0, 100.0 * (total_delta - idle_delta) / total_delta),
+    )
+
+
 def _node_resources() -> dict[str, Any]:
     memory: dict[str, int] = {}
     try:
@@ -930,6 +963,7 @@ def _node_resources() -> dict[str, Any]:
         "host": platform.node(),
         "platform": platform.platform(),
         "cpu_logical": os.cpu_count(),
+        "cpu_usage_percent": _cpu_usage_percent(),
         "load_1m": load[0],
         "load_5m": load[1],
         "memory_total_bytes": memory.get("MemTotal"),
@@ -1673,7 +1707,7 @@ class LinkNodeRuntime:
         spool: LinkSpool,
         executor: LinkNodeExecutor,
         *,
-        maximum_parallel_jobs: int = 4,
+        maximum_parallel_jobs: int = DEFAULT_PARALLEL_JOBS,
     ) -> None:
         self.spool = spool
         self.executor = executor
@@ -1844,9 +1878,9 @@ _LINK_DASHBOARD_HTML = r'''<!doctype html>
 <title>Lumen Link · Threadripper</title><style>
 :root{color-scheme:dark;--bg:#071012;--panel:#101d20;--line:#30484a;--cyan:#69cfc2;--gold:#d7a85e;--red:#d87870;--text:#bdd1cd;--muted:#718681}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#173236 0,transparent 38%),var(--bg);color:var(--text);font:15px system-ui,sans-serif}header{padding:28px 4vw 18px;border-bottom:1px solid var(--line)}h1{margin:4px 0;font-size:30px;letter-spacing:.04em}header span,.muted{color:var(--muted)}#heartbeat.connected{color:var(--cyan)}#heartbeat.waiting{color:var(--gold)}main{padding:22px 4vw;display:grid;gap:16px}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.card,.jobs{background:rgba(16,29,32,.9);border:1px solid var(--line);border-radius:5px;padding:16px;box-shadow:0 12px 35px #0005}.card b{display:block;color:var(--cyan);font:27px ui-monospace,monospace;margin-top:7px}.slots{height:10px;background:#071012;border:1px solid var(--line);margin-top:12px}.slots i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--gold));transition:width .4s}.job{display:grid;grid-template-columns:170px 120px 1fr 130px;gap:12px;padding:11px 0;border-top:1px solid #253a3c;align-items:center}.job:first-child{border:0}.state{color:var(--gold);font-family:ui-monospace,monospace}.bar{height:7px;background:#071012;overflow:hidden}.bar i{display:block;height:100%;background:var(--cyan)}.bar.indeterminate i{width:32%!important;animation:scan 1.2s ease-in-out infinite}@keyframes scan{0%{transform:translateX(-110%)}100%{transform:translateX(325%)}}@media(max-width:950px){.metrics{grid-template-columns:1fr 1fr}.job{grid-template-columns:1fr 1fr}.bar{grid-column:1/-1}}
-</style></head><body><header><span>REMOTE COMPUTE NODE</span><h1>Lumen Link · Threadripper</h1><span id="heartbeat">Waiting for worker telemetry…</span></header><main><section class="metrics"><div class="card">Lumen contact<b id="contact">—</b></div><div class="card">Worker uptime<b id="uptime">—</b></div><div class="card">CPU load · 1m<b id="cpu">—</b></div><div class="card">Parallel slots<b id="slots">—</b><div class="slots"><i id="slotbar"></i></div></div><div class="card">Queued<b id="queued">—</b></div><div class="card">Completed<b id="complete">—</b></div><div class="card">Memory available<b id="memory">—</b></div></section><section class="jobs"><h2>Compute flow</h2><div id="jobs" class="muted">No work has arrived.</div></section></main><script>
+</style></head><body><header><span>REMOTE COMPUTE NODE</span><h1>Lumen Link · Threadripper</h1><span id="heartbeat">Waiting for worker telemetry…</span></header><main><section class="metrics"><div class="card">Lumen contact<b id="contact">—</b></div><div class="card">Worker uptime<b id="uptime">—</b></div><div class="card">CPU utilization<b id="cpu">—</b></div><div class="card">Parallel slots<b id="slots">—</b><div class="slots"><i id="slotbar"></i></div></div><div class="card">Queued<b id="queued">—</b></div><div class="card">Completed<b id="complete">—</b></div><div class="card">Memory available<b id="memory">—</b></div></section><section class="jobs"><h2>Compute flow</h2><div id="jobs" class="muted">No work has arrived.</div></section></main><script>
 const fmt=s=>s==null?'—':s<60?`${Math.round(s)}s`:s<3600?`${Math.floor(s/60)}m ${Math.round(s%60)}s`:`${Math.floor(s/3600)}h ${Math.round(s%3600/60)}m`;const gib=n=>n==null?'—':`${(n/1073741824).toFixed(1)} GiB`;
-async function tick(){try{const d=await fetch('/dashboard/status',{cache:'no-store'}).then(r=>r.json());const linked=d.connection.state==='connected';heartbeat.className=d.connection.state;heartbeat.textContent=`WORKER ONLINE · LUMEN ${linked?'CONNECTED':'WAITING'} · ${new Date().toLocaleTimeString()}`;contact.textContent=d.connection.last_contact_age_s==null?'never':fmt(d.connection.last_contact_age_s);uptime.textContent=fmt(d.uptime_s);cpu.textContent=`${Math.round(100*(d.node.load_1m||0)/Math.max(1,d.node.cpu_logical||1))}%`;slots.textContent=`${d.active_slots} / ${d.maximum_parallel_jobs}`;slotbar.style.width=`${100*d.active_slots/Math.max(1,d.maximum_parallel_jobs)}%`;queued.textContent=d.queue.queued||0;complete.textContent=d.queue.complete||0;memory.textContent=gib(d.node.memory_available_bytes);jobs.innerHTML=d.jobs.length?d.jobs.map(j=>`<div class="job"><b>${j.job_type||'compute'}</b><span class="state">${j.stage||j.status}</span><div class="bar ${j.progress==null&&j.status==='running'?'indeterminate':''}"><i style="width:${j.progress==null?(j.status==='complete'?100:12):100*j.progress}%"></i></div><span>${fmt(j.elapsed_s)} · ${gib(j.peak_rss_bytes)}</span></div>`).join(''):'No work has arrived.'}catch(e){heartbeat.className='waiting';heartbeat.textContent=`WORKER OFFLINE · ${e.message}`}}tick();setInterval(tick,1000);
+async function tick(){try{const d=await fetch('/dashboard/status',{cache:'no-store'}).then(r=>r.json());const linked=d.connection.state==='connected';heartbeat.className=d.connection.state;heartbeat.textContent=`WORKER ONLINE · LUMEN ${linked?'CONNECTED':'WAITING'} · ${new Date().toLocaleTimeString()}`;contact.textContent=d.connection.last_contact_age_s==null?'never':fmt(d.connection.last_contact_age_s);uptime.textContent=fmt(d.uptime_s);cpu.textContent=`${Math.round(d.node.cpu_usage_percent==null?100*(d.node.load_1m||0)/Math.max(1,d.node.cpu_logical||1):d.node.cpu_usage_percent)}%`;slots.textContent=`${d.active_slots} / ${d.maximum_parallel_jobs}`;slotbar.style.width=`${100*d.active_slots/Math.max(1,d.maximum_parallel_jobs)}%`;queued.textContent=d.queue.queued||0;complete.textContent=d.queue.complete||0;memory.textContent=gib(d.node.memory_available_bytes);jobs.innerHTML=d.jobs.length?d.jobs.map(j=>`<div class="job"><b>${j.job_type||'compute'}</b><span class="state">${j.stage||j.status}</span><div class="bar ${j.progress==null&&j.status==='running'?'indeterminate':''}"><i style="width:${j.progress==null?(j.status==='complete'?100:12):100*j.progress}%"></i></div><span>${fmt(j.elapsed_s)} · ${gib(j.peak_rss_bytes)}</span></div>`).join(''):'No work has arrived.'}catch(e){heartbeat.className='waiting';heartbeat.textContent=`WORKER OFFLINE · ${e.message}`}}tick();setInterval(tick,1000);
 </script></body></html>'''
 
 
@@ -2455,7 +2489,7 @@ class LumenLinkCoordinator:
             raise
 
     def _loop(self) -> None:
-        while not self.stop_event.wait(2.0):
+        while not self.stop_event.wait(COORDINATOR_POLL_SECONDS):
             self.configuration = LinkConfiguration.load(self.config_path)
             if (
                 self.active is None
@@ -2489,7 +2523,7 @@ class LumenLinkCoordinator:
         if (
             not force
             and self._job_snapshot
-            and time.monotonic() - self._job_snapshot_at < 10.0
+            and time.monotonic() - self._job_snapshot_at < JOB_SNAPSHOT_SECONDS
         ):
             return list(self._job_snapshot)
         with self._standby_guard():
@@ -3770,7 +3804,7 @@ def serve_link_node(
     project_root: Path,
     max_threads: int = 24,
     max_memory_gib: float = 96.0,
-    maximum_parallel_jobs: int = 4,
+    maximum_parallel_jobs: int = DEFAULT_PARALLEL_JOBS,
 ) -> None:
     spool = LinkSpool(spool_root)
     runtime = LinkNodeRuntime(

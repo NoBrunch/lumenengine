@@ -1104,14 +1104,14 @@ latency, queue, active job stage, transfer volume, worker resources, event
 history, and supported versus gated capabilities. The phone/tablet interface
 has a compact status card. **Test connection**, **Enable link**, **Pause
 dispatch**, **Resume dispatch**, and **Disable link** change only the offline
-coordinator. It keeps up to four teacher jobs supplied to the Threadripper;
+coordinator. It keeps up to six teacher jobs supplied to the Threadripper;
 student training runs alone because it consumes the complete trusted dataset.
 Disabling returns
 unstarted jobs to local eligibility while an active remote job drains to its
 verified result.
 
 The Threadripper worker also serves a read-only Lumen-style dashboard at
-`http://192.168.50.1:8765/dashboard`. It shows heartbeat, worker uptime,
+`http://127.0.0.1:8765/dashboard` when opened on the Threadripper itself. It shows heartbeat, worker uptime,
 parallel-slot use, queue totals, memory headroom, stages, elapsed time, and
 peak memory without exposing recording or song identities. The Windows setup
 installs a desktop shortcut and a 30-second watchdog that starts the WSL user

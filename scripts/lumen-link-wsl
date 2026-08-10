@@ -445,7 +445,7 @@ fields = [
     "--root", str(value["lumen"]["research_root"]),
     "--max-threads", str(int(value["execution"]["cpu_threads"])),
     "--max-memory-gib", str(float(value["execution"]["maximum_memory_gib"])),
-    "--maximum-parallel-jobs", str(int(value["execution"].get("maximum_parallel_jobs", 4))),
+    "--maximum-parallel-jobs", str(int(value["execution"].get("maximum_parallel_jobs", 6))),
 ]
 print("\n".join(fields))
 PY
