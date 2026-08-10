@@ -19,6 +19,7 @@ from lumen_engine.link import (
     LinkAuthenticator,
     LinkAuthenticationError,
     LinkClient,
+    LinkConfiguration,
     LinkNodeExecutor,
     LinkNodeRuntime,
     LinkNodeServer,
@@ -1214,6 +1215,45 @@ class LinkTests(unittest.TestCase):
             self.assertEqual(len(client.submitted), 3)
             self.assertEqual(coordinator._prefill_remote_queue(), 0)
             self.assertEqual(len(client.submitted), 3)
+
+    def test_routing_maintains_standby_buffer_during_active_import(self):
+        store = SongMemoryStore(self.root / "route-buffer.sqlite3")
+        job_ids = [
+            store.enqueue_analysis_job(
+                job_type=EDMFORMER_JOB,
+                payload={"execution_target": "automatic"},
+            )
+            for _ in range(3)
+        ]
+        store.set_analysis_job_execution_target(
+            job_ids[0], execution_target="threadripper"
+        )
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "route-buffer-research",
+            state_root=self.root / "route-buffer-state",
+            config_path=self.root / "route-buffer-state" / "config.json",
+        )
+        coordinator.configuration = LinkConfiguration(
+            "http://127.0.0.1:1", SECRET, enabled=True
+        )
+        coordinator.remote_status = {
+            "capabilities": {"maximum_parallel_jobs": 2}
+        }
+        coordinator.active = {"job": {"id": "job:being-imported"}}
+        coordinator._submitted_local_job_ids.add(job_ids[0])
+        with patch.object(
+            coordinator, "_remote_is_compatible", return_value=True
+        ):
+            self.assertEqual(coordinator.route_queued_jobs(), 2)
+        jobs = {job["id"]: job for job in store.list_analysis_jobs()}
+        self.assertTrue(
+            all(
+                jobs[job_id]["payload"]["execution_target"]
+                == "threadripper"
+                for job_id in job_ids
+            )
+        )
 
     def test_student_executor_runs_fixed_child_and_publishes_artifacts(self):
         """Exercise the real Link runner boundary without a model mock."""

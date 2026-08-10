@@ -15,6 +15,9 @@ result. Git commit history remains the detailed engineering log.
 - Prevented remotely completed but not-yet-imported jobs from being repeatedly
   counted as fresh prefill submissions, so serial local result verification no
   longer collapses a six-slot teacher queue into single-job execution.
+- Kept a six-job routed standby buffer replenished while another result is
+  running or being imported, allowing newly free Threadripper slots to refill
+  without waiting for the serial canonical-import path.
 - Replaced the Threadripper CPU meter's one-minute load approximation with
   sampled CPU utilization, shortened Link queue discovery and handoff delays,
   and raised the 48-thread WSL worker default from four to six concurrent

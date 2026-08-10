@@ -2512,7 +2512,7 @@ class LumenLinkCoordinator:
                             self._remote_is_compatible(
                                 job_type, allow_contract_scan=True
                             )
-                    self.route_queued_jobs(refresh=False)
+                self.route_queued_jobs(refresh=False)
                 self._prefill_remote_queue()
                 self._advance()
             except LinkStandbyRequired:
@@ -2606,11 +2606,10 @@ class LumenLinkCoordinator:
         return list(jobs)
 
     def route_queued_jobs(self, *, refresh: bool = True) -> int:
-        """Route one canary only after authenticated contract agreement."""
+        """Maintain a standby buffer after authenticated contract agreement."""
         if (
             not self.configuration.enabled
             or self.configuration.paused
-            or self.active is not None
             or not self.can_import()
         ):
             return 0
@@ -2647,6 +2646,8 @@ class LumenLinkCoordinator:
             job.get("status") == "queued"
             and (job.get("payload") or {}).get("execution_target")
             == "threadripper"
+            and str(job.get("id") or "")
+            not in self._submitted_local_job_ids
             for job in jobs
         )
         routed = 0
@@ -2661,6 +2662,9 @@ class LumenLinkCoordinator:
                     str(job["id"]), execution_target="threadripper"
                 )
             ):
+                job.setdefault("payload", {})[
+                    "execution_target"
+                ] = "threadripper"
                 self._invalidate_status()
                 routed += 1
         return routed
