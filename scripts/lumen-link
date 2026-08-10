@@ -52,10 +52,13 @@ connection_exists() {
 }
 
 status() {
+    local active_connection=""
+    active_connection="$(nmcli -g GENERAL.CONNECTION device show "$INTERFACE" 2>/dev/null || true)"
     printf 'Lumen Link — live-computer status\n'
     printf '  interface              %s\n' "$INTERFACE"
     printf '  connection profile     %s\n' "$(connection_exists && printf 'ready' || printf 'missing')"
     printf '  expected local address %s\n' "$LUMEN_ADDRESS"
+    printf '  active wired profile   %s\n' "${active_connection:---}"
     printf '  worker endpoint        %s\n' "$ENDPOINT"
     printf '  local config           %s\n' "$([[ -f "$LINK_CONFIG" ]] && printf 'ready' || printf 'missing')"
     if [[ -f "$SECRET_FILE" ]]; then
@@ -77,14 +80,18 @@ configure_network() {
                 connection.interface-name "$INTERFACE" \
                 ipv4.method manual ipv4.addresses "$LUMEN_ADDRESS" \
                 ipv4.gateway "" ipv4.dns "" ipv4.never-default yes \
-                ipv6.method disabled connection.autoconnect yes
+                ipv6.method disabled connection.autoconnect yes \
+                connection.autoconnect-priority 100 \
+                connection.autoconnect-retries 0
         else
             shell_join sudo nmcli connection add type ethernet \
                 ifname "$INTERFACE" con-name "$CONNECTION_NAME" \
                 ipv4.method manual ipv4.addresses "$LUMEN_ADDRESS" \
                 ipv4.never-default yes ipv6.method disabled
             shell_join sudo nmcli connection modify "$CONNECTION_NAME" \
-                ipv4.gateway "" ipv4.dns "" connection.autoconnect yes
+                ipv4.gateway "" ipv4.dns "" connection.autoconnect yes \
+                connection.autoconnect-priority 100 \
+                connection.autoconnect-retries 0
         fi
         shell_join sudo nmcli connection up "$CONNECTION_NAME"
         return
@@ -94,14 +101,18 @@ configure_network() {
             connection.interface-name "$INTERFACE" \
             ipv4.method manual ipv4.addresses "$LUMEN_ADDRESS" \
             ipv4.gateway "" ipv4.dns "" ipv4.never-default yes \
-            ipv6.method disabled connection.autoconnect yes
+            ipv6.method disabled connection.autoconnect yes \
+            connection.autoconnect-priority 100 \
+            connection.autoconnect-retries 0
     else
         sudo nmcli connection add type ethernet \
             ifname "$INTERFACE" con-name "$CONNECTION_NAME" \
             ipv4.method manual ipv4.addresses "$LUMEN_ADDRESS" \
             ipv4.never-default yes ipv6.method disabled
         sudo nmcli connection modify "$CONNECTION_NAME" \
-            ipv4.gateway "" ipv4.dns "" connection.autoconnect yes
+            ipv4.gateway "" ipv4.dns "" connection.autoconnect yes \
+            connection.autoconnect-priority 100 \
+            connection.autoconnect-retries 0
     fi
     sudo nmcli connection up "$CONNECTION_NAME"
     if ip -4 route show default | grep -Fq "dev ${INTERFACE}"; then

@@ -24,7 +24,7 @@
   "execution": {
     "cpu_threads": 48,
     "maximum_memory_gib": 96,
-    "maximum_parallel_jobs": 1,
+    "maximum_parallel_jobs": 4,
     "job_types": [
       "teacher.edmformer",
       "teacher.songformer",

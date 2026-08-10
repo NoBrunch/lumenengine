@@ -1668,17 +1668,32 @@ class LinkNodeExecutor:
 
 
 class LinkNodeRuntime:
-    def __init__(self, spool: LinkSpool, executor: LinkNodeExecutor) -> None:
+    def __init__(
+        self,
+        spool: LinkSpool,
+        executor: LinkNodeExecutor,
+        *,
+        maximum_parallel_jobs: int = 4,
+    ) -> None:
         self.spool = spool
         self.executor = executor
+        self.maximum_parallel_jobs = max(1, int(maximum_parallel_jobs))
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
+        self.job_threads: dict[str, threading.Thread] = {}
         self.started_at = time.time()
+        self.last_coordinator_contact_at: float | None = None
+
+    def note_coordinator_contact(self) -> None:
+        """Record a successfully authenticated request from the Lumen PC."""
+
+        self.last_coordinator_contact_at = time.time()
 
     def start(self) -> None:
         if self.thread and self.thread.is_alive():
             return
         self.spool.recover_running()
+        self.executor.capabilities()
         self.thread = threading.Thread(target=self._run, name="lumen-link-node", daemon=True)
         self.thread.start()
 
@@ -1686,40 +1701,82 @@ class LinkNodeRuntime:
         self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=2.0)
+        for thread in list(self.job_threads.values()):
+            thread.join(timeout=2.0)
 
     def _run(self) -> None:
         while not self.stop_event.wait(0.5):
-            state = self.spool.next_queued()
-            if state is None:
+            self.job_threads = {
+                job_id: thread
+                for job_id, thread in self.job_threads.items()
+                if thread.is_alive()
+            }
+            running = self.spool.list_jobs(limit=1_000)
+            running_types = {
+                str(job.get("job_type"))
+                for job in running
+                if job.get("status") == "running"
+            }
+            if STUDENT_TRAIN_JOB in running_types:
                 continue
-            job_id = str(state["job_id"])
-            self.spool.update_job(
-                job_id,
-                status="running",
-                stage="inference",
-                progress=None,
-                progress_kind="indeterminate",
-            )
-            try:
-                def publish_progress(resources: dict[str, Any]) -> None:
-                    stage = str(resources.get("stage") or "inference")
-                    self.spool.update_job(
-                        job_id,
-                        status="running",
-                        stage=stage,
-                        progress=None,
-                        progress_kind="indeterminate",
-                        resources=resources,
-                    )
-
-                result = self.executor.execute(
-                    state,
-                    progress_callback=publish_progress,
+            capacity = self.maximum_parallel_jobs - len(self.job_threads)
+            if capacity <= 0:
+                continue
+            queued = [
+                job for job in reversed(running)
+                if job.get("status") == "queued"
+            ]
+            if not queued:
+                continue
+            if queued[0].get("job_type") == STUDENT_TRAIN_JOB:
+                if self.job_threads:
+                    continue
+                queued = queued[:1]
+            else:
+                queued = [
+                    job for job in queued
+                    if job.get("job_type") != STUDENT_TRAIN_JOB
+                ][:capacity]
+            for state in queued:
+                job_id = str(state["job_id"])
+                self.spool.update_job(
+                    job_id,
+                    status="running",
+                    stage="inference",
+                    progress=None,
+                    progress_kind="indeterminate",
                 )
-                self.spool.save_result(job_id, result)
-                self.spool.update_job(job_id, status="complete", stage="complete", progress=1.0, resources=result.get("resources", {}))
-            except Exception as error:
-                self.spool.update_job(job_id, status="failed", stage="failed", error=str(error))
+                thread = threading.Thread(
+                    target=self._execute_job,
+                    args=(state,),
+                    name=f"lumen-link-job-{job_id[-8:]}",
+                    daemon=True,
+                )
+                self.job_threads[job_id] = thread
+                thread.start()
+
+    def _execute_job(self, state: dict[str, Any]) -> None:
+        job_id = str(state["job_id"])
+        try:
+            def publish_progress(resources: dict[str, Any]) -> None:
+                stage = str(resources.get("stage") or "inference")
+                self.spool.update_job(
+                    job_id,
+                    status="running",
+                    stage=stage,
+                    progress=None,
+                    progress_kind="indeterminate",
+                    resources=resources,
+                )
+
+            result = self.executor.execute(
+                state,
+                progress_callback=publish_progress,
+            )
+            self.spool.save_result(job_id, result)
+            self.spool.update_job(job_id, status="complete", stage="complete", progress=1.0, resources=result.get("resources", {}))
+        except Exception as error:
+            self.spool.update_job(job_id, status="failed", stage="failed", error=str(error))
 
     def health(self) -> dict[str, Any]:
         jobs = self.spool.list_jobs(limit=100)
@@ -1731,11 +1788,66 @@ class LinkNodeRuntime:
             "uptime_s": max(0.0, time.time() - self.started_at),
             "capabilities": {
                 **self.executor.capabilities(),
+                "maximum_parallel_jobs": self.maximum_parallel_jobs,
             },
             "node": _node_resources(),
             "queue": counts,
             "jobs": jobs[:50],
+            "active_slots": len(self.job_threads),
+            "maximum_parallel_jobs": self.maximum_parallel_jobs,
         }
+
+    def dashboard_status(self) -> dict[str, Any]:
+        """Read-only operational telemetry with no recording identity."""
+
+        health = self.health()
+        jobs = []
+        for item in health["jobs"][:24]:
+            resources = item.get("resources") or {}
+            jobs.append({
+                "job_type": item.get("job_type"),
+                "status": item.get("status"),
+                "stage": item.get("stage"),
+                "progress": item.get("progress"),
+                "created_unix_ms": item.get("created_unix_ms"),
+                "updated_unix_ms": item.get("updated_unix_ms"),
+                "elapsed_s": resources.get("elapsed_s"),
+                "peak_rss_bytes": resources.get("peak_rss_bytes"),
+                "threads": resources.get("threads"),
+            })
+        contact_age = (
+            None
+            if self.last_coordinator_contact_at is None
+            else max(0.0, time.time() - self.last_coordinator_contact_at)
+        )
+        return {
+            "service": "Lumen Link",
+            "node": health["node"],
+            "uptime_s": health["uptime_s"],
+            "connection": {
+                "state": (
+                    "connected"
+                    if contact_age is not None and contact_age <= 10.0
+                    else "waiting"
+                ),
+                "last_contact_age_s": contact_age,
+            },
+            "queue": health["queue"],
+            "active_slots": health["active_slots"],
+            "maximum_parallel_jobs": health["maximum_parallel_jobs"],
+            "jobs": jobs,
+        }
+
+
+_LINK_DASHBOARD_HTML = r'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lumen Link · Threadripper</title><style>
+:root{color-scheme:dark;--bg:#071012;--panel:#101d20;--line:#30484a;--cyan:#69cfc2;--gold:#d7a85e;--red:#d87870;--text:#bdd1cd;--muted:#718681}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#173236 0,transparent 38%),var(--bg);color:var(--text);font:15px system-ui,sans-serif}header{padding:28px 4vw 18px;border-bottom:1px solid var(--line)}h1{margin:4px 0;font-size:30px;letter-spacing:.04em}header span,.muted{color:var(--muted)}#heartbeat.connected{color:var(--cyan)}#heartbeat.waiting{color:var(--gold)}main{padding:22px 4vw;display:grid;gap:16px}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.card,.jobs{background:rgba(16,29,32,.9);border:1px solid var(--line);border-radius:5px;padding:16px;box-shadow:0 12px 35px #0005}.card b{display:block;color:var(--cyan);font:27px ui-monospace,monospace;margin-top:7px}.slots{height:10px;background:#071012;border:1px solid var(--line);margin-top:12px}.slots i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--gold));transition:width .4s}.job{display:grid;grid-template-columns:170px 120px 1fr 130px;gap:12px;padding:11px 0;border-top:1px solid #253a3c;align-items:center}.job:first-child{border:0}.state{color:var(--gold);font-family:ui-monospace,monospace}.bar{height:7px;background:#071012;overflow:hidden}.bar i{display:block;height:100%;background:var(--cyan)}.bar.indeterminate i{width:32%!important;animation:scan 1.2s ease-in-out infinite}@keyframes scan{0%{transform:translateX(-110%)}100%{transform:translateX(325%)}}@media(max-width:950px){.metrics{grid-template-columns:1fr 1fr}.job{grid-template-columns:1fr 1fr}.bar{grid-column:1/-1}}
+</style></head><body><header><span>REMOTE COMPUTE NODE</span><h1>Lumen Link · Threadripper</h1><span id="heartbeat">Waiting for worker telemetry…</span></header><main><section class="metrics"><div class="card">Lumen contact<b id="contact">—</b></div><div class="card">Worker uptime<b id="uptime">—</b></div><div class="card">CPU load · 1m<b id="cpu">—</b></div><div class="card">Parallel slots<b id="slots">—</b><div class="slots"><i id="slotbar"></i></div></div><div class="card">Queued<b id="queued">—</b></div><div class="card">Completed<b id="complete">—</b></div><div class="card">Memory available<b id="memory">—</b></div></section><section class="jobs"><h2>Compute flow</h2><div id="jobs" class="muted">No work has arrived.</div></section></main><script>
+const fmt=s=>s==null?'—':s<60?`${Math.round(s)}s`:s<3600?`${Math.floor(s/60)}m ${Math.round(s%60)}s`:`${Math.floor(s/3600)}h ${Math.round(s%3600/60)}m`;const gib=n=>n==null?'—':`${(n/1073741824).toFixed(1)} GiB`;
+async function tick(){try{const d=await fetch('/dashboard/status',{cache:'no-store'}).then(r=>r.json());const linked=d.connection.state==='connected';heartbeat.className=d.connection.state;heartbeat.textContent=`WORKER ONLINE · LUMEN ${linked?'CONNECTED':'WAITING'} · ${new Date().toLocaleTimeString()}`;contact.textContent=d.connection.last_contact_age_s==null?'never':fmt(d.connection.last_contact_age_s);uptime.textContent=fmt(d.uptime_s);cpu.textContent=`${Math.round(100*(d.node.load_1m||0)/Math.max(1,d.node.cpu_logical||1))}%`;slots.textContent=`${d.active_slots} / ${d.maximum_parallel_jobs}`;slotbar.style.width=`${100*d.active_slots/Math.max(1,d.maximum_parallel_jobs)}%`;queued.textContent=d.queue.queued||0;complete.textContent=d.queue.complete||0;memory.textContent=gib(d.node.memory_available_bytes);jobs.innerHTML=d.jobs.length?d.jobs.map(j=>`<div class="job"><b>${j.job_type||'compute'}</b><span class="state">${j.stage||j.status}</span><div class="bar ${j.progress==null&&j.status==='running'?'indeterminate':''}"><i style="width:${j.progress==null?(j.status==='complete'?100:12):100*j.progress}%"></i></div><span>${fmt(j.elapsed_s)} · ${gib(j.peak_rss_bytes)}</span></div>`).join(''):'No work has arrived.'}catch(e){heartbeat.className='waiting';heartbeat.textContent=`WORKER OFFLINE · ${e.message}`}}tick();setInterval(tick,1000);
+</script></body></html>'''
 
 
 class LinkNodeHandler(BaseHTTPRequestHandler):
@@ -1761,6 +1873,24 @@ class LinkNodeHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         try:
+            if self.path in {"/", "/dashboard"}:
+                body = _LINK_DASHBOARD_HTML.encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path == "/dashboard/status":
+                body = _json_bytes(self.server.runtime.dashboard_status())
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             self._authenticate(_sha256_bytes(b""))
             if self.path == "/v1/health":
                 self._json(HTTPStatus.OK, self.server.runtime.health())
@@ -1915,6 +2045,7 @@ class LinkNodeHandler(BaseHTTPRequestHandler):
 
     def _authenticate(self, body_hash: str) -> None:
         self.server.authenticator.verify(self.command, self.path, self.headers, body_hash)
+        self.server.runtime.note_coordinator_contact()
 
     def _json(self, status: HTTPStatus, value: Any) -> None:
         body = _json_bytes(value)
@@ -2295,6 +2426,13 @@ class LumenLinkCoordinator:
 
         capabilities = (self.remote_status or {}).get("capabilities") or {}
         maximum = int(capabilities.get("max_threads") or 24)
+        parallel = max(
+            1, int(capabilities.get("maximum_parallel_jobs") or 1)
+        )
+        if job_type in {EDMFORMER_JOB, SONGFORMER_JOB}:
+            # Leave each concurrently running teacher a fair share of the
+            # machine. Student training runs alone and may use every thread.
+            maximum = max(1, maximum // parallel)
         if job_type == EDMFORMER_JOB:
             # The validated EDMFormer runner has its own bounded attention
             # implementation and currently accepts at most eight threads.
@@ -2336,6 +2474,7 @@ class LumenLinkCoordinator:
                                 job_type, allow_contract_scan=True
                             )
                     self.route_queued_jobs(refresh=False)
+                self._prefill_remote_queue()
                 self._advance()
             except LinkStandbyRequired:
                 continue
@@ -2424,13 +2563,6 @@ class LumenLinkCoordinator:
         jobs = self._refresh_job_snapshot(
             force=refresh, precompute_students=True
         )
-        if any(
-            job.get("status") == "queued"
-            and (job.get("payload") or {}).get("execution_target")
-            == "threadripper"
-            for job in jobs
-        ):
-            return 0
         eligible = sorted(
             (
                 job
@@ -2449,7 +2581,22 @@ class LumenLinkCoordinator:
                 int(item.get("created_unix_ms") or 0),
             ),
         )
-        for job in eligible:
+        maximum = max(
+            1,
+            int(
+                ((self.remote_status or {}).get("capabilities") or {}).get(
+                    "maximum_parallel_jobs", 1
+                )
+            ),
+        )
+        already_routed = sum(
+            job.get("status") == "queued"
+            and (job.get("payload") or {}).get("execution_target")
+            == "threadripper"
+            for job in jobs
+        )
+        routed = 0
+        for job in eligible[: max(0, maximum - already_routed)]:
             target = str(
                 (job.get("payload") or {}).get("execution_target")
                 or "automatic"
@@ -2461,8 +2608,61 @@ class LumenLinkCoordinator:
                 )
             ):
                 self._invalidate_status()
-                return 1
-        return 0
+                routed += 1
+        return routed
+
+    def _prefill_remote_queue(self) -> int:
+        """Keep the Threadripper's parallel slots supplied ahead of import."""
+
+        if not self.can_import() or not self.remote_status:
+            return 0
+        capabilities = (self.remote_status.get("capabilities") or {})
+        maximum = max(1, int(capabilities.get("maximum_parallel_jobs") or 1))
+        remote_jobs = self.remote_status.get("jobs") or []
+        occupied_ids = {
+            str(job.get("job_id") or "")
+            for job in remote_jobs
+            if job.get("status") in {"queued", "running"}
+        }
+        capacity = maximum - len(occupied_ids)
+        if capacity <= 0:
+            return 0
+        active_id = str(((self.active or {}).get("job") or {}).get("id") or "")
+        candidates = [
+            job for job in self._job_snapshot
+            if job.get("status") == "queued"
+            and (job.get("payload") or {}).get("execution_target") == "threadripper"
+            and str(job.get("id") or "") not in occupied_ids
+            and str(job.get("id") or "") != active_id
+            and self._remote_is_compatible(str(job.get("job_type") or ""))
+        ]
+        candidates.sort(key=lambda item: (-int(item.get("priority") or 0), int(item.get("created_unix_ms") or 0)))
+        if candidates and candidates[0].get("job_type") == STUDENT_TRAIN_JOB:
+            if occupied_ids:
+                return 0
+            candidates = candidates[:1]
+        else:
+            candidates = [job for job in candidates if job.get("job_type") != STUDENT_TRAIN_JOB]
+        submitted = 0
+        client = self._client()
+        for job in candidates[:capacity]:
+            manifest = self._prepared_manifests.get(str(job["id"])) or self._manifest(job, jobs=self._job_snapshot)
+            sources = self._prepared_sources.get(str(job["id"])) or self._object_sources(job, manifest, jobs=self._job_snapshot)
+            # upload() acquires the standby guard once per chunk so Live can
+            # preempt a long transfer. Do not nest that non-reentrant guard.
+            for item, source in sources:
+                client.upload(
+                    source,
+                    str(item["sha256"]),
+                    chunk_guard=self._standby_guard,
+                )
+            with self._standby_guard():
+                client.submit(manifest)
+            self._prepared_manifests[str(job["id"])] = manifest
+            self._prepared_sources[str(job["id"])] = sources
+            submitted += 1
+            self._event("prefill", f"submitted {job['id']} to a parallel slot")
+        return submitted
 
     def _restore_queued_jobs(self) -> int:
         if not self.can_import():
@@ -3570,6 +3770,7 @@ def serve_link_node(
     project_root: Path,
     max_threads: int = 24,
     max_memory_gib: float = 96.0,
+    maximum_parallel_jobs: int = 4,
 ) -> None:
     spool = LinkSpool(spool_root)
     runtime = LinkNodeRuntime(
@@ -3581,6 +3782,7 @@ def serve_link_node(
             max_threads=max_threads,
             max_memory_gib=max_memory_gib,
         ),
+        maximum_parallel_jobs=maximum_parallel_jobs,
     )
     server = LinkNodeServer((host, port), spool=spool, authenticator=LinkAuthenticator(secret), runtime=runtime)
     runtime.start()

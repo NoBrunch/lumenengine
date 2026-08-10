@@ -2064,6 +2064,27 @@ class OfflineResearchTests(unittest.TestCase):
             self.assertEqual(job["job_type"], STUDENT_TRAIN_JOB)
             self.assertEqual(job["payload"]["epochs"], 1)
             self.assertIn(str(examples), job["payload"]["source_sha256"])
+            combined = Path(job["payload"]["examples_path"])
+            self.assertRegex(combined.name, r"^student-training-[0-9a-f]{64}\.jsonl$")
+            prepared = json.loads(combined.read_text(encoding="utf-8"))
+            self.assertEqual(prepared["features"], row["features"])
+            self.assertNotIn("target_provenance_details", prepared)
+
+            second = enqueue_student_training(
+                store,
+                research_root=research,
+                example_paths=[examples],
+                epochs=2,
+            )
+            jobs = store.list_analysis_jobs(limit=10)
+            first = next(item for item in jobs if item["id"] == queued["job_id"])
+            newest = next(item for item in jobs if item["id"] == second["job_id"])
+            self.assertEqual(first["status"], "canceled")
+            self.assertEqual(newest["status"], "queued")
+            self.assertEqual(
+                first["payload"]["examples_path"],
+                newest["payload"]["examples_path"],
+            )
 
     def test_automatic_training_ignores_unowned_example_files(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -22,6 +22,7 @@ $SshFirewallName = "Lumen Link SSH Bootstrap"
 $TaskName = "Lumen Link WSL Network Refresh"
 $ProgramRoot = Join-Path $env:ProgramData "LumenLink"
 $RefreshScript = Join-Path $ProgramRoot "refresh-portproxy.ps1"
+$DashboardShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Lumen Link Dashboard.url"
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -110,12 +111,18 @@ netsh interface portproxy add v4tov4 listenaddress=$ThreadripperAddress listenpo
     } else { "" }
     $content = @"
 `$ErrorActionPreference = "Stop"
-`$raw = (& wsl.exe -d "$Distro" -- hostname -I) -join " "
-`$wslAddress = ((`$raw -split "\s+") | Where-Object { `$_ -match '^\d+\.\d+\.\d+\.\d+`$' })[0]
-if (-not `$wslAddress) { throw "Could not resolve the WSL address" }
-netsh interface portproxy delete v4tov4 listenaddress=$ThreadripperAddress listenport=$WorkerPort 2>`$null | Out-Null
-netsh interface portproxy add v4tov4 listenaddress=$ThreadripperAddress listenport=$WorkerPort connectaddress=`$wslAddress connectport=$WorkerPort | Out-Null
+while (`$true) {
+  try {
+    & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null
+    `$raw = (& wsl.exe -d "$Distro" -- hostname -I) -join " "
+    `$wslAddress = ((`$raw -split "\s+") | Where-Object { `$_ -match '^\d+\.\d+\.\d+\.\d+`$' })[0]
+    if (-not `$wslAddress) { throw "Could not resolve the WSL address" }
+    netsh interface portproxy delete v4tov4 listenaddress=$ThreadripperAddress listenport=$WorkerPort 2>`$null | Out-Null
+    netsh interface portproxy add v4tov4 listenaddress=$ThreadripperAddress listenport=$WorkerPort connectaddress=`$wslAddress connectport=$WorkerPort | Out-Null
 $sshLines
+  } catch { }
+  Start-Sleep -Seconds 30
+}
 "@
     Set-Content -Path $RefreshScript -Value $content -Encoding UTF8
     $action = New-ScheduledTaskAction `
@@ -134,7 +141,10 @@ function Install-MirroredStartupTask {
     New-Item -ItemType Directory -Force -Path $ProgramRoot | Out-Null
     $content = @"
 `$ErrorActionPreference = "Stop"
-& wsl.exe -d "$Distro" -- true
+while (`$true) {
+  try { & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null } catch { }
+  Start-Sleep -Seconds 30
+}
 "@
     Set-Content -Path $RefreshScript -Value $content -Encoding UTF8
     $action = New-ScheduledTaskAction `
@@ -147,6 +157,11 @@ function Install-MirroredStartupTask {
         -Trigger $trigger `
         -RunLevel Highest `
         -Force | Out-Null
+}
+
+function Install-DashboardShortcut {
+    $content = "[InternetShortcut]`r`nURL=http://${ThreadripperAddress}:$WorkerPort/dashboard`r`n"
+    Set-Content -Path $DashboardShortcut -Value $content -Encoding ASCII
 }
 
 if (-not $Apply) {
@@ -239,8 +254,12 @@ if ($effectiveMode -eq "Nat") {
     Install-MirroredStartupTask
 }
 
+Install-DashboardShortcut
+
 Write-Host "Lumen Link Windows network applied."
 Write-Host "  Mode:      $effectiveMode"
 Write-Host "  Endpoint:  http://${ThreadripperAddress}:$WorkerPort"
 Write-Host "  Allowed:   $LumenAddress only"
+Write-Host "  Dashboard: http://${ThreadripperAddress}:$WorkerPort/dashboard"
+Write-Host "  Watchdog:  repairs WSL worker and forwarding every 30 seconds"
 Write-Host "No gateway or DNS was assigned to the direct Ethernet interface."

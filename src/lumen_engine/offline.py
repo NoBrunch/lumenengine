@@ -2051,6 +2051,31 @@ def _teacher_source(row: dict[str, Any]) -> str:
     return str(row.get("target_provenance") or "unknown")
 
 
+_TEACHER_MERGE_FIELDS = frozenset({
+    "recording_id", "capture_session_id", "audio_frame_index",
+    "recording_offset_ms", "position_ms", "split_group_id", "split",
+    "features", "functional", "energy", "content", "boundary",
+    "boundary_supervised", "milliseconds_since_boundary",
+    "target_confidence", "target_provenance", "target_provenance_details",
+    "teacher_run_id", "timeline_id", "structure_supervision",
+})
+
+_STUDENT_TRAINING_FIELDS = frozenset({
+    "recording_id", "capture_session_id", "audio_frame_index",
+    "recording_offset_ms", "position_ms", "split_group_id", "split",
+    "features", "functional", "energy", "content", "boundary",
+    "boundary_supervised", "milliseconds_since_boundary",
+})
+
+
+def _compact_example_row(
+    row: dict[str, Any], fields: frozenset[str]
+) -> dict[str, Any]:
+    """Keep only fields needed by fusion or numerical student training."""
+
+    return {name: row[name] for name in fields if name in row}
+
+
 def _authoritative_structure_row(row: dict[str, Any]) -> bool:
     source = _teacher_source(row).casefold()
     return any(teacher in source for teacher in ACTIVE_STRUCTURE_TEACHERS)
@@ -2598,16 +2623,25 @@ def enqueue_student_training(
             "no completed teacher runs in this Lumen database have usable "
             "student examples"
         )
-    combined = root / "exports" / "student-training.jsonl"
-    combined.parent.mkdir(parents=True, exist_ok=True)
-    partial = combined.with_suffix(".jsonl.partial")
+    exports = root / "exports"
+    exports.mkdir(parents=True, exist_ok=True)
+    partial = exports / f".student-training-{uuid.uuid4().hex}.partial"
     source_rows: list[dict[str, Any]] = []
     for path in paths:
-        source_rows.extend(_load_jsonl(path))
+        # Compact each file before loading the next. The old preparation path
+        # retained several kilobytes of repeated provenance per 10 Hz frame
+        # and then made multiple full-list copies.
+        source_rows.extend(
+            _compact_example_row(row, _TEACHER_MERGE_FIELDS)
+            for row in _iter_jsonl(path)
+        )
     merged_rows, merge_report = _merge_teacher_example_rows(
         source_rows,
         authoritative_only=not bool(example_paths),
     )
+    # Merged rows retain references to the selected invariant feature vectors;
+    # the duplicate source dictionaries are no longer needed.
+    del source_rows
     consensus_report: dict[str, Any] = {
         "revision": store.operator_consensus_revision(),
         "rows_corrected": 0,
@@ -2619,6 +2653,10 @@ def enqueue_student_training(
         )
         merged_rows, correction_report = (
             _apply_operator_timeline_corrections(store, merged_rows)
+        )
+    for index, row in enumerate(merged_rows):
+        merged_rows[index] = _compact_example_row(
+            row, _STUDENT_TRAINING_FIELDS
         )
     rows = len(merged_rows)
     with partial.open("w", encoding="utf-8") as output:
@@ -2643,12 +2681,33 @@ def enqueue_student_training(
         raise RuntimeError(
             "teacher examples require at least two complete training songs"
         )
-    partial.replace(combined)
+    combined_sha256 = _hash_file(partial)
+    combined = exports / f"student-training-{combined_sha256}.jsonl"
+    if combined.is_file():
+        if _hash_file(combined) != combined_sha256:
+            partial.unlink(missing_ok=True)
+            raise RuntimeError("content-addressed student dataset is corrupt")
+        partial.unlink(missing_ok=True)
+    else:
+        partial.replace(combined)
+    # Only the newest explicit request remains runnable. Previously every job
+    # referenced one mutable student-training.jsonl, so later preparation
+    # silently invalidated earlier queued manifests.
+    for existing in store.list_analysis_jobs(limit=10_000):
+        if (
+            existing.get("job_type") == STUDENT_TRAIN_JOB
+            and existing.get("status") == "queued"
+        ):
+            store.update_analysis_job(
+                str(existing["id"]),
+                status="canceled",
+                error="superseded by a newer trusted training snapshot",
+            )
     job_id = store.enqueue_analysis_job(
         job_type=STUDENT_TRAIN_JOB,
         payload={
             "examples_path": str(combined),
-            "examples_sha256": _hash_file(combined),
+            "examples_sha256": combined_sha256,
             "epochs": max(1, int(epochs)),
             "output_path": str(
                 root / "models" / "lumen-structure-student.npz"
@@ -3427,6 +3486,27 @@ def training_readiness(
         evaluation.get("teacher_fusion_version")
         == TEACHER_FUSION_VERSION
     )
+    newly_trusted_run_ids = trusted_run_ids - trained_run_ids
+    retired_trained_run_ids = trained_run_ids - trusted_run_ids
+    candidate_stale_reasons: list[str] = []
+    if newly_trusted_run_ids:
+        candidate_stale_reasons.append(
+            f"{len(newly_trusted_run_ids)} newly trusted teacher run(s) arrived"
+        )
+    if retired_trained_run_ids:
+        candidate_stale_reasons.append(
+            f"{len(retired_trained_run_ids)} prior teacher run(s) are no longer trusted"
+        )
+    if trained_consensus_revision != trusted_consensus_revision:
+        candidate_stale_reasons.append("operator timeline corrections changed")
+    if isinstance(evaluation, dict) and evaluation.get(
+        "activation_gate_version"
+    ) != STUDENT_ACTIVATION_GATE_VERSION:
+        candidate_stale_reasons.append("qualification gate version changed")
+    if isinstance(evaluation, dict) and evaluation.get(
+        "teacher_fusion_version"
+    ) != TEACHER_FUSION_VERSION:
+        candidate_stale_reasons.append("teacher fusion version changed")
     active_provenance_current = bool(
         active_model.is_file()
         and isinstance(active_evaluation, dict)
@@ -3519,6 +3599,8 @@ def training_readiness(
             "evaluation": evaluation,
             "active_evaluation": active_evaluation,
             "candidate_provenance_current": candidate_provenance_current,
+            "candidate_stale_reasons": candidate_stale_reasons,
+            "newly_trusted_teacher_runs": len(newly_trusted_run_ids),
             "candidate_teacher_run_ids": sorted(trained_run_ids),
             "trusted_teacher_run_ids": sorted(trusted_run_ids),
             "candidate_operator_consensus_revision": trained_consensus_revision,
@@ -4183,12 +4265,18 @@ def _hash_file(path: Path) -> str:
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    return list(_iter_jsonl(path))
+
+
+def _iter_jsonl(path: Path) -> Iterable[dict[str, Any]]:
     with path.open("r", encoding="utf-8") as source:
-        return [
-            json.loads(line)
-            for line in source
-            if line.strip()
-        ]
+        for line in source:
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise ValueError(f"JSONL row in {path} is not an object")
+            yield value
 
 
 def _git_revision(path: Path) -> str | None:

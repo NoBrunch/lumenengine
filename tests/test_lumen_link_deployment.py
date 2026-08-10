@@ -54,6 +54,8 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn("DRY-RUN:", network.stdout)
         self.assertIn("192.168.50.2/24", network.stdout)
         self.assertIn("ipv4.never-default", network.stdout)
+        self.assertIn("connection.autoconnect-priority", network.stdout)
+        self.assertIn("connection.autoconnect-retries", network.stdout)
         self.assertNotIn("--apply", network.stdout)
 
         pairing = subprocess.run(
@@ -77,6 +79,7 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         script = (ROOT / "scripts/lumen-link-wsl").read_text(encoding="utf-8")
         self.assertIn('link-node "${worker_arguments[@]}"', script)
         self.assertIn('"--max-memory-gib"', script)
+        self.assertIn('"--maximum-parallel-jobs"', script)
         self.assertNotIn("link-worker --config", script)
         self.assertIn("CORE_PYTHON_VERSION=3.12.8", script)
         self.assertIn("SONGFORMER_PYTHON_VERSION=3.10.20", script)
@@ -96,6 +99,7 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("scripts/lumen-link-wsl run", service)
         self.assertIn("UMask=0077", service)
+        self.assertIn("Restart=always", service)
 
     def test_windows_setup_has_explicit_apply_and_restricted_firewall(self) -> None:
         script = (ROOT / "scripts/lumen-link-windows.ps1").read_text(
@@ -103,6 +107,8 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         )
         self.assertIn("[switch]$Apply", script)
         self.assertIn('if (-not $Apply)', script)
+        self.assertIn("Lumen Link Dashboard.url", script)
+        self.assertIn("Start-Sleep -Seconds 30", script)
         self.assertIn("-RemoteAddress $LumenAddress", script)
         self.assertIn("-LocalAddress $ThreadripperAddress", script)
         self.assertIn("Lumen Link WSL Network Refresh", script)
@@ -128,8 +134,9 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         guide = (ROOT / "docs/lumen-link-wsl-deployment.md").read_text(
             encoding="utf-8"
         )
-        self.assertIn("routes only one job at a", guide)
+        self.assertIn("up to four teacher slots", guide)
         self.assertIn("Other queued", guide)
+        self.assertIn("Lumen Link Dashboard", guide)
         self.assertNotIn("select one completed EDM recording", guide)
         self.assertIn("physical acceptance work", guide)
         self.assertIn("all three job types as `READY`", guide)

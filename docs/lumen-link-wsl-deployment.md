@@ -7,10 +7,11 @@ artifacts. Lumen remains the sole authority for line-in timing, feedback, song
 memory, model activation, choreography and DMX. If the cable is unplugged or
 Windows restarts, Live continues and remote jobs remain durable.
 
-The operator dashboard stays in Lumen's KDE-inspired interface. It shows the
-node connection, CPU, memory and disk telemetry, current song/job, stage,
-progress, completed/queued work and the last verified result. The WSL side is
-deliberately headless.
+Lumen provides its coordinator console, and the Threadripper also hosts a
+KDE-inspired, read-only compute dashboard. It shows truthful Lumen-contact
+state, worker uptime, memory, parallel slots, job stage, progress, queue and
+completion counts. Windows receives a **Lumen Link Dashboard** desktop
+shortcut, while the WSL worker remains headless.
 
 ```text
 Lumen PC                                      Windows + WSL Threadripper
@@ -406,9 +407,9 @@ job's code, teacher/model, preprocessing and ontology contract with the Lumen
 PC before allowing it to be routed.
 
 There is intentionally no per-song offload selector. The coordinator chooses
-the next eligible automatic supported job and routes only one job at a time.
-Teacher work naturally precedes the student-training job that consumes its
-examples. Use that behavior for the first canary:
+eligible automatic jobs and keeps up to four teacher slots supplied. A
+student-training job waits for the teacher jobs and then runs alone so it may
+use the full Threadripper. Use one job as the first canary:
 
 1. Press **Enable link**. Wait for the first job to appear as uploading or
    running.
@@ -418,7 +419,7 @@ examples. Use that behavior for the first canary:
 3. Inspect that job's result and event history. For a teacher job, inspect the
    imported timeline. For `student.train`, inspect the candidate and held-out
    evaluation; activation remains a separate local decision.
-4. If the canary is correct, press **Enable link** again for sequential bulk
+4. If the canary is correct, press **Enable link** again for parallel bulk
    processing. **Pause dispatch** temporarily stops new routing; **Disable
    link** returns unstarted queued work to automatic/local eligibility. An
    already-active remote process is never discarded mid-result.
@@ -438,6 +439,26 @@ During the canary, confirm:
 
 Those cable/restart cases are physical acceptance work, not claims that this
 deployment package has already exercised the two computers.
+
+### Threadripper-local dashboard
+
+After applying the Windows setup, open **Lumen Link Dashboard** from the
+Threadripper's Windows desktop, or browse locally to:
+
+```text
+http://192.168.50.1:8765/dashboard
+```
+
+**WORKER ONLINE** means the WSL service and dashboard are responding.
+**LUMEN CONNECTED** means an authenticated request arrived from the Lumen PC
+within ten seconds; **LUMEN WAITING** means the worker is available but has not
+heard from the coordinator recently. The page never exposes song identity,
+recording identity, manifests, tokens or the pairing secret.
+
+The installed Windows scheduled watchdog starts WSL, repairs NAT forwarding
+when required, and restarts the worker service every 30 seconds. The WSL
+service itself uses `Restart=always`. After the one-time installation, normal
+Lumen or Windows restarts do not require terminal commands to reconnect.
 
 ## Updating Lumen Link
 

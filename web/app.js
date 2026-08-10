@@ -2894,9 +2894,13 @@ function renderResearch(research = {}) {
       readiness.textContent += recoveryNote;
       readiness.className = "research-readiness";
     } else if (staleCandidate) {
+      const staleReasons = model.candidate_stale_reasons || [];
+      const staleDetail = staleReasons.length
+        ? ` Snapshot changed: ${staleReasons.join("; ")}.`
+        : " The trusted training snapshot changed after this candidate was produced.";
       readiness.textContent = training.activation_ready === false
         ? `The saved candidate predates the current qualification gate. Activation remains locked: ${(training.activation_blockers || []).join("; ")}. Collect complete, identified, previously unseen songs before the next qualifying train; a diagnostic pass may still be run now.`
-        : "The saved candidate was trained from an older manifest or qualification gate. Train again so validation uses the current trusted examples, song splits, and event metrics.";
+        : `The saved candidate remains a valid result for its original snapshot, but it does not include the latest trusted data.${staleDetail} Finish the current analysis queue, then train one new snapshot.`;
       readiness.textContent += recoveryNote;
       readiness.className = "research-readiness";
     } else if (training.train_ready) {

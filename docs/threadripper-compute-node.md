@@ -114,6 +114,9 @@ The software package now provides:
 6. Remote full-song EDMFormer and SongFormer processing, student training, and
    held-out evaluation. Validated causal students and exact-song timelines
    remain on Lumen for network-independent Live operation.
+7. A Threadripper-local Lumen-style compute dashboard, four parallel teacher
+   slots, exclusive full-machine student training, and restart watchdogs for
+   both the WSL worker and Windows NAT forwarding.
 
 Offline show simulation remains a later capability. The two-PC cable,
 restart/resume, and local-versus-remote parity checks remain physical

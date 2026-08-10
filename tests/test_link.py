@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 import shutil
 import wave
+from urllib.request import urlopen
 
 from lumen_engine.link import (
     LINK_SCHEMA,
@@ -268,6 +269,67 @@ class LinkTests(unittest.TestCase):
                 headers,
                 hashlib.sha256(b"").hexdigest(),
             )
+
+    def test_authenticated_health_marks_lumen_contact_on_dashboard(self):
+        before = self.runtime.dashboard_status()
+        self.assertEqual(before["connection"]["state"], "waiting")
+        self.client.health()
+        after = self.runtime.dashboard_status()
+        self.assertEqual(after["connection"]["state"], "connected")
+        self.assertLess(after["connection"]["last_contact_age_s"], 1.0)
+
+    def test_threadripper_dashboard_is_read_only_and_identity_free(self):
+        with urlopen(self.client.endpoint + "/dashboard", timeout=2) as response:
+            html = response.read().decode()
+        with urlopen(self.client.endpoint + "/dashboard/status", timeout=2) as response:
+            status = json.loads(response.read())
+        self.assertIn("Lumen Link · Threadripper", html)
+        self.assertIn("active_slots", status)
+        self.assertIn("maximum_parallel_jobs", status)
+        self.assertIn("connection", status)
+        self.assertNotIn("manifest", json.dumps(status))
+        self.assertNotIn("recording_id", json.dumps(status))
+
+    def test_threadripper_runs_four_teacher_jobs_concurrently(self):
+        release = threading.Event()
+        lock = threading.Lock()
+
+        class BlockingExecutor(FakeExecutor):
+            def __init__(self):
+                self.active = 0
+                self.peak = 0
+
+            def execute(self, state, progress_callback=None):
+                with lock:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                try:
+                    release.wait(timeout=3.0)
+                    return super().execute(state, progress_callback)
+                finally:
+                    with lock:
+                        self.active -= 1
+
+        executor = BlockingExecutor()
+        self.runtime.executor = executor
+        source = self.root / "parallel.wav"
+        source.write_bytes(b"RIFF-parallel-teacher-input")
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.client.upload(source, digest)
+        try:
+            for index in range(4):
+                self.client.submit(
+                    manifest(f"job:parallel:{index}", digest, source.stat().st_size)
+                )
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and executor.peak < 4:
+                time.sleep(0.02)
+            self.assertEqual(executor.peak, 4)
+            health = self.client.health()
+            self.assertEqual(health["maximum_parallel_jobs"], 4)
+            self.assertEqual(health["active_slots"], 4)
+        finally:
+            release.set()
 
     def test_chunk_upload_resumes_and_rejects_corruption(self):
         content = b"Lumen immutable recording" * 200

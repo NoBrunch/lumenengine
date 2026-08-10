@@ -132,10 +132,13 @@ sending work. The running worker must advertise `teacher.edmformer`,
 evaluation and candidate-artifact return. Codex must stop if any is gated.
 
 For the canary, press **Enable link**, wait until its automatically chosen
-single supported job is active, then press **Disable link**. The active job is
+supported job is active, then press **Disable link**. Active remote work is
 allowed to finish and import; other queued automatic jobs return to local
 eligibility. Inspect its verified result. If accepted, press **Enable link**
-again for sequential bulk processing. There is no per-song selector.
+again for bulk processing. Up to four teacher jobs may run concurrently;
+student training runs exclusively. There is no per-song selector. The
+Threadripper-local read-only dashboard is at
+`http://192.168.50.1:8765/dashboard`.
 Codex should inspect status, progress, result checksums and service logs
 without opening, copying or summarizing song audio.
 

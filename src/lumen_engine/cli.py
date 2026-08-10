@@ -325,6 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     link_node.add_argument("--max-threads", type=int, default=24)
     link_node.add_argument("--max-memory-gib", type=float, default=96.0)
+    link_node.add_argument("--maximum-parallel-jobs", type=int, default=4)
     link_node.set_defaults(handler=_link_node)
 
     ui = subparsers.add_parser(
@@ -920,6 +921,8 @@ def _link_node(args: argparse.Namespace) -> int:
         raise ValueError("--max-threads must be at least 1")
     if args.max_memory_gib < 1:
         raise ValueError("--max-memory-gib must be at least 1")
+    if args.maximum_parallel_jobs < 1:
+        raise ValueError("--maximum-parallel-jobs must be at least 1")
     print(
         f"Lumen Link compute node: http://{args.host}:{args.port} "
         f"(spool {args.spool})"
@@ -933,6 +936,7 @@ def _link_node(args: argparse.Namespace) -> int:
         project_root=PROJECT_DIR,
         max_threads=args.max_threads,
         max_memory_gib=args.max_memory_gib,
+        maximum_parallel_jobs=args.maximum_parallel_jobs,
     )
     return 0
 

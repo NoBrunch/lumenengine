@@ -1104,9 +1104,27 @@ latency, queue, active job stage, transfer volume, worker resources, event
 history, and supported versus gated capabilities. The phone/tablet interface
 has a compact status card. **Test connection**, **Enable link**, **Pause
 dispatch**, **Resume dispatch**, and **Disable link** change only the offline
-coordinator. It routes one eligible automatic job at a time. Disabling returns
+coordinator. It keeps up to four teacher jobs supplied to the Threadripper;
+student training runs alone because it consumes the complete trusted dataset.
+Disabling returns
 unstarted jobs to local eligibility while an active remote job drains to its
 verified result.
+
+The Threadripper worker also serves a read-only Lumen-style dashboard at
+`http://192.168.50.1:8765/dashboard`. It shows heartbeat, worker uptime,
+parallel-slot use, queue totals, memory headroom, stages, elapsed time, and
+peak memory without exposing recording or song identities. The Windows setup
+installs a desktop shortcut and a 30-second watchdog that starts the WSL user
+service and repairs NAT forwarding after Windows or WSL restarts. The worker
+service uses an always-restart policy; ordinary Lumen restarts reconnect
+without operator commands.
+
+Student preparation writes a compact, content-addressed numerical snapshot.
+Rich per-frame teacher provenance stays in immutable teacher exports rather
+than being repeated inside every training row. A new Train request cancels
+older queued snapshots instead of overwriting their input path. This prevents
+the multi-copy memory pressure and mechanical-disk swap storm observed on the
+16 GiB Lumen PC.
 
 An authenticated worker with a different code or asset contract is reported
 as **INCOMPATIBLE**, not Offline. The dashboard shows both short revisions and
