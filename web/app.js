@@ -234,10 +234,13 @@ function researchServerTask(research = app.bootstrap?.research || {}) {
     student_training: "Training the temporal model",
   };
   if (preparation) {
+    const stage = label(research.preparation?.stage || "preparing");
+    const progress = Number(research.preparation?.progress);
     return {
       title: "Preparing captured audio",
-      detail: "Verifying continuity, recording identity, checksums, and full-song eligibility.",
-      startedAt: app.researchTaskStartedAt,
+      detail: `${stage}${Number.isFinite(progress) ? ` · ${Math.round(clamp(progress) * 100)}%` : ""} · ${research.preparation?.detail || "Verifying continuity, recording identity, checksums, and full-song eligibility."}`,
+      startedAt: Number(research.preparation?.started_unix_ms)
+        || app.researchTaskStartedAt,
     };
   }
   if (worker.cancel_requested) {
@@ -590,7 +593,7 @@ async function initialize() {
     renderStatus();
     await refreshSongTeaching();
     await refreshStructureLibrary();
-    refreshSpotifyConsole(false);
+    if (!app.remote) refreshSpotifyConsole(false);
     app.disconnected = false;
     $("loading-screen").classList.add("loaded");
   } catch (error) {
@@ -630,9 +633,16 @@ async function pollStatus() {
       (app.page === "link" && app.pollCount % 10 === 0)
       || (app.remote && app.pollCount % 100 === 0)
     ) void refreshLink(false);
-    const researchRunning = Boolean(app.bootstrap?.research?.worker?.running);
-    if (app.page === "audio" && app.pollCount % (researchRunning ? 50 : 300) === 0) void refreshResearch();
-    const spotifyVisible = app.page === "music" || app.remote;
+    const researchRunning = Boolean(
+      app.bootstrap?.research?.worker?.running
+      || app.bootstrap?.research?.preparation?.running
+      || app.bootstrap?.research?.preparation?.pending
+    );
+    if (
+      (app.page === "audio" || researchRunning)
+      && app.pollCount % (researchRunning ? 10 : 300) === 0
+    ) void refreshResearch();
+    const spotifyVisible = app.page === "music";
     if (spotifyVisible && app.pollCount % 50 === 0 && app.system?.spotify?.token_present) {
       refreshSpotifyConsole(false);
     }
@@ -743,9 +753,7 @@ function renderRehearsal(rehearsal = {}) {
     "rehearsal-size": Number(rehearsal.size) * 100,
     "rehearsal-intensity": Number(rehearsal.intensity) * 100,
     "rehearsal-strobe": Number(rehearsal.strobe) * 100,
-    "rehearsal-palette": rehearsal.palette,
   };
-  renderColorOptions(rehearsal.palette);
   for (const [id, value] of Object.entries(values)) {
     const element = $(id);
     if (element && document.activeElement !== element && value !== undefined) element.value = value;
@@ -790,7 +798,6 @@ function colorStudioSettings() {
 
 function renderColorOptions(selected = "") {
   const select = $("rehearsal-palette");
-  if (!select) return;
   const settings = app.bootstrap?.settings || {};
   const families = settings.palette_families || ["auto", "party_vivid", "midnight_teal", "cool", "warm", "magenta_blue", "cyan_violet", "red_amber"];
   const colors = colorStudioSettings().colors || {};
@@ -798,9 +805,11 @@ function renderColorOptions(selected = "") {
     ...families.map((value) => [value, value === "auto" ? "Automatic" : label(value)]),
     ...Object.keys(colors).map((value) => [value, `Solid · ${label(value)}`]),
   ];
-  const existing = options.map(([value, name]) => `<option value="${escapeHtml(value)}">${escapeHtml(name)}</option>`).join("");
-  if (select.innerHTML !== existing) select.innerHTML = existing;
-  if (selected) select.value = selected;
+  if (select) {
+    const existing = options.map(([value, name]) => `<option value="${escapeHtml(value)}">${escapeHtml(name)}</option>`).join("");
+    if (select.innerHTML !== existing) select.innerHTML = existing;
+    if (selected) select.value = selected;
+  }
   const calibration = $("calibration-color");
   if (calibration) {
     const solidOptions = Object.keys(colors).map((value) => `<option value="${escapeHtml(value)}">Solid · ${escapeHtml(label(value))}</option>`).join("");
@@ -1252,7 +1261,6 @@ function rehearsalFormValues() {
     size: Number($("rehearsal-size")?.value || 100) / 100,
     intensity: Number($("rehearsal-intensity")?.value || 68) / 100,
     strobe: Number($("rehearsal-strobe")?.value || 0) / 100,
-    palette: $("rehearsal-palette")?.value || "party_vivid",
     isolate: Boolean($("rehearsal-isolate")?.checked),
   };
 }
@@ -2464,25 +2472,40 @@ function renderLink(link = {}) {
     remote.address || setup.endpoint || "Awaiting WSL node",
   );
 
+  const localQueue = queue.local || {};
+  const linkQueue = queue.link || {};
+  const remoteQueue = queue.remote || {};
   const hasLocalCompletionCount = queue.completed !== undefined
     || queue.imported !== undefined || queue.locally_imported !== undefined;
   const completedCount = queue.completed ?? queue.imported
     ?? queue.locally_imported ?? queue.remote?.complete;
   for (const [id, value] of [
-    ["link-queued", queue.queued],
-    ["link-running", queue.running ?? queue.remote?.running],
+    ["link-queued", localQueue.queued ?? queue.queued],
+    ["link-running", queue.running ?? remoteQueue.running],
     ["link-completed", completedCount],
-    ["link-failed", queue.failed ?? queue.remote?.failed],
+    ["link-failed", queue.failed ?? linkQueue.failed ?? remoteQueue.failed],
   ]) setText(id, Number(value || 0).toLocaleString());
   setText(
+    "link-queued-detail",
+    `${Number(remoteQueue.queued || 0).toLocaleString()} staged remotely · eligible local queue`,
+  );
+  setText(
     "link-completed-detail",
-    hasLocalCompletionCount ? "locally verified and imported" : "remote finished · import unconfirmed",
+    hasLocalCompletionCount
+      ? `${Number(queue.recent_imports || 0).toLocaleString()} recent receipts shown · verified lifetime total`
+      : "remote finished · import unconfirmed",
   );
   setText("remote-link-queued", Number(queue.queued || 0).toLocaleString());
   setText("remote-link-running", Number(queue.running ?? queue.remote?.running ?? 0).toLocaleString());
   setText("link-transfer-total", formatBytes(queue.bytes_transferred));
   setText("link-transfer-pending", formatBytes(queue.bytes_pending ?? queue.bytes));
-  setText("link-queue-state", link.paused ? "PAUSED" : Number(queue.running ?? queue.remote?.running ?? 0) ? "ACTIVE" : "IDLE");
+  const runningCount = Number(queue.running ?? remoteQueue.running ?? 0);
+  const waitingCount = Number(localQueue.queued ?? queue.queued ?? 0)
+    + Number(remoteQueue.queued || 0);
+  setText(
+    "link-queue-state",
+    link.paused ? "PAUSED" : runningCount ? "ACTIVE" : waitingCount ? "WAITING" : "IDLE",
+  );
 
   const recentImports = Array.isArray(link.recent_imports) ? link.recent_imports : [];
   const importedByJob = new Map(
@@ -2837,7 +2860,9 @@ function renderResearch(research = {}) {
       readiness.textContent = "Refreshing the offline training summary in the background. Live audio, lighting, Spotify, and this console remain responsive.";
       readiness.className = "research-readiness active";
     } else if (preparationRunning) {
-      readiness.textContent = "Preparing the most recent capture: verifying continuity, song identity, and full-song eligibility before teacher jobs are queued.";
+      const preparation = research.preparation || {};
+      const progress = Number(preparation.progress);
+      readiness.textContent = `${label(preparation.stage || "preparing")} ${Number.isFinite(progress) ? `${Math.round(clamp(progress) * 100)}%: ` : ""}${preparation.detail || "Preparing the most recent capture before teacher jobs are queued."}`;
       readiness.className = "research-readiness active";
     } else if (research.worker?.running) {
       const done = Number(workerProgress.processed || 0);
@@ -3288,7 +3313,6 @@ function renderSpotifyConsole() {
   $("spotify-console-setup")?.classList.toggle("hidden", Boolean(spotify.connected));
   $("spotify-console-connected")?.classList.toggle("hidden", !spotify.connected);
   if (!spotify.connected) return;
-  renderRemoteSpotify(spotify);
 
   const playback = spotify.playback || {};
   const track = playback.track || {};
@@ -3507,21 +3531,6 @@ function updateSpotifyProgressDisplay() {
   if ($("spotify-seek") && document.activeElement !== $("spotify-seek")) {
     $("spotify-seek").value = duration ? Math.round(clamp(progress / duration) * 1000) : 0;
   }
-}
-
-function renderRemoteSpotify(spotify) {
-  const playback = spotify.playback || {};
-  const track = playback.track || {};
-  setText("remote-spotify-state", playback.is_playing ? "PLAYING" : track.name ? "PAUSED" : "IDLE");
-  setText("remote-spotify-title", track.name || "No active Spotify track");
-  setText("remote-spotify-artist", track.artists?.join(", ") || "Connect Spotify on the console");
-  if ($("remote-spotify-play")) $("remote-spotify-play").textContent = playback.is_playing ? "❚❚" : "▶";
-  const select = $("remote-spotify-playlist");
-  if (select) {
-    select.innerHTML = `<option value="">Choose playlist…</option>${(spotify.playlists || []).map((playlist) => `<option value="${escapeHtml(playlist.id || "")}" ${playlist.id === app.spotifyPlaylistId ? "selected" : ""}>${escapeHtml(playlist.name || "Untitled playlist")}</option>`).join("")}`;
-    select.disabled = !spotify.library_authorized;
-  }
-  if ($("remote-spotify-message")) $("remote-spotify-message").textContent = spotify.message || (spotify.library_authorized ? "Choose a playlist or use the transport controls." : "Connect Spotify with playlist access on the desktop console.");
 }
 
 function selectedSpotifyDeviceId() {
@@ -4839,7 +4848,7 @@ function installHandlers() {
       window.setTimeout(startRehearsal, 250);
     } else startRehearsal();
   });
-  ["rehearsal-output", "rehearsal-scope", "rehearsal-palette", "rehearsal-isolate"].forEach((id) => {
+  ["rehearsal-output", "rehearsal-scope", "rehearsal-isolate"].forEach((id) => {
     $(id)?.addEventListener("change", () => patchRehearsal(rehearsalFormValues()));
   });
   ["rehearsal-bpm", "rehearsal-size", "rehearsal-intensity", "rehearsal-strobe"].forEach((id) => {
@@ -5223,18 +5232,6 @@ function installHandlers() {
   });
   $("spotify-connect-button")?.addEventListener("click", connectSpotify);
   $("spotify-refresh-button")?.addEventListener("click", () => refreshSpotifyConsole(true));
-  $("remote-spotify-refresh")?.addEventListener("click", () => refreshSpotifyConsole(true));
-  $("remote-spotify-previous")?.addEventListener("click", () => spotifyCommand("previous"));
-  $("remote-spotify-play")?.addEventListener("click", () => spotifyCommand(app.spotify?.playback?.is_playing ? "pause" : "play"));
-  $("remote-spotify-next")?.addEventListener("click", () => spotifyCommand("next"));
-  $("remote-spotify-playlist")?.addEventListener("change", (event) => {
-    app.spotifyPlaylistId = event.target.value || "";
-    refreshSpotifyConsole(true, "");
-  });
-  $("remote-spotify-play-playlist")?.addEventListener("click", () => {
-    const playlist = (app.spotify?.playlists || []).find((item) => item.id === app.spotifyPlaylistId);
-    if (playlist?.uri) spotifyCommand("play", { context_uri: playlist.uri });
-  });
   $("spotify-search-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     app.spotifyPlaylistId = "";

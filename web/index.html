@@ -387,7 +387,6 @@
                   <label><span>Audition scale <output id="rehearsal-size-value">100%</output></span><input id="rehearsal-size" type="range" min="0" max="100" step="1" value="100"></label>
                   <label><span>Intensity <output id="rehearsal-intensity-value">68%</output></span><input id="rehearsal-intensity" type="range" min="0" max="100" step="1" value="68"></label>
                   <label><span>Strobe <output id="rehearsal-strobe-value">Off</output></span><input id="rehearsal-strobe" type="range" min="0" max="100" step="1" value="0"></label>
-                  <label><span>Palette family</span><select id="rehearsal-palette"><option value="pure_blue" selected>Solid · Pure blue</option><option value="auto">Automatic</option><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
                   <label class="check-control"><input id="rehearsal-isolate" type="checkbox" checked><span>Darken fixtures outside selected scope</span></label>
                 </div>
                 <button id="rehearsal-start" class="rehearsal-start">Start selected routine</button>
@@ -432,7 +431,6 @@
                     <label><span>Pod B start phase <output id="center-arm-2-phase-value">0%</output></span><input id="center-arm-2-phase" data-center-motion-control type="range" min="0" max="100" step="1" value="0"></label>
                     <label><span>Pod B direction</span><select id="center-arm-2-direction" data-center-motion-control><option value="1">Forward</option><option value="-1">Reverse</option></select></label>
                     <label><span>Emitters</span><select id="center-emitter-pattern" data-center-motion-control><option value="both">Center + pods</option><option value="alternate">Alternate center / pods</option><option value="ball">Center lens only</option><option value="arms">Pod beams only</option><option value="chase">Emitter chase</option></select></label>
-                    <label><span>Color behavior</span><select id="center-color-pattern" data-center-motion-control><option value="palette">Selected palette</option><option value="alternate">Alternate within palette</option><option value="opposed">Opposed colors</option><option value="pulse">Beat pulse</option></select></label>
                     <label><span>Laser behavior</span><select id="center-laser-mode" data-center-motion-control><option value="off">Off</option><option value="steady">Steady</option><option value="beat">On beat</option><option value="alternate">Alternate red / green</option></select></label>
                     <label><span>Laser level <output id="center-laser-level-value">65%</output></span><input id="center-laser-level" data-center-motion-control type="range" min="0" max="100" step="1" value="65"></label>
                     <label><span>Segmented ring program <output id="center-strip-program-value">0</output></span><input id="center-strip-program" data-center-motion-control type="range" min="0" max="255" step="1" value="0"></label>
@@ -461,7 +459,7 @@
                   <div class="teaching-lane"><span>Movers actually output</span><b id="teaching-movers-output">Waiting</b><small id="teaching-movers-detail">No effective cue</small><button data-capture-live-cue="movers">Load this cue into editor</button></div>
                   <div class="teaching-lane"><span>Center actually output</span><b id="teaching-center-output">Waiting</b><small id="teaching-center-detail">No effective cue</small><button data-capture-live-cue="center">Load this cue into editor</button></div>
                 </div>
-                <p class="teaching-reference-help">Loading a cue copies the complete observed output into the editor. Nothing is taught until you inspect its routine, speed, travel, activity, brightness, palette, strobe state, duration, and then save it at the intended song position.</p>
+                <p class="teaching-reference-help">Loading a cue copies the complete observed output into the editor. Nothing is taught until you inspect its routine, speed, travel, activity, brightness, strobe state, duration, and then save it at the intended song position.</p>
               </section>
               <section class="panel sequence-editor-panel">
                 <div class="panel-titlebar"><h3>Song Timeline &amp; Sequence Editor</h3><span id="sequence-song-position" class="panel-note">No identified song</span></div>
@@ -508,30 +506,9 @@
                   <div class="gesture-movement-actions"><button id="gesture-movement-add" type="button">+ Add selected movement</button><button id="gesture-movement-edit" type="button">Edit selected movement</button><button id="gesture-movement-save" type="button" class="primary">Save associations</button></div>
                 </div>
               </section>
-              <section class="panel color-studio-panel">
-                <div class="panel-titlebar"><h3>Color Studio</h3><span id="color-studio-status" class="panel-note">Solid fixture colors</span></div>
-                <p class="control-help">Create solid colors and palette families here in Rehearsal. Pick a hue and saturation from the wheel, set its brightness on the bar, then name and save it.</p>
-                <div class="color-studio-grid">
-                  <div class="color-wheel-editor">
-                    <h4>Color wheel</h4>
-                    <canvas id="color-wheel-canvas" width="360" height="240" aria-label="Hue and saturation color wheel"></canvas>
-                    <label><span>Brightness</span><input id="color-brightness-input" type="range" min="0" max="100" step="1" value="100"></label>
-                    <div class="color-add-row"><input id="color-name-input" placeholder="Color name" maxlength="48"><input id="color-value-input" type="text" value="#00a8a8" maxlength="7" aria-label="Selected hexadecimal color"><i id="color-selected-preview" style="background:#00a8a8"></i><button id="color-add-button" class="compact-button">Add color</button></div>
-                    <h4>Saved solid colors</h4>
-                    <div id="solid-color-list" class="solid-color-list"></div>
-                  </div>
-                  <div>
-                    <h4>Palette family</h4>
-                    <label><span>Palette name</span><input id="palette-name-input" placeholder="Garage cool" maxlength="48"></label>
-                    <div id="palette-color-picker" class="palette-color-picker"></div>
-                    <button id="palette-save-button" class="compact-button primary">Save palette</button>
-                    <small>Automatic remains the default. A saved solid color can be selected directly for fixture and movement testing.</small>
-                  </div>
-                </div>
-              </section>
               <section class="panel rehearsal-guide-panel">
                 <div class="panel-titlebar"><h3>Rehearsal workflow</h3></div>
-                <ol><li>Select Preview only and learn each motion.</li><li>Switch to Live rig and check its physical range.</li><li>Adjust tempo, size, scope, color, and intensity.</li><li>While a song plays later, return here and choose Use this routine here.</li></ol>
+                <ol><li>Select Preview only and learn each motion.</li><li>Switch to Live rig and check its physical range.</li><li>Adjust tempo, size, scope, and intensity.</li><li>While a song plays later, return here and choose Use this routine here.</li></ol>
               </section>
             </div>
           </section>
@@ -1210,9 +1187,9 @@
               <section class="panel link-summary-panel">
                 <div class="panel-titlebar"><h3>Workload</h3><span id="link-queue-state" class="panel-badge">IDLE</span></div>
                 <div class="link-summary-grid">
-                  <div><span>QUEUED</span><b id="link-queued">0</b><small>waiting locally</small></div>
+                  <div><span>QUEUED</span><b id="link-queued">0</b><small id="link-queued-detail">eligible jobs waiting locally</small></div>
                   <div><span>RUNNING</span><b id="link-running">0</b><small>on compute node</small></div>
-                  <div><span>COMPLETE</span><b id="link-completed">0</b><small id="link-completed-detail">remote finished</small></div>
+                  <div><span>IMPORTED</span><b id="link-completed">0</b><small id="link-completed-detail">verified lifetime total</small></div>
                   <div><span>FAILED</span><b id="link-failed">0</b><small>need attention</small></div>
                 </div>
                 <div class="link-transfer-summary">
@@ -1304,20 +1281,6 @@
             <span><b id="remote-section">WAITING</b> section</span>
             <span><b id="remote-confidence">0%</b> confidence</span>
           </div>
-        </section>
-
-        <section class="remote-section remote-spotify-section">
-          <div class="remote-section-heading"><h2>Spotify controller</h2><span id="remote-spotify-state">Checking</span></div>
-          <div class="remote-spotify-track"><b id="remote-spotify-title">No active Spotify track</b><span id="remote-spotify-artist">Connect Spotify on the console</span></div>
-          <div class="remote-spotify-controls">
-            <button id="remote-spotify-previous">◀◀</button>
-            <button id="remote-spotify-play">▶</button>
-            <button id="remote-spotify-next">▶▶</button>
-            <button id="remote-spotify-refresh">↻</button>
-          </div>
-          <select id="remote-spotify-playlist"><option value="">Choose playlist…</option></select>
-          <button id="remote-spotify-play-playlist">Play selected playlist</button>
-          <small id="remote-spotify-message">Playback follows Spotify's active device, including Chromecast Audio.</small>
         </section>
 
         <section class="remote-gesture">

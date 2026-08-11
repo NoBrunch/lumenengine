@@ -1951,7 +1951,7 @@ _LINK_DASHBOARD_HTML = r'''<!doctype html>
 <title>Lumen Link · Threadripper</title><style>
 :root{color-scheme:dark;--bg:#071012;--panel:#101d20;--line:#30484a;--cyan:#69cfc2;--gold:#d7a85e;--red:#d87870;--text:#bdd1cd;--muted:#718681}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,#173236 0,transparent 38%),var(--bg);color:var(--text);font:15px system-ui,sans-serif}header{padding:28px 4vw 18px;border-bottom:1px solid var(--line)}h1{margin:4px 0;font-size:30px;letter-spacing:.04em}header span,.muted{color:var(--muted)}#heartbeat.connected{color:var(--cyan)}#heartbeat.waiting{color:var(--gold)}main{padding:22px 4vw;display:grid;gap:16px}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.card,.jobs{background:rgba(16,29,32,.9);border:1px solid var(--line);border-radius:5px;padding:16px;box-shadow:0 12px 35px #0005}.card b{display:block;color:var(--cyan);font:27px ui-monospace,monospace;margin-top:7px}.slots{height:10px;background:#071012;border:1px solid var(--line);margin-top:12px}.slots i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--gold));transition:width .4s}.job{display:grid;grid-template-columns:170px 120px 1fr 130px;gap:12px;padding:11px 0;border-top:1px solid #253a3c;align-items:center}.job:first-child{border:0}.state{color:var(--gold);font-family:ui-monospace,monospace}.bar{height:7px;background:#071012;overflow:hidden}.bar i{display:block;height:100%;background:var(--cyan)}.bar.indeterminate i{width:32%!important;animation:scan 1.2s ease-in-out infinite}@keyframes scan{0%{transform:translateX(-110%)}100%{transform:translateX(325%)}}@media(max-width:950px){.metrics{grid-template-columns:1fr 1fr}.job{grid-template-columns:1fr 1fr}.bar{grid-column:1/-1}}
-</style></head><body><header><span>REMOTE COMPUTE NODE</span><h1>Lumen Link · Threadripper</h1><span id="heartbeat">Waiting for worker telemetry…</span></header><main><section class="metrics"><div class="card">Lumen contact<b id="contact">—</b></div><div class="card">Worker uptime<b id="uptime">—</b></div><div class="card">CPU utilization<b id="cpu">—</b></div><div class="card">Parallel slots<b id="slots">—</b><div class="slots"><i id="slotbar"></i></div></div><div class="card">Queued<b id="queued">—</b></div><div class="card">Completed<b id="complete">—</b></div><div class="card">Memory available<b id="memory">—</b></div></section><section class="jobs"><h2>Compute flow</h2><div id="jobs" class="muted">No work has arrived.</div></section></main><script>
+</style></head><body><header><span>REMOTE COMPUTE NODE</span><h1>Lumen Link · Threadripper</h1><span id="heartbeat">Waiting for worker telemetry…</span></header><main><section class="metrics"><div class="card">Lumen contact<b id="contact">—</b></div><div class="card">Worker uptime<b id="uptime">—</b></div><div class="card">CPU utilization<b id="cpu">—</b></div><div class="card">Parallel slots<b id="slots">—</b><div class="slots"><i id="slotbar"></i></div></div><div class="card">Queued on node<b id="queued">—</b></div><div class="card">Results retained<b id="complete">—</b></div><div class="card">Memory available<b id="memory">—</b></div></section><section class="jobs"><h2>Compute flow</h2><div id="jobs" class="muted">No work has arrived.</div></section></main><script>
 const fmt=s=>s==null?'—':s<60?`${Math.round(s)}s`:s<3600?`${Math.floor(s/60)}m ${Math.round(s%60)}s`:`${Math.floor(s/3600)}h ${Math.round(s%3600/60)}m`;const gib=n=>n==null?'—':`${(n/1073741824).toFixed(1)} GiB`;
 async function tick(){try{const d=await fetch('/dashboard/status',{cache:'no-store'}).then(r=>r.json());const linked=d.connection.state==='connected';heartbeat.className=d.connection.state;heartbeat.textContent=`WORKER ONLINE · LUMEN ${linked?'CONNECTED':'WAITING'} · ${new Date().toLocaleTimeString()}`;contact.textContent=d.connection.last_contact_age_s==null?'never':fmt(d.connection.last_contact_age_s);uptime.textContent=fmt(d.uptime_s);cpu.textContent=`${Math.round(d.node.cpu_usage_percent==null?100*(d.node.load_1m||0)/Math.max(1,d.node.cpu_logical||1):d.node.cpu_usage_percent)}%`;slots.textContent=`${d.active_slots} / ${d.maximum_parallel_jobs}`;slotbar.style.width=`${100*d.active_slots/Math.max(1,d.maximum_parallel_jobs)}%`;queued.textContent=d.queue.queued||0;complete.textContent=d.queue.complete||0;memory.textContent=gib(d.node.memory_available_bytes);jobs.innerHTML=d.jobs.length?d.jobs.map(j=>`<div class="job"><b>${j.job_type||'compute'}</b><span class="state">${j.stage||j.status}</span><div class="bar ${j.progress==null&&j.status==='running'?'indeterminate':''}"><i style="width:${j.progress==null?(j.status==='complete'?100:12):100*j.progress}%"></i></div><span>${fmt(j.elapsed_s)} · ${gib(j.peak_rss_bytes)}</span></div>`).join(''):'No work has arrived.'}catch(e){heartbeat.className='waiting';heartbeat.textContent=`WORKER OFFLINE · ${e.message}`}}tick();setInterval(tick,1000);
 </script></body></html>'''
@@ -2609,6 +2609,7 @@ class LumenLinkCoordinator:
             return list(self._job_snapshot)
         with self._standby_guard():
             jobs = self.store.list_analysis_jobs(limit=10_000)
+            self._reject_ineligible_teacher_jobs(jobs)
             self._job_snapshot = jobs
             self._job_snapshot_at = time.monotonic()
             if precompute_students:
@@ -2677,6 +2678,57 @@ class LumenLinkCoordinator:
             }
         self._invalidate_status()
         return list(jobs)
+
+    def _reject_ineligible_teacher_jobs(
+        self, jobs: list[dict[str, Any]]
+    ) -> int:
+        """Quarantine legacy partial captures before they can block Link.
+
+        Current preparation never queues partial or unidentified recordings,
+        but older durable rows can predate that supervision contract. A
+        deterministic invalid row must be failed once instead of aborting
+        every coordinator cycle ahead of valid work.
+        """
+
+        rejected = 0
+        for job in jobs:
+            if (
+                job.get("status") != "queued"
+                or job.get("job_type")
+                not in {EDMFORMER_JOB, SONGFORMER_JOB}
+            ):
+                continue
+            payload = job.get("payload") or {}
+            # Minimal synthetic jobs are used by contract tests. Real teacher
+            # jobs always carry an audio path and must carry positive,
+            # preparation-derived whole-song supervision.
+            if not payload.get("audio_path"):
+                continue
+            supervision = payload.get("structure_supervision")
+            if isinstance(supervision, dict) and supervision.get(
+                "eligible"
+            ) is True:
+                continue
+            message = (
+                "Lumen Link rejected this legacy teacher job because its "
+                "recording is partial, unidentified, or missing verified "
+                "whole-song supervision."
+            )
+            self.store.update_analysis_job(
+                str(job["id"]), status="failed", error=message
+            )
+            job["status"] = "failed"
+            job["error"] = message
+            self._submitted_local_job_ids.discard(str(job["id"]))
+            self._prepared_manifests.pop(str(job["id"]), None)
+            self._prepared_sources.pop(str(job["id"]), None)
+            rejected += 1
+        if rejected:
+            self._event(
+                "warning",
+                f"quarantined {rejected} ineligible legacy teacher job(s)",
+            )
+        return rejected
 
     def route_queued_jobs(self, *, refresh: bool = True) -> int:
         """Maintain a standby buffer after authenticated contract agreement."""
@@ -3125,20 +3177,39 @@ class LumenLinkCoordinator:
                 )
                 self.active["stage"] = "importing"
                 self._persist()
-                if job["job_type"] == EDMFORMER_JOB:
-                    imported = self._import_teacher(
-                        job, manifest, result, teacher="EDMFormer"
+                try:
+                    if job["job_type"] == EDMFORMER_JOB:
+                        imported = self._import_teacher(
+                            job, manifest, result, teacher="EDMFormer"
+                        )
+                    elif job["job_type"] == SONGFORMER_JOB:
+                        imported = self._import_teacher(
+                            job, manifest, result, teacher="SongFormer"
+                        )
+                    elif job["job_type"] == STUDENT_TRAIN_JOB:
+                        imported = self._import_student(
+                            client, job, manifest, result
+                        )
+                    else:
+                        raise LinkProtocolError(
+                            "unsupported completed remote job"
+                        )
+                except (LinkProtocolError, ValueError) as error:
+                    message = f"Lumen Link local import rejected: {error}"
+                    self.store.update_analysis_job(
+                        job["id"], status="failed", error=message
                     )
-                elif job["job_type"] == SONGFORMER_JOB:
-                    imported = self._import_teacher(
-                        job, manifest, result, teacher="SongFormer"
+                    self._event(
+                        "error",
+                        f"local import rejected {job['id']}: {error}",
                     )
-                elif job["job_type"] == STUDENT_TRAIN_JOB:
-                    imported = self._import_student(
-                        client, job, manifest, result
-                    )
-                else:
-                    raise LinkProtocolError("unsupported completed remote job")
+                    self.active = None
+                    self._prepared_manifests.pop(str(job["id"]), None)
+                    self._prepared_sources.pop(str(job["id"]), None)
+                    self._submitted_local_job_ids.discard(str(job["id"]))
+                    self._job_snapshot_at = 0.0
+                    self._persist()
+                    return
                 self.store.update_analysis_job(job["id"], status="complete", result=imported)
                 self._record_import(job, manifest, imported)
                 self._event("complete", f"imported {job['id']}")
@@ -3746,11 +3817,18 @@ class LumenLinkCoordinator:
             "result": imported,
         }
         self.recent_imports.appendleft(receipt)
+        updated_snapshot = False
         for cached in self._job_snapshot:
             if str(cached.get("id") or "") == str(job["id"]):
                 cached["status"] = "complete"
                 cached["result"] = imported
+                updated_snapshot = True
                 break
+        if not updated_snapshot:
+            self._job_snapshot.insert(
+                0,
+                {**deepcopy(job), "status": "complete", "result": imported},
+            )
         _atomic_json(
             self.recent_imports_path,
             {
@@ -3840,6 +3918,28 @@ class LumenLinkCoordinator:
             and job["job_type"] in SUPPORTED_JOB_TYPES
         ]
         queue_bytes = int(self._queue_summary.get("bytes_pending") or 0)
+        local_counts = {
+            state: sum(
+                job.get("status") == state
+                and job.get("job_type") in SUPPORTED_JOB_TYPES
+                for job in local_jobs
+            )
+            for state in ("queued", "running", "complete", "failed", "canceled")
+        }
+        link_counts = {
+            state: sum(
+                job.get("status") == state
+                and job.get("job_type") in SUPPORTED_JOB_TYPES
+                and (
+                    (job.get("payload") or {}).get("execution_target")
+                    == "threadripper"
+                    or (job.get("result") or {}).get("execution_target")
+                    == "threadripper"
+                )
+                for job in local_jobs
+            )
+            for state in ("queued", "running", "complete", "failed", "canceled")
+        }
         compatibility = {
             job_type: self._remote_is_compatible(job_type)
             for job_type in SUPPORTED_JOB_TYPES
@@ -3911,7 +4011,25 @@ class LumenLinkCoordinator:
             "local_node": {**_node_resources(), "address": "192.168.50.2"},
             "remote_node": {**((self.remote_status or {}).get("node") or {}), "address": configuration.endpoint.removeprefix("http://").removeprefix("https://")},
             "capabilities": (self.remote_status or {}).get("capabilities", {"supported_job_types": [], "gated_job_types": {job_type: "awaiting authenticated compatible health" for job_type in SUPPORTED_JOB_TYPES}, "job_contracts": {}}),
-            "queue": {"queued": int(self._queue_summary.get("queued") or len(queued)), "bytes_pending": queue_bytes, "bytes_transferred": int((self.active or {}).get("transferred_bytes") or 0), "locally_imported": len(self.recent_imports), "remote": (self.remote_status or {}).get("queue", {})},
+            "queue": {
+                "queued": local_counts["queued"],
+                "running": int(
+                    ((self.remote_status or {}).get("queue") or {}).get(
+                        "running", 0
+                    )
+                ),
+                "completed": link_counts["complete"],
+                "failed": link_counts["failed"],
+                "locally_imported": link_counts["complete"],
+                "recent_imports": len(self.recent_imports),
+                "bytes_pending": queue_bytes,
+                "bytes_transferred": int(
+                    (self.active or {}).get("transferred_bytes") or 0
+                ),
+                "local": local_counts,
+                "link": link_counts,
+                "remote": (self.remote_status or {}).get("queue", {}),
+            },
             "jobs": jobs,
             "recent_imports": list(self.recent_imports),
             "events": list(self.events),

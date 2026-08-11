@@ -8,6 +8,17 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Made Lumen Link workload status describe durable local state instead of a
+  capped 20-item receipt window, separated local/imported totals from the
+  compute node's retained spool counts, and quarantined legacy partial teacher
+  jobs so one invalid result cannot block later eligible work indefinitely.
+- Published explicit captured-audio preparation stages, progress, timestamps,
+  completion, and failures, and kept that status polling while preparation is
+  active on any console page. This prevents a completed preparation from
+  remaining displayed as an hours-long running task.
+- Removed Spotify playback controls from the phone `/remote` interface and
+  removed Rehearsal's palette selector and Color Studio pending a future color
+  workflow redesign.
 - Kept authenticated Link health independent from individual job-preparation
   failures, quarantined stale legacy student snapshots, and re-keyed remote
   transport jobs when a source upgrade changes the immutable manifest for an

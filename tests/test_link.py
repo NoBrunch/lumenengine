@@ -1255,6 +1255,127 @@ class LinkTests(unittest.TestCase):
             )
         )
 
+    def test_refresh_quarantines_legacy_partial_teacher_without_blocking_queue(
+        self,
+    ):
+        store = SongMemoryStore(self.root / "partial-link.sqlite3")
+        audio = self.root / "partial-link.wav"
+        audio.write_bytes(b"partial")
+        bad_id = store.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={
+                "audio_path": str(audio),
+                "recording_id": "recording:partial",
+                "execution_target": "threadripper",
+            },
+        )
+        good_id = store.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={
+                "audio_path": str(audio),
+                "recording_id": "recording:complete",
+                "structure_supervision": {"eligible": True},
+                "execution_target": "automatic",
+            },
+        )
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "partial-link-research",
+            state_root=self.root / "partial-link-state",
+            config_path=self.root / "partial-link-state" / "config.json",
+        )
+
+        snapshot = {
+            job["id"]: job
+            for job in coordinator._refresh_job_snapshot(force=True)
+        }
+
+        self.assertEqual(snapshot[bad_id]["status"], "failed")
+        self.assertIn("whole-song supervision", snapshot[bad_id]["error"])
+        self.assertEqual(snapshot[good_id]["status"], "queued")
+        self.assertTrue(any(
+            event["kind"] == "warning" and "quarantined 1" in event["message"]
+            for event in coordinator.events
+        ))
+
+    def test_workload_completed_is_durable_total_not_recent_receipt_window(
+        self,
+    ):
+        store = SongMemoryStore(self.root / "link-totals.sqlite3")
+        for index in range(25):
+            job_id = store.enqueue_analysis_job(
+                job_type=EDMFORMER_JOB,
+                payload={"execution_target": "threadripper", "index": index},
+            )
+            store.update_analysis_job(
+                job_id,
+                status="complete",
+                result={"execution_target": "threadripper"},
+            )
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "link-totals-research",
+            state_root=self.root / "link-totals-state",
+            config_path=self.root / "link-totals-state" / "config.json",
+        )
+        coordinator._refresh_job_snapshot(force=True)
+
+        status = coordinator.status()
+
+        self.assertEqual(status["queue"]["completed"], 25)
+        self.assertEqual(status["queue"]["locally_imported"], 25)
+        self.assertEqual(status["queue"]["recent_imports"], 0)
+        self.assertEqual(status["queue"]["link"]["complete"], 25)
+
+    def test_deterministic_local_import_rejection_fails_once_and_advances(self):
+        store = SongMemoryStore(self.root / "import-reject.sqlite3")
+        job_id = store.enqueue_analysis_job(
+            job_type=EDMFORMER_JOB,
+            payload={"execution_target": "threadripper"},
+        )
+        job = store.claim_analysis_job_by_id(
+            job_id, worker_id="lumen-link:test", worker_pid=1
+        )
+        assert job is not None
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "import-reject-research",
+            state_root=self.root / "import-reject-state",
+            config_path=self.root / "import-reject-state" / "config.json",
+        )
+        coordinator.active = {
+            "job": job,
+            "manifest": {"job_id": job_id, "objects": []},
+            "stage": "remote",
+        }
+
+        class CompletedClient:
+            def request(self, method, path):
+                del method
+                if path.endswith("/result"):
+                    return {"result": True}
+                return {"status": "complete", "stage": "complete"}
+
+        with patch.object(
+            coordinator, "_client", return_value=CompletedClient()
+        ), patch.object(
+            coordinator,
+            "_import_teacher",
+            side_effect=ValueError("partial recording"),
+        ):
+            coordinator._advance()
+
+        stored = {
+            item["id"]: item for item in store.list_analysis_jobs()
+        }[job_id]
+        self.assertEqual(stored["status"], "failed")
+        self.assertIn("local import rejected", stored["error"])
+        self.assertIsNone(coordinator.active)
+        self.assertTrue(any(
+            "local import rejected" in event["message"]
+            for event in coordinator.events
+        ))
+
     def test_student_executor_runs_fixed_child_and_publishes_artifacts(self):
         """Exercise the real Link runner boundary without a model mock."""
         spool = LinkSpool(self.root / "student-executor-spool")

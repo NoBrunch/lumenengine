@@ -9,6 +9,53 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class OperatorInterfaceContractTests(unittest.TestCase):
+    def test_phone_remote_has_no_spotify_playback_controls(self) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        for element_id in (
+            "remote-spotify-previous",
+            "remote-spotify-play",
+            "remote-spotify-next",
+            "remote-spotify-refresh",
+            "remote-spotify-playlist",
+            "remote-spotify-play-playlist",
+        ):
+            self.assertNotIn(f'id="{element_id}"', html)
+            self.assertNotIn(f'$("{element_id}")', script)
+        self.assertNotIn("function renderRemoteSpotify", script)
+
+    def test_rehearsal_palette_and_color_studio_are_removed(self) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+
+        for element_id in (
+            "rehearsal-palette",
+            "center-color-pattern",
+            "color-wheel-canvas",
+            "color-brightness-input",
+            "color-name-input",
+            "palette-name-input",
+            "palette-color-picker",
+            "palette-save-button",
+        ):
+            self.assertNotIn(f'id="{element_id}"', html)
+        self.assertNotIn("Color Studio", html)
+
+    def test_live_work_status_uses_durable_totals_and_active_preparation_polling(
+        self,
+    ) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("<span>IMPORTED</span>", html)
+        self.assertIn('id="link-queued-detail"', html)
+        self.assertIn("queue.recent_imports", script)
+        self.assertIn("verified lifetime total", script)
+        self.assertIn("app.bootstrap?.research?.preparation?.running", script)
+        self.assertIn("app.bootstrap?.research?.preparation?.pending", script)
+        self.assertIn("researchRunning ? 10 : 300", script)
+        self.assertIn("research.preparation?.started_unix_ms", script)
+
     def test_long_tasks_have_a_console_wide_live_status_region(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")

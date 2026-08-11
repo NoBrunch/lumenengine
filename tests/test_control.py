@@ -367,6 +367,36 @@ class ControlApplicationTests(unittest.TestCase):
         finally:
             other.close()
 
+    def test_research_status_publishes_captured_audio_preparation_stage(self):
+        class AlivePreparation:
+            @staticmethod
+            def is_alive():
+                return True
+
+        now_ms = int(time.time() * 1000)
+        self.application._training_prepare_thread = AlivePreparation()
+        self.application._training_prepare_status.update({
+            "running": True,
+            "session_id": "session:test",
+            "stage": "indexing_capture",
+            "progress": 0.20,
+            "started_unix_ms": now_ms - 5_000,
+            "updated_unix_ms": now_ms,
+            "detail": "Verifying audio continuity.",
+        })
+        try:
+            preparation = self.application.research_status(
+                wait_for_readiness=False
+            )["preparation"]
+        finally:
+            self.application._training_prepare_thread = None
+
+        self.assertTrue(preparation["running"])
+        self.assertEqual(preparation["stage"], "indexing_capture")
+        self.assertEqual(preparation["progress"], 0.20)
+        self.assertEqual(preparation["detail"], "Verifying audio continuity.")
+        self.assertEqual(preparation["started_unix_ms"], now_ms - 5_000)
+
     def test_live_listener_burst_coalesces_feedback_bias_rebuild(self) -> None:
         self.application.engine_mode = "live"
         with patch.object(

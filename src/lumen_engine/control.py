@@ -639,6 +639,19 @@ class LumenApplication:
         self._training_prepare_thread: threading.Thread | None = None
         self._training_prepare_pending = False
         self._training_prepare_pending_session: str | None = None
+        self._training_prepare_status: dict[str, Any] = {
+            "running": False,
+            "pending": False,
+            "session_id": None,
+            "stage": "idle",
+            "progress": 0.0,
+            "started_unix_ms": None,
+            "updated_unix_ms": None,
+            "finished_unix_ms": None,
+            "outcome": None,
+            "detail": "No captured-audio preparation is running.",
+            "error": None,
+        }
         self._research_worker_thread: threading.Thread | None = None
         self._research_worker_last: dict[str, Any] | None = None
         self._research_worker_progress: dict[str, Any] = {
@@ -3360,11 +3373,29 @@ class LumenApplication:
             if running is not None and running.is_alive():
                 self._training_prepare_pending = True
                 self._training_prepare_pending_session = requested_session
+                self._training_prepare_status["pending"] = True
+                self._training_prepare_status["updated_unix_ms"] = int(
+                    time.time() * 1000
+                )
                 self._add_event(
                     "memory",
                     "Offline preparation is already processing a prior capture",
                 )
                 return
+            now_ms = int(time.time() * 1000)
+            self._training_prepare_status = {
+                "running": True,
+                "pending": False,
+                "session_id": requested_session,
+                "stage": "starting",
+                "progress": 0.0,
+                "started_unix_ms": now_ms,
+                "updated_unix_ms": now_ms,
+                "finished_unix_ms": None,
+                "outcome": None,
+                "detail": "Starting captured-audio preparation.",
+                "error": None,
+            }
             thread = threading.Thread(
                 target=self._prepare_training_capture,
                 args=(requested_session,),
@@ -3374,20 +3405,66 @@ class LumenApplication:
             self._training_prepare_thread = thread
             thread.start()
 
+    def _publish_training_preparation(
+        self,
+        *,
+        stage: str,
+        progress: float,
+        detail: str,
+    ) -> None:
+        """Publish a small, lock-protected preparation heartbeat for the UI."""
+
+        with self._lock:
+            self._training_prepare_status.update(
+                {
+                    "running": True,
+                    "stage": stage,
+                    "progress": clamp(progress, 0.0, 1.0),
+                    "updated_unix_ms": int(time.time() * 1000),
+                    "detail": detail,
+                }
+            )
+
     def _prepare_training_capture(self, session_id: str) -> None:
         try:
             # The live writers no longer trigger SQLite auto-checkpoints. Fold
             # committed pages from this run before scanning its compact track
             # identities, entirely on the preparation worker.
+            self._publish_training_preparation(
+                stage="checkpointing",
+                progress=0.05,
+                detail="Checkpointing the captured session database.",
+            )
             self.memory.checkpoint("PASSIVE")
+            self._publish_training_preparation(
+                stage="indexing_capture",
+                progress=0.20,
+                detail=(
+                    "Verifying audio continuity, checksums, and recording "
+                    "identity for the captured session."
+                ),
+            )
             result = export_research_session_index(
                 self.memory, self.training_root, session_id
+            )
+            self._publish_training_preparation(
+                stage="queueing_teachers",
+                progress=0.60,
+                detail=(
+                    "Materializing eligible full-song recordings and "
+                    "queueing their teacher jobs."
+                ),
             )
             research = ResearchJobCoordinator(
                 self.memory,
                 training_root=self.training_root,
                 research_root=self.training_root / "research",
             ).prepare_export(result["path"], queue_songformer=True)
+            self._publish_training_preparation(
+                stage="rebuilding_consensus",
+                progress=0.85,
+                detail="Rebuilding corrected song timelines.",
+            )
             consensus = self.memory.refresh_operator_structure_consensus()
             self.memory.mark_research_session_prepared(
                 session_id, result["path"]
@@ -3396,6 +3473,23 @@ class LumenApplication:
             with self._lock:
                 self._last_training_export = result["path"]
                 self._training_history = training_history
+                now_ms = int(time.time() * 1000)
+                self._training_prepare_status.update(
+                    {
+                        "running": False,
+                        "stage": "complete",
+                        "progress": 1.0,
+                        "updated_unix_ms": now_ms,
+                        "finished_unix_ms": now_ms,
+                        "outcome": "complete",
+                        "detail": (
+                            f"Queued {research['jobs_queued']} teacher job(s) "
+                            f"and rebuilt {consensus['songs']} corrected "
+                            "timeline(s)."
+                        ),
+                        "error": None,
+                    }
+                )
                 self._add_event(
                     "memory",
                     (
@@ -3407,6 +3501,18 @@ class LumenApplication:
                 self._status_sequence += 1
         except Exception as error:
             with self._lock:
+                now_ms = int(time.time() * 1000)
+                self._training_prepare_status.update(
+                    {
+                        "running": False,
+                        "stage": "failed",
+                        "updated_unix_ms": now_ms,
+                        "finished_unix_ms": now_ms,
+                        "outcome": "failed",
+                        "detail": "Captured-audio preparation failed.",
+                        "error": str(error),
+                    }
+                )
                 self._add_event(
                     "memory",
                     f"Offline capture preparation failed: {error}",
@@ -3419,6 +3525,7 @@ class LumenApplication:
                 self._training_prepare_pending = False
                 self._training_prepare_pending_session = None
                 self._training_prepare_thread = None
+                self._training_prepare_status["pending"] = False
             self._schedule_research_readiness_refresh()
             if rerun and not self._stop.is_set():
                 self._start_training_preparation(pending_session)
@@ -4752,10 +4859,12 @@ class LumenApplication:
                 "recovered_jobs": deepcopy(self._research_recovered),
                 "progress": progress,
             }
-            result["preparation"] = {
-                "running": preparation_running,
-                "pending": bool(self._training_prepare_pending),
-            }
+            preparation_status = deepcopy(self._training_prepare_status)
+            preparation_status["running"] = preparation_running
+            preparation_status["pending"] = bool(
+                self._training_prepare_pending
+            )
+            result["preparation"] = preparation_status
             may_reload_model = bool(
                 not worker_running
                 and self.engine_phase in {"ready", "fault"}
