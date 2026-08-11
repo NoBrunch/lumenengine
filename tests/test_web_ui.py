@@ -53,8 +53,18 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("verified lifetime total", script)
         self.assertIn("app.bootstrap?.research?.preparation?.running", script)
         self.assertIn("app.bootstrap?.research?.preparation?.pending", script)
+        self.assertIn(
+            "app.bootstrap?.research?.student_preparation?.running", script
+        )
         self.assertIn("researchRunning ? 10 : 300", script)
         self.assertIn("research.preparation?.started_unix_ms", script)
+        self.assertIn("Preparing student-training snapshot", script)
+        self.assertIn("studentPreparationRunning", script)
+        self.assertIn("student_link?.running", script)
+        self.assertIn("student_local_validation", script)
+        self.assertIn(
+            "researchServerTask(research) || app.operatorTask", script
+        )
 
     def test_long_tasks_have_a_console_wide_live_status_region(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")

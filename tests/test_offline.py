@@ -2120,11 +2120,15 @@ class OfflineResearchTests(unittest.TestCase):
             }
             examples.write_text(json.dumps(row) + "\n", encoding="utf-8")
             store = SongMemoryStore(root / "lumen.sqlite3")
+            progress = []
             queued = enqueue_student_training(
                 store,
                 research_root=research,
                 example_paths=[examples],
                 epochs=1,
+                progress_callback=lambda stage, value, detail: progress.append(
+                    (stage, value, detail)
+                ),
             )
             self.assertEqual(queued["examples"], 1)
             job = store.list_analysis_jobs()[0]
@@ -2136,6 +2140,11 @@ class OfflineResearchTests(unittest.TestCase):
             prepared = json.loads(combined.read_text(encoding="utf-8"))
             self.assertEqual(prepared["features"], row["features"])
             self.assertNotIn("target_provenance_details", prepared)
+            self.assertEqual(
+                [item[0] for item in progress],
+                ["sealing_snapshot", "queueing_training", "queued"],
+            )
+            self.assertEqual(progress[-1][1], 1.0)
 
             second = enqueue_student_training(
                 store,

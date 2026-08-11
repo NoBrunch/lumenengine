@@ -397,6 +397,112 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertEqual(preparation["detail"], "Verifying audio continuity.")
         self.assertEqual(preparation["started_unix_ms"], now_ms - 5_000)
 
+    def test_student_snapshot_preparation_publishes_live_progress(self):
+        observed = []
+
+        def prepare(*args, progress_callback=None, **kwargs):
+            del args, kwargs
+            assert progress_callback is not None
+            progress_callback(
+                "materializing_snapshot",
+                0.5,
+                "Materialized 10 of 20 song groups.",
+            )
+            observed.append(
+                self.application.research_status(
+                    wait_for_readiness=False
+                )["student_preparation"]
+            )
+            return {
+                "job_id": "job:student-progress",
+                "examples": 123,
+                "teacher_run_ids": ["run:one"],
+            }
+
+        with patch(
+            "lumen_engine.control.enqueue_student_training",
+            side_effect=prepare,
+        ), patch.object(
+            self.application.lumen_link, "route_queued_jobs"
+        ), patch.object(
+            self.application.lumen_link,
+            "ready_for_offload",
+            return_value=True,
+        ), patch.object(self.application.lumen_link, "start"):
+            result = self.application.train_structure_student({"epochs": 30})
+
+        self.assertEqual(observed[0]["stage"], "materializing_snapshot")
+        self.assertEqual(observed[0]["progress"], 0.5)
+        self.assertTrue(observed[0]["running"])
+        final = result["research"]["student_preparation"]
+        self.assertEqual(final["stage"], "queued")
+        self.assertEqual(final["outcome"], "queued")
+        self.assertEqual(final["progress"], 1.0)
+        self.assertFalse(final["running"])
+
+    def test_student_snapshot_preparation_is_single_flight(self):
+        self.application._student_training_prepare_status["running"] = True
+
+        with self.assertRaisesRegex(
+            RuntimeError, "snapshot is already being prepared"
+        ):
+            self.application.train_structure_student({"epochs": 30})
+
+    def test_research_status_projects_remote_student_link_stage(self):
+        job_id = self.application.memory.enqueue_analysis_job(
+            job_type=STUDENT_TRAIN_JOB,
+            payload={"execution_target": "threadripper"},
+        )
+        with patch.object(
+            self.application.lumen_link,
+            "status",
+            return_value={
+                "jobs": [{
+                    "job": {"id": job_id, "job_type": STUDENT_TRAIN_JOB},
+                    "stage": "student_local_validation",
+                    "progress": 0.45,
+                    "remote": {
+                        "resources": {
+                            "elapsed_s": 120.0,
+                            "rss_bytes": 2_000_000_000,
+                        }
+                    },
+                }]
+            },
+        ):
+            student_link = self.application.research_status(
+                wait_for_readiness=False
+            )["student_link"]
+
+        self.assertTrue(student_link["running"])
+        self.assertEqual(student_link["job_id"], job_id)
+        self.assertEqual(student_link["stage"], "student_local_validation")
+        self.assertEqual(student_link["progress"], 0.45)
+        self.assertEqual(student_link["resources"]["elapsed_s"], 120.0)
+
+    def test_research_status_reports_manifest_preparation_before_claim(self):
+        job_id = self.application.memory.enqueue_analysis_job(
+            job_type=STUDENT_TRAIN_JOB,
+            payload={"execution_target": "automatic"},
+        )
+        with patch.object(
+            self.application.lumen_link,
+            "ready_for_offload",
+            return_value=True,
+        ), patch.object(
+            self.application.lumen_link,
+            "status",
+            return_value={"jobs": []},
+        ):
+            student_link = self.application.research_status(
+                wait_for_readiness=False
+            )["student_link"]
+
+        self.assertTrue(student_link["running"])
+        self.assertEqual(student_link["job_id"], job_id)
+        self.assertEqual(student_link["stage"], "preparing_manifest")
+        self.assertIsNone(student_link["progress"])
+
     def test_live_listener_burst_coalesces_feedback_bias_rebuild(self) -> None:
         self.application.engine_mode = "live"
         with patch.object(

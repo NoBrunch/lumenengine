@@ -3579,6 +3579,13 @@ class LumenLinkCoordinator:
         """Verify, independently gate, and atomically activate a candidate."""
         from lumen_engine.student import StreamingStructureStudent
 
+        def publish_import_stage(stage: str, progress: float) -> None:
+            if self.active is None:
+                return
+            self.active["stage"] = stage
+            self.active["progress"] = progress
+            self._invalidate_status()
+
         if (
             result.get("schema") != RESULT_SCHEMA
             or result.get("job_id")
@@ -3639,6 +3646,7 @@ class LumenLinkCoordinator:
         ):
             return {**receipt, "import_reused": True}
 
+        publish_import_stage("student_artifact_download", 0.10)
         import_root = self.state_root / "imports" / hashlib.sha256(
             manifest_sha256.encode()
         ).hexdigest()
@@ -3656,6 +3664,7 @@ class LumenLinkCoordinator:
                 int(metadata.get("bytes") or 0),
                 import_root / (name + suffixes[name]),
             )
+        publish_import_stage("student_artifact_verification", 0.30)
         remote_report = _read_json(downloaded["evaluation"])
         if remote_report != result.get("report"):
             raise LinkProtocolError(
@@ -3675,6 +3684,7 @@ class LumenLinkCoordinator:
                         rows.append(value)
             return rows
 
+        publish_import_stage("student_local_validation", 0.45)
         original_path = Path(
             str(job["payload"]["examples_path"])
         ).resolve()
@@ -3735,6 +3745,7 @@ class LumenLinkCoordinator:
             "execution_target": "threadripper",
             "local_revalidated": True,
         }
+        publish_import_stage("student_activation_commit", 0.90)
         candidate_path = output_path.with_name(
             output_path.stem + ".candidate" + output_path.suffix
         )

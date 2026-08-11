@@ -1631,6 +1631,7 @@ class LinkTests(unittest.TestCase):
             state_root=self.root / "student-import-state",
             config_path=self.root / "student-import-state" / "config.json",
         )
+        coordinator.active = {"stage": "importing", "progress": None}
 
         class FakeModel:
             approved_axes = {"energy"}
@@ -1675,6 +1676,10 @@ class LinkTests(unittest.TestCase):
             )
         self.assertTrue(imported["activated"])
         self.assertTrue(imported["local_revalidated"])
+        self.assertEqual(
+            coordinator.active["stage"], "student_activation_commit"
+        )
+        self.assertEqual(coordinator.active["progress"], 0.90)
         self.assertTrue(reused["import_reused"])
         self.assertEqual(client.downloads, 6)
         self.assertEqual(output.read_bytes(), candidate.read_bytes())

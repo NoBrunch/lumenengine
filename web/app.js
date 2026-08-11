@@ -218,8 +218,10 @@ function finishOperatorTask(task) {
 
 function researchServerTask(research = app.bootstrap?.research || {}) {
   const preparation = Boolean(research.preparation?.running);
+  const studentPreparation = Boolean(research.student_preparation?.running);
+  const studentLink = research.student_link || {};
   const worker = research.worker || {};
-  if (!preparation && !worker.running) {
+  if (!preparation && !studentPreparation && !studentLink.running && !worker.running) {
     app.researchTaskStartedAt = 0;
     return null;
   }
@@ -230,8 +232,15 @@ function researchServerTask(research = app.bootstrap?.research || {}) {
   const planned = Number(progress.planned || 0);
   const stage = String(progress.resources?.stage || "");
   const stageLabels = {
+    preparing_manifest: "Hashing the snapshot and coherent audio manifest",
     student_feature_preparation: "Preparing causal audio features",
     student_training: "Training the temporal model",
+    student_validation: "Evaluating independent held-out songs",
+    importing: "Returning the candidate to Lumen",
+    student_artifact_download: "Downloading candidate artifacts",
+    student_artifact_verification: "Verifying candidate checksums and receipts",
+    student_local_validation: "Reproducing held-out qualification locally",
+    student_activation_commit: "Committing the qualified model atomically",
   };
   if (preparation) {
     const stage = label(research.preparation?.stage || "preparing");
@@ -240,6 +249,32 @@ function researchServerTask(research = app.bootstrap?.research || {}) {
       title: "Preparing captured audio",
       detail: `${stage}${Number.isFinite(progress) ? ` · ${Math.round(clamp(progress) * 100)}%` : ""} · ${research.preparation?.detail || "Verifying continuity, recording identity, checksums, and full-song eligibility."}`,
       startedAt: Number(research.preparation?.started_unix_ms)
+        || app.researchTaskStartedAt,
+    };
+  }
+  if (studentPreparation) {
+    const stage = label(research.student_preparation?.stage || "preparing snapshot");
+    const progress = Number(research.student_preparation?.progress);
+    return {
+      title: "Preparing student-training snapshot",
+      detail: `${stage}${Number.isFinite(progress) ? ` · ${Math.round(clamp(progress) * 100)}%` : ""} · ${research.student_preparation?.detail || "Selecting and sealing trusted teacher data."}`,
+      startedAt: Number(research.student_preparation?.started_unix_ms)
+        || app.researchTaskStartedAt,
+    };
+  }
+  if (studentLink.running) {
+    const stage = String(studentLink.stage || "preparing_manifest");
+    const resources = studentLink.resources || {};
+    const linkProgress = studentLink.progress == null
+      ? Number.NaN
+      : Number(studentLink.progress);
+    const featureDetail = Number(resources.recordings_total || 0) > 0
+      ? ` · ${Number(resources.recordings_complete || 0).toLocaleString()} of ${Number(resources.recordings_total).toLocaleString()} recordings`
+      : "";
+    return {
+      title: "Training and validating the structure model",
+      detail: `${stageLabels[stage] || label(stage)}${Number.isFinite(linkProgress) ? ` · ${Math.round(clamp(linkProgress) * 100)}%` : ""}${featureDetail}`,
+      startedAt: Number(studentLink.started_unix_ms)
         || app.researchTaskStartedAt,
     };
   }
@@ -269,7 +304,7 @@ function researchServerTask(research = app.bootstrap?.research || {}) {
 function renderOperatorTask(research = app.bootstrap?.research || {}) {
   const element = $("operator-task");
   if (!element) return;
-  const task = app.operatorTask || researchServerTask(research);
+  const task = researchServerTask(research) || app.operatorTask;
   element.classList.toggle("hidden", !task);
   if (!task) return;
   setText("operator-task-title", task.title || "Working");
@@ -637,6 +672,8 @@ async function pollStatus() {
       app.bootstrap?.research?.worker?.running
       || app.bootstrap?.research?.preparation?.running
       || app.bootstrap?.research?.preparation?.pending
+      || app.bootstrap?.research?.student_preparation?.running
+      || app.bootstrap?.research?.student_link?.running
     );
     if (
       (app.page === "audio" || researchRunning)
@@ -1999,7 +2036,10 @@ function renderStatus() {
   if (app.page === "audio") renderTrainingDataset(status.training || {}, engine);
   const researchSnapshot = app.bootstrap?.research || {};
   const researchBusy = Boolean(
-    researchSnapshot.worker?.running || researchSnapshot.preparation?.running
+    researchSnapshot.worker?.running
+      || researchSnapshot.preparation?.running
+      || researchSnapshot.student_preparation?.running
+      || researchSnapshot.student_link?.running
   );
   if ($("research-import-button")) {
     $("research-import-button").disabled = running || researchBusy;
@@ -2853,6 +2893,10 @@ function renderResearch(research = {}) {
     ? ` Recovered ${recoveredJobs.length.toLocaleString()} interrupted job${recoveredJobs.length === 1 ? "" : "s"}; completed work was preserved.`
     : "";
   const preparationRunning = Boolean(research.preparation?.running);
+  const studentPreparationRunning = Boolean(
+    research.student_preparation?.running
+  );
+  const studentLinkRunning = Boolean(research.student_link?.running);
   const cancelRequested = Boolean(research.worker?.cancel_requested);
   const readiness = $("research-readiness");
   if (readiness) {
@@ -2863,6 +2907,20 @@ function renderResearch(research = {}) {
       const preparation = research.preparation || {};
       const progress = Number(preparation.progress);
       readiness.textContent = `${label(preparation.stage || "preparing")} ${Number.isFinite(progress) ? `${Math.round(clamp(progress) * 100)}%: ` : ""}${preparation.detail || "Preparing the most recent capture before teacher jobs are queued."}`;
+      readiness.className = "research-readiness active";
+    } else if (studentPreparationRunning) {
+      const studentPreparation = research.student_preparation || {};
+      const progress = Number(studentPreparation.progress);
+      readiness.textContent = `${label(studentPreparation.stage || "preparing snapshot")} ${Number.isFinite(progress) ? `${Math.round(clamp(progress) * 100)}%: ` : ""}${studentPreparation.detail || "Preparing the immutable trusted-data snapshot for training."}`;
+      readiness.className = "research-readiness active";
+    } else if (studentLinkRunning) {
+      const studentLink = research.student_link || {};
+      const resources = studentLink.resources || {};
+      const stage = label(studentLink.stage || "remote training");
+      const featureDetail = Number(resources.recordings_total || 0) > 0
+        ? ` ${Number(resources.recordings_complete || 0).toLocaleString()} of ${Number(resources.recordings_total).toLocaleString()} recordings prepared.`
+        : "";
+      readiness.textContent = `${stage}.${featureDetail} The current active model remains available until local qualification commits a replacement.`;
       readiness.className = "research-readiness active";
     } else if (research.worker?.running) {
       const done = Number(workerProgress.processed || 0);
@@ -3006,7 +3064,7 @@ function renderResearch(research = {}) {
   const engineRunning = Boolean(app.status?.engine?.running);
   const currentJobType = String(research.worker?.progress?.current_job_type || "");
   if (runButton) {
-    runButton.disabled = engineRunning || preparationRunning || Boolean(research.worker?.running);
+    runButton.disabled = engineRunning || preparationRunning || studentPreparationRunning || studentLinkRunning || Boolean(research.worker?.running);
     runButton.textContent = preparationRunning
       ? "Preparing capture…"
       : research.worker?.running
@@ -3031,14 +3089,22 @@ function renderResearch(research = {}) {
   }
   const trainButton = $("research-train-button");
   if (trainButton) {
-    trainButton.disabled = engineRunning || preparationRunning || Boolean(research.worker?.running) || !training.train_ready;
+    trainButton.disabled = engineRunning || preparationRunning || studentPreparationRunning || studentLinkRunning || Boolean(research.worker?.running) || !training.train_ready;
     const trainingNow = Boolean(research.worker?.running && currentJobType === "student.train");
-    trainButton.textContent = trainingNow ? "Training and validating…" : "Train and validate";
-    trainButton.classList.toggle("task-pending", trainingNow);
-    trainButton.setAttribute("aria-busy", String(trainingNow));
+    trainButton.textContent = studentPreparationRunning
+      ? "Preparing training snapshot…"
+      : studentLinkRunning || trainingNow ? "Training and validating…" : "Train and validate";
+    trainButton.classList.toggle(
+      "task-pending",
+      studentPreparationRunning || studentLinkRunning || trainingNow,
+    );
+    trainButton.setAttribute(
+      "aria-busy",
+      String(studentPreparationRunning || studentLinkRunning || trainingNow),
+    );
   }
   if ($("research-import-button")) {
-    $("research-import-button").disabled = engineRunning || preparationRunning || Boolean(research.worker?.running);
+    $("research-import-button").disabled = engineRunning || preparationRunning || studentPreparationRunning || studentLinkRunning || Boolean(research.worker?.running);
   }
   renderOperatorTask(research);
   const list = $("research-components");
@@ -3165,6 +3231,10 @@ async function trainStructureStudent() {
     "Selecting trusted teacher examples, preserving held-out songs, and preparing the causal model.",
     button,
   );
+  const preparationPoll = window.setInterval(
+    () => void refreshResearch(),
+    1000,
+  );
   try {
     const result = await api("/api/research/train-student", {
       method: "POST",
@@ -3180,6 +3250,7 @@ async function trainStructureStudent() {
   } catch (error) {
     toast("Student training could not start", error.message, "error");
   } finally {
+    window.clearInterval(preparationPoll);
     await refreshResearch();
     finishOperatorTask(task);
     renderResearch(app.bootstrap?.research || {});

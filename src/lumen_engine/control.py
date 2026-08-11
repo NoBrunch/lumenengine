@@ -652,6 +652,17 @@ class LumenApplication:
             "detail": "No captured-audio preparation is running.",
             "error": None,
         }
+        self._student_training_prepare_status: dict[str, Any] = {
+            "running": False,
+            "stage": "idle",
+            "progress": 0.0,
+            "started_unix_ms": None,
+            "updated_unix_ms": None,
+            "finished_unix_ms": None,
+            "outcome": None,
+            "detail": "No student-training snapshot is being prepared.",
+            "error": None,
+        }
         self._research_worker_thread: threading.Thread | None = None
         self._research_worker_last: dict[str, Any] | None = None
         self._research_worker_progress: dict[str, Any] = {
@@ -4804,14 +4815,85 @@ class LumenApplication:
             }
         # SQLite can wait on an offline writer. Never perform that wait while
         # holding the lock used to publish audio/DMX state.
+        analysis_jobs = self.memory.list_analysis_jobs(limit=100_000)
         running_jobs = [
             job
-            for job in self.memory.list_analysis_jobs(limit=100_000)
+            for job in analysis_jobs
             if job["status"] == "running"
             and not str(job.get("worker_id") or "").startswith(
                 "lumen-link:"
             )
         ]
+        queued_automatic_student = any(
+            job.get("job_type") == STUDENT_TRAIN_JOB
+            and job.get("status") == "queued"
+            and str(
+                (job.get("payload") or {}).get("execution_target")
+                or "automatic"
+            )
+            == "automatic"
+            for job in analysis_jobs
+        )
+        automatic_student_offload_ready = bool(
+            queued_automatic_student
+            and self.lumen_link.ready_for_offload(STUDENT_TRAIN_JOB)
+        )
+        student_job = max(
+            (
+                job
+                for job in analysis_jobs
+                if job.get("job_type") == STUDENT_TRAIN_JOB
+                and job.get("status") in {"queued", "running"}
+                and (
+                    (job.get("payload") or {}).get("execution_target")
+                    == "threadripper"
+                    or str(job.get("worker_id") or "").startswith(
+                        "lumen-link:"
+                    )
+                    or (
+                        job.get("status") == "queued"
+                        and automatic_student_offload_ready
+                    )
+                )
+            ),
+            key=lambda job: int(job.get("created_unix_ms") or 0),
+            default=None,
+        )
+        student_link = {
+            "running": False,
+            "status": "idle",
+            "stage": "idle",
+            "progress": None,
+            "started_unix_ms": None,
+            "resources": {},
+            "job_id": None,
+        }
+        if student_job is not None:
+            link_status = self.lumen_link.status()
+            link_entry = next(
+                (
+                    entry
+                    for entry in link_status.get("jobs") or []
+                    if str((entry.get("job") or {}).get("id") or entry.get("job_id") or "")
+                    == str(student_job["id"])
+                ),
+                None,
+            )
+            remote = (link_entry or {}).get("remote") or link_entry or {}
+            student_link = {
+                "running": True,
+                "status": str(student_job.get("status") or "queued"),
+                "stage": str(
+                    (link_entry or {}).get("stage")
+                    or "preparing_manifest"
+                ),
+                "progress": (link_entry or {}).get("progress"),
+                "started_unix_ms": int(
+                    student_job.get("created_unix_ms") or 0
+                ) or None,
+                "resources": deepcopy(remote.get("resources") or {}),
+                "job_id": str(student_job["id"]),
+            }
         with self._lock:
             worker = self._research_worker_thread
             local_worker_running = bool(
@@ -4865,6 +4947,10 @@ class LumenApplication:
                 self._training_prepare_pending
             )
             result["preparation"] = preparation_status
+            result["student_preparation"] = deepcopy(
+                self._student_training_prepare_status
+            )
+            result["student_link"] = student_link
             may_reload_model = bool(
                 not worker_running
                 and self.engine_phase in {"ready", "fault"}
@@ -5467,11 +5553,72 @@ class LumenApplication:
                     "offline research is already running in another "
                     "Lumen process"
                 )
-        queued = enqueue_student_training(
-            self.memory,
-            research_root=self.training_root / "research",
-            epochs=epochs,
-        )
+            if self._student_training_prepare_status["running"]:
+                raise RuntimeError(
+                    "a student-training snapshot is already being prepared"
+                )
+            now_ms = int(time.time() * 1000)
+            self._student_training_prepare_status = {
+                "running": True,
+                "stage": "starting",
+                "progress": 0.0,
+                "started_unix_ms": now_ms,
+                "updated_unix_ms": now_ms,
+                "finished_unix_ms": None,
+                "outcome": None,
+                "detail": "Starting student-training snapshot preparation.",
+                "error": None,
+            }
+
+        def publish_preparation(
+            stage: str, progress: float, detail: str
+        ) -> None:
+            with self._lock:
+                self._student_training_prepare_status.update(
+                    {
+                        "running": stage != "queued",
+                        "stage": stage,
+                        "progress": clamp(progress, 0.0, 1.0),
+                        "updated_unix_ms": int(time.time() * 1000),
+                        "detail": detail,
+                    }
+                )
+
+        try:
+            queued = enqueue_student_training(
+                self.memory,
+                research_root=self.training_root / "research",
+                epochs=epochs,
+                progress_callback=publish_preparation,
+            )
+        except Exception as error:
+            with self._lock:
+                failed_ms = int(time.time() * 1000)
+                self._student_training_prepare_status.update(
+                    {
+                        "running": False,
+                        "stage": "failed",
+                        "updated_unix_ms": failed_ms,
+                        "finished_unix_ms": failed_ms,
+                        "outcome": "failed",
+                        "detail": "Student-training snapshot preparation failed.",
+                        "error": str(error),
+                    }
+                )
+            raise
+        with self._lock:
+            finished_ms = int(time.time() * 1000)
+            self._student_training_prepare_status.update(
+                {
+                    "running": False,
+                    "stage": "queued",
+                    "progress": 1.0,
+                    "updated_unix_ms": finished_ms,
+                    "finished_unix_ms": finished_ms,
+                    "outcome": "queued",
+                    "error": None,
+                }
+            )
         self.lumen_link.route_queued_jobs()
         if self.lumen_link.ready_for_offload(STUDENT_TRAIN_JOB):
             self.lumen_link.start()

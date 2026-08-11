@@ -2548,6 +2548,7 @@ def _process_teacher_example_groups(
     authoritative_only: bool,
     apply_operator_overlays: bool,
     row_consumer: Any = None,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     """Fuse one recording at a time so corpus size cannot dictate RAM use."""
 
@@ -2595,7 +2596,8 @@ def _process_teacher_example_groups(
         "boundary_rows_corrected": 0,
     }
 
-    for recording_key in sorted(path_groups):
+    recording_keys = sorted(path_groups)
+    for group_index, recording_key in enumerate(recording_keys, start=1):
         source_rows = [
             _compact_example_row(row, _TEACHER_MERGE_FIELDS)
             for path in path_groups[recording_key]
@@ -2673,6 +2675,12 @@ def _process_teacher_example_groups(
         if row_consumer is not None:
             row_consumer(merged_rows)
         del merged_rows
+        if progress_callback is not None:
+            progress_callback(
+                group_index,
+                len(recording_keys),
+                int(merge_report["merged_rows"]),
+            )
 
     leaking = {
         group: sorted(splits)
@@ -2758,6 +2766,7 @@ def enqueue_student_training(
     research_root: str | Path,
     example_paths: Iterable[str | Path] = (),
     epochs: int = 30,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     """Combine teacher examples and enqueue a reproducible CPU training job."""
     root = Path(research_root).resolve()
@@ -2767,8 +2776,20 @@ def enqueue_student_training(
     if not paths:
         # This is a derived materialized view. Refresh it only in the explicit
         # offline training action, never from Live or a status poll.
+        if progress_callback is not None:
+            progress_callback(
+                "refreshing_examples",
+                0.03,
+                "Refreshing operator consensus and current teacher examples.",
+            )
         store.refresh_operator_structure_consensus()
         refresh_current_student_examples(store, research_root=root)
+        if progress_callback is not None:
+            progress_callback(
+                "selecting_trusted_data",
+                0.10,
+                "Selecting the exact trusted teacher-run snapshot.",
+            )
         trusted = trusted_student_examples(store, research_root=root)
         paths = [Path(path) for path in trusted["paths"]]
         provenance = trusted
@@ -2803,12 +2824,31 @@ def enqueue_student_training(
                         + "\n"
                     )
 
+            def publish_materialization(
+                completed_groups: int,
+                total_groups: int,
+                completed_rows: int,
+            ) -> None:
+                if progress_callback is None:
+                    return
+                ratio = completed_groups / max(1, total_groups)
+                progress_callback(
+                    "materializing_snapshot",
+                    0.12 + 0.70 * ratio,
+                    (
+                        f"Materialized {completed_groups} of "
+                        f"{total_groups} song group(s) and "
+                        f"{completed_rows} aligned example(s)."
+                    ),
+                )
+
             materialized = _process_teacher_example_groups(
                 store,
                 path_groups,
                 authoritative_only=True,
                 apply_operator_overlays=True,
                 row_consumer=write_group,
+                progress_callback=publish_materialization,
             )
         rows = int(materialized["examples"])
         statistics = {
@@ -2865,6 +2905,12 @@ def enqueue_student_training(
         raise RuntimeError(
             "teacher examples require at least two complete training songs"
         )
+    if progress_callback is not None:
+        progress_callback(
+            "sealing_snapshot",
+            0.86,
+            "Hashing and sealing the immutable student-training snapshot.",
+        )
     combined_sha256 = _hash_file(partial)
     combined = exports / f"student-training-{combined_sha256}.jsonl"
     if combined.is_file():
@@ -2887,6 +2933,12 @@ def enqueue_student_training(
                 status="canceled",
                 error="superseded by a newer trusted training snapshot",
             )
+    if progress_callback is not None:
+        progress_callback(
+            "queueing_training",
+            0.94,
+            "Recording source checksums and queueing one reproducible training job.",
+        )
     job_id = store.enqueue_analysis_job(
         job_type=STUDENT_TRAIN_JOB,
         payload={
@@ -2928,7 +2980,7 @@ def enqueue_student_training(
         },
         priority=50,
     )
-    return {
+    result = {
         "job_id": job_id,
         "examples_path": str(combined),
         "source_files": len(paths),
@@ -2944,6 +2996,16 @@ def enqueue_student_training(
         "operator_timeline_corrections": correction_report,
         "teacher_run_ids": provenance.get("teacher_run_ids", []),
     }
+    if progress_callback is not None:
+        progress_callback(
+            "queued",
+            1.0,
+            (
+                f"Queued {rows} aligned example(s) from "
+                f"{len(paths)} trusted teacher file(s)."
+            ),
+        )
+    return result
 
 
 def refresh_current_student_examples(

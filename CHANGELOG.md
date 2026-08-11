@@ -8,6 +8,12 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Made Train and Validate publish snapshot materialization progress by song
+  group, follow exclusive Threadripper feature/training/validation stages from
+  the Audio Laboratory, and name local artifact verification, held-out
+  revalidation, and atomic activation instead of appearing idle or stuck.
+- Made student snapshot preparation single-flight across browsers so two
+  simultaneous Train and Validate requests cannot build competing snapshots.
 - Made Lumen Link workload status describe durable local state instead of a
   capped 20-item receipt window, separated local/imported totals from the
   compute node's retained spool counts, and quarantined legacy partial teacher
