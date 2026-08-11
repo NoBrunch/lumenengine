@@ -35,8 +35,15 @@ def main() -> int:
     progress_path = Path(str(spec["progress_path"])).resolve()
     work.mkdir(parents=True, exist_ok=True)
 
-    def progress(stage: str) -> None:
-        _atomic_json(progress_path, {"stage": stage})
+    stage_history: list[str] = []
+
+    def progress(stage: str, **details: object) -> None:
+        if not stage_history or stage_history[-1] != stage:
+            stage_history.append(stage)
+        _atomic_json(
+            progress_path,
+            {"stage": stage, "stage_history": stage_history, **details},
+        )
 
     store = SongMemoryStore(work / "isolated.sqlite3")
     jobs: list[dict[str, object]] = []
@@ -58,11 +65,34 @@ def main() -> int:
     if _hash_file(examples_path) != str(spec["examples_sha256"]):
         raise ValueError("immutable student examples checksum changed")
     examples = _load_jsonl(examples_path)
-    progress("student_feature_preparation")
+    feature_workers = max(1, int(spec.get("feature_workers") or 1))
+    progress(
+        "student_feature_preparation",
+        progress=0.0,
+        recordings_complete=0,
+        recordings_total=len(spec["recordings"]),
+        feature_workers=feature_workers,
+    )
+
+    def feature_progress(details: dict[str, object]) -> None:
+        progress(
+            str(details.get("stage") or "student_feature_preparation"),
+            **{
+                name: value
+                for name, value in details.items()
+                if name != "stage"
+            },
+            feature_workers=feature_workers,
+        )
+
     feature_report = _refresh_student_audio_features(
         examples,
         jobs=jobs,
-        research_root=work / "research",
+        research_root=Path(
+            str(spec.get("feature_cache_root") or work / "research")
+        ).resolve(),
+        maximum_workers=feature_workers,
+        progress_callback=feature_progress,
     )
     prepared = Path(str(spec["prepared_examples_path"])).resolve()
     prepared_partial = prepared.with_suffix(prepared.suffix + ".partial")

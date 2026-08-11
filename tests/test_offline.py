@@ -36,6 +36,7 @@ from lumen_engine.offline import (
     _validate_teacher_coverage,
     _capture_split_group,
     _student_audio_feature_cache,
+    _refresh_student_audio_features,
     _recording_split,
     build_student_examples,
     enqueue_student_training,
@@ -315,6 +316,72 @@ class OfflineResearchTests(unittest.TestCase):
             self.assertTrue(
                 any(row[arrangement_index] > 0.0 for row in first["features"])
             )
+
+    def test_student_features_parallelize_without_inheriting_examples(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            jobs = []
+            examples = []
+            for index, frequency in enumerate((220.0, 440.0)):
+                recording_id = f"recording:{index}"
+                audio_path = root / f"capture-{index}.wav"
+                samples = array(
+                    "h",
+                    (
+                        round(
+                            8_000
+                            * math.sin(
+                                2.0
+                                * math.pi
+                                * frequency
+                                * frame_index
+                                / 8_000
+                            )
+                        )
+                        for frame_index in range(4_000)
+                    ),
+                )
+                with wave.open(str(audio_path), "wb") as output:
+                    output.setnchannels(1)
+                    output.setsampwidth(2)
+                    output.setframerate(8_000)
+                    output.writeframes(samples.tobytes())
+                jobs.append({
+                    "payload": {
+                        "recording_id": recording_id,
+                        "audio_path": str(audio_path),
+                        "content_sha256": hashlib.sha256(
+                            audio_path.read_bytes()
+                        ).hexdigest(),
+                    }
+                })
+                examples.append({
+                    "recording_id": recording_id,
+                    "recording_offset_ms": 100,
+                })
+            progress = []
+            report = _refresh_student_audio_features(
+                examples,
+                jobs=jobs,
+                research_root=root / "shared-cache",
+                maximum_workers=2,
+                progress_callback=progress.append,
+            )
+            self.assertEqual(report["feature_workers"], 2)
+            self.assertEqual(report["recordings"], 2)
+            self.assertEqual(progress[-1]["progress"], 1.0)
+            self.assertTrue(all(row.get("features") for row in examples))
+            self.assertTrue(all(
+                Path(path).with_suffix(".metadata.json").is_file()
+                for path in report["cache_paths"]
+            ))
+            repeated = _refresh_student_audio_features(
+                examples,
+                jobs=jobs,
+                research_root=root / "shared-cache",
+                maximum_workers=2,
+            )
+            self.assertEqual(repeated["cache_hits"], 2)
 
     def test_candidate_becomes_stale_when_new_teacher_run_arrives(self):
         with tempfile.TemporaryDirectory() as temporary:

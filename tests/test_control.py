@@ -2002,7 +2002,7 @@ class ControlApplicationTests(unittest.TestCase):
 
     def test_remote_student_import_hot_loads_without_restart(self) -> None:
         loaded = threading.Event()
-        refreshed = threading.Event()
+        refresh_scheduled = threading.Event()
         sentinel = object()
 
         def load_model():
@@ -2015,21 +2015,50 @@ class ControlApplicationTests(unittest.TestCase):
             side_effect=load_model,
         ), patch.object(
             self.application,
-            "_refresh_research_readiness_cache",
-            side_effect=lambda: refreshed.set(),
+            "_schedule_research_readiness_refresh",
+            side_effect=lambda: refresh_scheduled.set() or True,
         ):
             self.application._on_lumen_link_import(
                 {"id": "job:remote-student", "job_type": STUDENT_TRAIN_JOB},
                 {"activated": True, "approved_axes": ["energy"]},
             )
             self.assertTrue(loaded.wait(1.0))
-            self.assertTrue(refreshed.wait(1.0))
+            self.assertTrue(refresh_scheduled.wait(1.0))
         self.assertIs(self.application._student_model, sentinel)
         self.assertIsNone(self.application._research_readiness_cache)
         self.assertTrue(any(
             "Imported Threadripper student.train result" in event["message"]
             for event in self.application.events
         ))
+
+    def test_repeated_imports_share_one_deferred_readiness_audit(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def refresh():
+            nonlocal calls
+            calls += 1
+            entered.set()
+            release.wait(timeout=2.0)
+
+        self.application._research_readiness_dirty_at = (
+            time.monotonic() - 3.0
+        )
+        with patch.object(
+            self.application,
+            "_refresh_research_readiness_cache",
+            side_effect=refresh,
+        ):
+            for _ in range(5):
+                self.application._schedule_research_readiness_refresh()
+            self.assertTrue(entered.wait(1.0))
+            self.assertEqual(calls, 1)
+            release.set()
+            thread = self.application._research_readiness_thread
+            if thread is not None:
+                thread.join(timeout=2.0)
+        self.assertEqual(calls, 1)
 
     def test_link_status_projects_cached_student_gate_without_a_new_audit(
         self,

@@ -499,6 +499,7 @@ class LumenApplication:
         self._training_export_lock = threading.Lock()
         self._teaching_lock = threading.Lock()
         self._stop = threading.Event()
+        self._shutdown = threading.Event()
         self._thread: threading.Thread | None = None
         self._output: GatedOutput | None = None
         self._runtime: PerformanceRuntime | None = None
@@ -576,6 +577,8 @@ class LumenApplication:
         )
         self._research_readiness_thread: threading.Thread | None = None
         self._research_readiness_error: str | None = None
+        self._research_readiness_generation = 0
+        self._research_readiness_dirty_at = time.monotonic()
         self._student_model_path = (
             self.training_root
             / "research"
@@ -827,30 +830,26 @@ class LumenApplication:
 
         def refresh() -> None:
             try:
-                # Keep model loading and the database-heavy readiness rebuild
-                # inside the same standby lease used by Link imports.  Starting
-                # Live either waits for this bounded handoff or wins the lease
-                # first; these operations can never overlap the DMX loop.
-                with self.lumen_link.standby_task_guard():
-                    with self._research_readiness_lock:
-                        self._research_readiness_cache = None
-                        self._research_readiness_error = None
-                    if (
-                        job.get("job_type") == STUDENT_TRAIN_JOB
-                        and bool(imported.get("activated"))
-                    ):
+                if (
+                    job.get("job_type") == STUDENT_TRAIN_JOB
+                    and bool(imported.get("activated"))
+                ):
+                    # Loading the small activated artifact is serialized with
+                    # a Live transition. The multi-gigabyte corpus audit is
+                    # coalesced separately after Link becomes idle so it can
+                    # never block health polling or result imports.
+                    with self.lumen_link.standby_task_guard():
                         with self._lock:
                             self._load_student_model()
-                    self._refresh_research_readiness_cache()
-                    with self._lock:
-                        self._add_event(
-                            "memory",
-                            f"Imported Threadripper {job.get('job_type')} result",
-                        )
-                        self._status_sequence += 1
+                self._mark_research_readiness_dirty()
+                with self._lock:
+                    self._add_event(
+                        "memory",
+                        f"Imported Threadripper {job.get('job_type')} result",
+                    )
+                    self._status_sequence += 1
             except LinkStandbyRequired:
-                # A later standby status/readiness request will rebuild the
-                # cache; never make a Live transition wait on newly queued work.
+                self._mark_research_readiness_dirty()
                 return
 
         threading.Thread(
@@ -2596,6 +2595,7 @@ class LumenApplication:
 
     def close(self) -> None:
         errors: list[str] = []
+        self._shutdown.set()
         self._stop.set()
         self._research_cancel.set()
         self.lumen_link.close()
@@ -4516,6 +4516,15 @@ class LumenApplication:
                     command = ["nice", "-n", "10", *command]
                 if shutil.which("ionice"):
                     command = ["ionice", "-c", "2", "-n", "7", *command]
+                if shutil.which("prlimit"):
+                    # A regression in a derived status calculation must fail
+                    # its disposable audit, never pressure-kill the desktop.
+                    command = [
+                        "prlimit",
+                        f"--as={3 * 1024**3}",
+                        "--",
+                        *command,
+                    ]
                 environment = dict(os.environ)
                 source_root = str(PROJECT_DIR / "src")
                 existing_python_path = environment.get("PYTHONPATH")
@@ -4551,9 +4560,52 @@ class LumenApplication:
                 self._research_readiness_error = (
                     f"{type(error).__name__}: {error}"
                 )
+
+    def _research_readiness_pipeline_busy(self) -> bool:
+        """Keep corpus audits behind active Link compute and imports."""
+
+        if self.lumen_link.active is not None:
+            return True
+        remote_queue = (
+            ((self.lumen_link.remote_status or {}).get("queue") or {})
+            if self.lumen_link.remote_status is not None
+            else {}
+        )
+        return any(
+            int(remote_queue.get(state) or 0) > 0
+            for state in ("queued", "running")
+        )
+
+    def _research_readiness_refresh_worker(self) -> None:
+        """Coalesce imports into one low-priority, post-queue audit."""
+
+        try:
+            while not self._shutdown.is_set():
+                with self._research_readiness_lock:
+                    generation = self._research_readiness_generation
+                    quiet_for = (
+                        time.monotonic() - self._research_readiness_dirty_at
+                    )
+                if quiet_for < 2.0 or self._research_readiness_pipeline_busy():
+                    self._shutdown.wait(0.5)
+                    continue
+                self._refresh_research_readiness_cache()
+                with self._research_readiness_lock:
+                    if generation == self._research_readiness_generation:
+                        return
         finally:
             with self._research_readiness_lock:
                 self._research_readiness_thread = None
+
+    def _mark_research_readiness_dirty(self) -> None:
+        """Invalidate one derived view without launching duplicate audits."""
+
+        with self._research_readiness_lock:
+            self._research_readiness_cache = None
+            self._research_readiness_error = None
+            self._research_readiness_generation += 1
+            self._research_readiness_dirty_at = time.monotonic()
+        self._schedule_research_readiness_refresh()
 
     def _schedule_research_readiness_refresh(self) -> bool:
         with self._research_readiness_lock:
@@ -4561,7 +4613,7 @@ class LumenApplication:
             if thread is not None and thread.is_alive():
                 return True
             thread = threading.Thread(
-                target=self._refresh_research_readiness_cache,
+                target=self._research_readiness_refresh_worker,
                 name="lumen-readiness-audit",
                 daemon=True,
             )

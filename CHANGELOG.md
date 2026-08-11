@@ -18,6 +18,15 @@ result. Git commit history remains the detailed engineering log.
 - Kept a six-job routed standby buffer replenished while another result is
   running or being imported, allowing newly free Threadripper slots to refill
   without waiting for the serial canonical-import path.
+- Reworked research readiness to merge one recording at a time, coalesce all
+  Link imports into one post-queue audit, and cap the disposable audit address
+  space. On the installed library this reduced the measured peak from multiple
+  4-6 GiB processes to 171 MiB and prevented readiness from blocking Link
+  telemetry or imports.
+- Parallelized student audio feature preparation across up to 24 clean worker
+  processes, added recording-level progress, reused content-addressed feature
+  caches across training runs, and enforced the compute-node memory ceiling
+  across the complete process group.
 - Replaced the Threadripper CPU meter's one-minute load approximation with
   sampled CPU utilization, shortened Link queue discovery and handoff delays,
   and raised the 48-thread WSL worker default from four to six concurrent

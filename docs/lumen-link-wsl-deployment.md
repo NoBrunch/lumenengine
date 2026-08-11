@@ -243,8 +243,18 @@ The worker processes up to six teacher jobs concurrently. Each EDMFormer job
 is limited to its validated eight-thread runner maximum, filling the 48-thread
 WSL allocation when six are active. SongFormer jobs divide the same allocation
 evenly. Student training still runs alone and may use the full allocation.
+Its per-recording causal feature preparation uses at most 24 isolated workers,
+publishes completed/total recording progress, and reuses immutable feature
+caches after retries or later training snapshots. The worker accounts for the
+entire student process group when enforcing the memory ceiling.
 The per-job memory ceiling is 96 GiB on this 128 GiB computer; exceeding it
 fails that disposable job instead of exhausting Windows and WSL.
+
+The Lumen PC performs its exact training-readiness audit only after active Link
+compute and result imports drain. Imports coalesce into one audit, which merges
+one recording at a time in a low-priority, 3 GiB-address-space subprocess. A
+readiness regression therefore fails the derived status refresh instead of
+pressuring the 16 GiB desktop session or delaying Link telemetry.
 
 ## 4. Configure the dedicated Windows Ethernet port
 

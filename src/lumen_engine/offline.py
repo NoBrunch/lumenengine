@@ -7,10 +7,12 @@ Python environments.  Nothing here runs in the audio or DMX timing thread.
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
@@ -2539,6 +2541,162 @@ def _student_example_statistics(
     }
 
 
+def _process_teacher_example_groups(
+    store: SongMemoryStore,
+    path_groups: dict[str, list[Path]],
+    *,
+    authoritative_only: bool,
+    apply_operator_overlays: bool,
+    row_consumer: Any = None,
+) -> dict[str, Any]:
+    """Fuse one recording at a time so corpus size cannot dictate RAM use."""
+
+    split_counts = {"train": 0, "validation": 0, "test": 0}
+    split_groups: dict[str, set[str]] = {
+        split: set() for split in split_counts
+    }
+    group_splits: dict[str, set[str]] = {}
+    label_balance: dict[str, dict[str, int]] = {
+        axis: {} for axis in _AXIS_TEACHER_PRIORITY
+    }
+    merge_report: dict[str, Any] = {
+        "source_rows": 0,
+        "authoritative_source_rows": 0,
+        "excluded_non_authoritative_rows": 0,
+        "merged_rows": 0,
+        "duplicates_collapsed": 0,
+        "axis_conflicts": {
+            axis: 0 for axis in _AXIS_TEACHER_PRIORITY
+        },
+        "axis_precedence": _AXIS_TEACHER_PRIORITY,
+        "boundary_merge": "maximum",
+        "active_teacher_authority": (
+            "axis_specific_edmformer_songformer"
+            if authoritative_only
+            else "explicit_paths"
+        ),
+    }
+    consensus_report: dict[str, Any] = {
+        "revision": store.operator_consensus_revision(),
+        "timelines": 0,
+        "recordings_corrected": 0,
+        "rows_corrected": 0,
+        "axis_rows_corrected": {
+            axis: 0 for axis in ("functional", "energy", "content")
+        },
+        "boundary_rows_corrected": 0,
+    }
+    correction_report: dict[str, Any] = {
+        "recordings": 0,
+        "rows_corrected": 0,
+        "axis_rows_corrected": {
+            axis: 0 for axis in ("functional", "energy", "content")
+        },
+        "boundary_rows_corrected": 0,
+    }
+
+    for recording_key in sorted(path_groups):
+        source_rows = [
+            _compact_example_row(row, _TEACHER_MERGE_FIELDS)
+            for path in path_groups[recording_key]
+            for row in _iter_jsonl(path)
+        ]
+        merged_rows, group_merge = _merge_teacher_example_rows(
+            source_rows,
+            authoritative_only=authoritative_only,
+        )
+        del source_rows
+        for name in (
+            "source_rows",
+            "authoritative_source_rows",
+            "excluded_non_authoritative_rows",
+            "merged_rows",
+            "duplicates_collapsed",
+        ):
+            merge_report[name] += int(group_merge.get(name) or 0)
+        for axis, count in (group_merge.get("axis_conflicts") or {}).items():
+            merge_report["axis_conflicts"][axis] = (
+                merge_report["axis_conflicts"].get(axis, 0) + int(count)
+            )
+
+        if apply_operator_overlays:
+            merged_rows, group_consensus = _apply_operator_consensus_rows(
+                store, merged_rows
+            )
+            merged_rows, group_corrections = (
+                _apply_operator_timeline_corrections(store, merged_rows)
+            )
+            for name in (
+                "timelines",
+                "recordings_corrected",
+                "rows_corrected",
+                "boundary_rows_corrected",
+            ):
+                consensus_report[name] += int(
+                    group_consensus.get(name) or 0
+                )
+            for axis, count in (
+                group_consensus.get("axis_rows_corrected") or {}
+            ).items():
+                consensus_report["axis_rows_corrected"][axis] += int(count)
+            for name in (
+                "recordings",
+                "rows_corrected",
+                "boundary_rows_corrected",
+            ):
+                correction_report[name] += int(
+                    group_corrections.get(name) or 0
+                )
+            for axis, count in (
+                group_corrections.get("axis_rows_corrected") or {}
+            ).items():
+                correction_report["axis_rows_corrected"][axis] += int(count)
+
+        for row in merged_rows:
+            split = str(row.get("split") or "train")
+            if split not in split_counts:
+                raise ValueError(f"unknown student dataset split {split!r}")
+            group = str(
+                row.get("split_group_id") or row.get("recording_id") or ""
+            )
+            if not group:
+                raise ValueError("student example has no split group identity")
+            split_counts[split] += 1
+            split_groups[split].add(group)
+            group_splits.setdefault(group, set()).add(split)
+            for axis in label_balance:
+                label = str(row.get(axis) or "unknown")
+                if label != "unknown":
+                    label_balance[axis][label] = (
+                        label_balance[axis].get(label, 0) + 1
+                    )
+        if row_consumer is not None:
+            row_consumer(merged_rows)
+        del merged_rows
+
+    leaking = {
+        group: sorted(splits)
+        for group, splits in group_splits.items()
+        if len(splits) > 1
+    }
+    if leaking:
+        raise ValueError(
+            "student split groups cross dataset partitions: "
+            + ", ".join(sorted(leaking)[:5])
+        )
+    return {
+        "examples": int(merge_report["merged_rows"]),
+        "split_counts": split_counts,
+        "split_group_counts": {
+            split: len(groups) for split, groups in split_groups.items()
+        },
+        "label_balance": label_balance,
+        "teacher_merge": merge_report,
+        "operator_consensus": consensus_report,
+        "operator_timeline_corrections": correction_report,
+    }
+
+
 def _student_song_evaluation(
     model: StreamingStructureStudent,
     rows: list[dict[str, Any]],
@@ -2604,6 +2762,7 @@ def enqueue_student_training(
     """Combine teacher examples and enqueue a reproducible CPU training job."""
     root = Path(research_root).resolve()
     paths = [Path(path).resolve() for path in example_paths]
+    explicit_paths = bool(paths)
     provenance: dict[str, Any]
     if not paths:
         # This is a derived materialized view. Refresh it only in the explicit
@@ -2626,58 +2785,83 @@ def enqueue_student_training(
     exports = root / "exports"
     exports.mkdir(parents=True, exist_ok=True)
     partial = exports / f".student-training-{uuid.uuid4().hex}.partial"
-    source_rows: list[dict[str, Any]] = []
-    for path in paths:
-        # Compact each file before loading the next. The old preparation path
-        # retained several kilobytes of repeated provenance per 10 Hz frame
-        # and then made multiple full-list copies.
-        source_rows.extend(
+    if not explicit_paths:
+        path_groups = {
+            str(key): [Path(path) for path in values]
+            for key, values in (provenance.get("path_groups") or {}).items()
+        }
+        with partial.open("w", encoding="utf-8") as output:
+            def write_group(group_rows: list[dict[str, Any]]) -> None:
+                for row in group_rows:
+                    output.write(
+                        json.dumps(
+                            _compact_example_row(
+                                row, _STUDENT_TRAINING_FIELDS
+                            ),
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+
+            materialized = _process_teacher_example_groups(
+                store,
+                path_groups,
+                authoritative_only=True,
+                apply_operator_overlays=True,
+                row_consumer=write_group,
+            )
+        rows = int(materialized["examples"])
+        statistics = {
+            "split_counts": materialized["split_counts"],
+            "split_group_counts": materialized["split_group_counts"],
+            "label_balance": materialized["label_balance"],
+        }
+        merge_report = materialized["teacher_merge"]
+        consensus_report = materialized["operator_consensus"]
+        correction_report = materialized[
+            "operator_timeline_corrections"
+        ]
+    else:
+        source_rows = [
             _compact_example_row(row, _TEACHER_MERGE_FIELDS)
+            for path in paths
             for row in _iter_jsonl(path)
+        ]
+        merged_rows, merge_report = _merge_teacher_example_rows(
+            source_rows,
+            authoritative_only=False,
         )
-    merged_rows, merge_report = _merge_teacher_example_rows(
-        source_rows,
-        authoritative_only=not bool(example_paths),
-    )
-    # Merged rows retain references to the selected invariant feature vectors;
-    # the duplicate source dictionaries are no longer needed.
-    del source_rows
-    consensus_report: dict[str, Any] = {
-        "revision": store.operator_consensus_revision(),
-        "rows_corrected": 0,
-    }
-    correction_report: dict[str, Any] = {"rows_corrected": 0}
-    if not example_paths:
-        merged_rows, consensus_report = _apply_operator_consensus_rows(
-            store, merged_rows
+        del source_rows
+        merged_rows = [
+            _compact_example_row(row, _STUDENT_TRAINING_FIELDS)
+            for row in merged_rows
+        ]
+        rows = len(merged_rows)
+        with partial.open("w", encoding="utf-8") as output:
+            for row in merged_rows:
+                output.write(json.dumps(row, sort_keys=True) + "\n")
+        statistics = _student_example_statistics(
+            merged_rows,
+            require_group_identity=False,
         )
-        merged_rows, correction_report = (
-            _apply_operator_timeline_corrections(store, merged_rows)
-        )
-    for index, row in enumerate(merged_rows):
-        merged_rows[index] = _compact_example_row(
-            row, _STUDENT_TRAINING_FIELDS
-        )
-    rows = len(merged_rows)
-    with partial.open("w", encoding="utf-8") as output:
-        for row in merged_rows:
-            output.write(json.dumps(row, sort_keys=True) + "\n")
+        consensus_report = {
+            "revision": store.operator_consensus_revision(),
+            "rows_corrected": 0,
+        }
+        correction_report = {"rows_corrected": 0}
+        del merged_rows
     if rows == 0:
         raise RuntimeError("teacher example files contain no training rows")
-    statistics = _student_example_statistics(
-        merged_rows,
-        require_group_identity=not bool(example_paths),
-    )
     split_counts = statistics["split_counts"]
     split_group_counts = statistics["split_group_counts"]
     label_balance = statistics["label_balance"]
     held_out_examples = split_counts["validation"] + split_counts["test"]
-    if not example_paths and held_out_examples == 0:
+    if not explicit_paths and held_out_examples == 0:
         raise RuntimeError(
             "teacher examples do not yet include a held-out song; process "
             "more recordings before training"
         )
-    if not example_paths and split_group_counts["train"] < 2:
+    if not explicit_paths and split_group_counts["train"] < 2:
         raise RuntimeError(
             "teacher examples require at least two complete training songs"
         )
@@ -2729,16 +2913,16 @@ def enqueue_student_training(
             "operator_consensus_revision": consensus_report.get("revision"),
             "operator_timeline_corrections": correction_report,
             "trainer_version": StreamingStructureStudent.format_version,
-            "refresh_audio_features": not bool(example_paths),
+            "refresh_audio_features": not explicit_paths,
             "feature_preprocessing_version": (
                 STUDENT_AUDIO_FEATURE_VERSION
-                if not example_paths
+                if not explicit_paths
                 else "stored_semantic_frames"
             ),
-            "require_activation_gate": not bool(example_paths),
+            "require_activation_gate": not explicit_paths,
             "applicable_axes": (
                 sorted(COMBINED_STUDENT_AXES)
-                if not example_paths
+                if not explicit_paths
                 else sorted({*LABELS.keys(), "boundary"})
             ),
         },
@@ -2850,6 +3034,7 @@ def trusted_student_examples(
     split_groups: dict[str, set[str]] = {
         "train": set(), "validation": set(), "test": set()
     }
+    path_groups: dict[str, list[Path]] = {}
     seen: set[Path] = set()
     completed_runs = store.list_teacher_runs(status="complete")
     for run in completed_runs:
@@ -3069,6 +3254,9 @@ def trusted_student_examples(
         seen.add(path)
         paths.append(str(path))
         run_ids.append(str(run["id"]))
+        path_groups.setdefault(
+            str(run.get("recording_id") or path), []
+        ).append(path)
         total_examples += valid_rows
         for split in split_counts:
             split_counts[split] += file_split_counts[split]
@@ -3078,26 +3266,32 @@ def trusted_student_examples(
                 label_balance[axis][label] = (
                     label_balance[axis].get(label, 0) + count
                 )
-    merged_rows: list[dict[str, Any]] = []
-    merge_report: dict[str, Any] = {
-        "source_rows": 0,
-        "merged_rows": 0,
-        "duplicates_collapsed": 0,
-        "axis_conflicts": {},
+    merged_summary: dict[str, Any] = {
+        "examples": 0,
+        "split_counts": {"train": 0, "validation": 0, "test": 0},
+        "split_group_counts": {"train": 0, "validation": 0, "test": 0},
+        "label_balance": {
+            axis: {} for axis in _AXIS_TEACHER_PRIORITY
+        },
+        "teacher_merge": {
+            "source_rows": 0,
+            "merged_rows": 0,
+            "duplicates_collapsed": 0,
+            "axis_conflicts": {},
+        },
+        "operator_consensus": {
+            "revision": store.operator_consensus_revision(),
+            "rows_corrected": 0,
+        },
+        "operator_timeline_corrections": {"rows_corrected": 0},
     }
     if paths:
         try:
-            source_rows = [
-                row for path in paths for row in _load_jsonl(Path(path))
-            ]
-            merged_rows, merge_report = _merge_teacher_example_rows(
-                source_rows
-            )
-            merged_rows, consensus_report = _apply_operator_consensus_rows(
-                store, merged_rows
-            )
-            merged_rows, correction_report = (
-                _apply_operator_timeline_corrections(store, merged_rows)
+            merged_summary = _process_teacher_example_groups(
+                store,
+                path_groups,
+                authoritative_only=True,
+                apply_operator_overlays=True,
             )
         except (OSError, ValueError, json.JSONDecodeError) as error:
             errors.append(
@@ -3105,23 +3299,18 @@ def trusted_student_examples(
             )
             paths = []
             run_ids = []
-            merged_rows = []
-            consensus_report = {
-                "revision": store.operator_consensus_revision(),
-                "rows_corrected": 0,
-            }
-            correction_report = {"rows_corrected": 0}
-    else:
-        consensus_report = {
-            "revision": store.operator_consensus_revision(),
-            "rows_corrected": 0,
-        }
-        correction_report = {"rows_corrected": 0}
-    merged_statistics = _student_example_statistics(merged_rows)
+            path_groups = {}
+    merge_report = merged_summary["teacher_merge"]
+    consensus_report = merged_summary["operator_consensus"]
+    correction_report = merged_summary["operator_timeline_corrections"]
     return {
         "scope": "active_database_completed_teacher_runs",
         "active_teacher_authority": "axis_specific_edmformer_songformer",
         "paths": paths,
+        "path_groups": {
+            key: [str(path) for path in values]
+            for key, values in path_groups.items()
+        },
         "teacher_run_ids": run_ids,
         "completed_teacher_runs": len(completed_runs),
         "preserved_non_authoritative_runs": sum(
@@ -3130,11 +3319,11 @@ def trusted_student_examples(
             if item.get("reason") == "non_authoritative_structure_teacher"
         ),
         "usable_teacher_runs": len(run_ids),
-        "examples": len(merged_rows),
+        "examples": int(merged_summary["examples"]),
         "raw_examples": total_examples,
-        "label_balance": merged_statistics["label_balance"],
-        "split_counts": merged_statistics["split_counts"],
-        "split_group_counts": merged_statistics["split_group_counts"],
+        "label_balance": merged_summary["label_balance"],
+        "split_counts": merged_summary["split_counts"],
+        "split_group_counts": merged_summary["split_group_counts"],
         "teacher_merge": merge_report,
         "operator_consensus": consensus_report,
         "operator_consensus_revision": consensus_report.get("revision"),
@@ -3787,12 +3976,33 @@ def _student_audio_feature_cache(
     research_root: Path,
     content_sha256: str | None = None,
     cancel_check: Any = None,
+    include_features: bool = True,
 ) -> dict[str, Any]:
     """Build reusable causal 10 Hz features from a coherent captured WAV."""
     cache_root = research_root / "features" / STUDENT_AUDIO_FEATURE_VERSION
     cache_root.mkdir(parents=True, exist_ok=True)
     identity = str(content_sha256 or audio_path.stem)
     cache_path = cache_root / f"{identity}.json"
+    metadata_path = cache_path.with_suffix(".metadata.json")
+    if cache_path.is_file() and metadata_path.is_file():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if (
+                metadata.get("version") == STUDENT_AUDIO_FEATURE_VERSION
+                and metadata.get("audio_identity") == identity
+                and int(metadata.get("step_ms") or 0) == 100
+                and int(metadata.get("feature_rows") or 0) > 0
+            ):
+                if not include_features:
+                    return {
+                        **metadata,
+                        "path": str(cache_path),
+                        "cached": True,
+                    }
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                return {**cached, "path": str(cache_path), "cached": True}
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
     if cache_path.is_file():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -3801,7 +4011,31 @@ def _student_audio_feature_cache(
                 and cached.get("audio_identity") == identity
                 and int(cached.get("step_ms") or 0) == 100
             ):
-                return {**cached, "path": str(cache_path), "cached": True}
+                metadata = {
+                    name: value
+                    for name, value in cached.items()
+                    if name != "features"
+                }
+                metadata["feature_rows"] = len(cached.get("features") or ())
+                metadata_partial = metadata_path.with_suffix(
+                    metadata_path.suffix + ".partial"
+                )
+                metadata_partial.write_text(
+                    json.dumps(metadata, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                metadata_partial.replace(metadata_path)
+                if include_features:
+                    return {
+                        **cached,
+                        "path": str(cache_path),
+                        "cached": True,
+                    }
+                return {
+                    **metadata,
+                    "path": str(cache_path),
+                    "cached": True,
+                }
         except (OSError, ValueError, json.JSONDecodeError):
             pass
 
@@ -3872,7 +4106,34 @@ def _student_audio_feature_cache(
         json.dumps(result, separators=(",", ":")), encoding="utf-8"
     )
     partial.replace(cache_path)
-    return {**result, "path": str(cache_path), "cached": False}
+    metadata = {
+        name: value for name, value in result.items() if name != "features"
+    }
+    metadata["feature_rows"] = len(feature_rows)
+    metadata_partial = metadata_path.with_suffix(
+        metadata_path.suffix + ".partial"
+    )
+    metadata_partial.write_text(
+        json.dumps(metadata, separators=(",", ":")), encoding="utf-8"
+    )
+    metadata_partial.replace(metadata_path)
+    if include_features:
+        return {**result, "path": str(cache_path), "cached": False}
+    return {**metadata, "path": str(cache_path), "cached": False}
+
+
+def _student_audio_feature_cache_task(
+    task: tuple[str, str, str | None],
+) -> dict[str, Any]:
+    """Process-pool boundary for one immutable recording feature cache."""
+
+    audio_path, research_root, content_sha256 = task
+    return _student_audio_feature_cache(
+        Path(audio_path),
+        research_root=Path(research_root),
+        content_sha256=content_sha256,
+        include_features=False,
+    )
 
 
 def _refresh_student_audio_features(
@@ -3881,6 +4142,8 @@ def _refresh_student_audio_features(
     jobs: list[dict[str, Any]],
     research_root: Path,
     cancel_check: Any = None,
+    maximum_workers: int = 1,
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     audio_by_recording: dict[str, tuple[Path, str | None]] = {}
     for job in jobs:
@@ -3909,35 +4172,118 @@ def _refresh_student_audio_features(
             "current-audio student preprocessing is missing coherent WAVs "
             f"for {len(missing)} recording(s)"
         )
-    caches: dict[str, dict[str, Any]] = {}
-    for recording_id in recording_ids:
-        if not recording_id:
-            continue
-        audio_path, content_sha256 = audio_by_recording[recording_id]
-        caches[recording_id] = _student_audio_feature_cache(
-            audio_path,
-            research_root=research_root,
-            content_sha256=content_sha256,
-            cancel_check=cancel_check,
-        )
+    active_recording_ids = [item for item in recording_ids if item]
+    rows_by_recording: dict[str, list[dict[str, Any]]] = {}
     for row in examples:
         recording_id = str(row.get("recording_id") or "")
-        cache = caches.get(recording_id)
-        if cache is None:
-            continue
-        offset_ms = max(0, int(row.get("recording_offset_ms") or 0))
-        feature_index = min(
-            len(cache["features"]) - 1,
-            round(offset_ms / int(cache["step_ms"])),
+        if recording_id:
+            rows_by_recording.setdefault(recording_id, []).append(row)
+
+    tasks: dict[str, tuple[str, str, str | None]] = {}
+    identity_by_recording: dict[str, str] = {}
+    for recording_id in active_recording_ids:
+        audio_path, content_sha256 = audio_by_recording[recording_id]
+        identity = str(content_sha256 or audio_path.stem)
+        identity_by_recording[recording_id] = identity
+        tasks.setdefault(
+            identity,
+            (str(audio_path), str(research_root), content_sha256),
         )
-        row["features"] = list(cache["features"][feature_index])
-        row["feature_preprocessing_version"] = STUDENT_AUDIO_FEATURE_VERSION
+
+    cache_metadata: dict[str, dict[str, Any]] = {}
+    completed = 0
+    worker_count = max(1, min(int(maximum_workers), len(tasks) or 1))
+
+    def publish_progress() -> None:
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "stage": "student_feature_preparation",
+                    "recordings_complete": completed,
+                    "recordings_total": len(tasks),
+                    "progress": (
+                        completed / len(tasks) if tasks else 1.0
+                    ),
+                }
+            )
+
+    publish_progress()
+    if worker_count == 1:
+        for identity, task in tasks.items():
+            if cancel_check is not None:
+                cancel_check()
+            cache_metadata[identity] = _student_audio_feature_cache_task(task)
+            completed += 1
+            publish_progress()
+    else:
+        thread_variables = (
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+        )
+        previous_thread_values = {
+            name: os.environ.get(name) for name in thread_variables
+        }
+        try:
+            # Spawn clean workers so the parent's multi-gigabyte examples list
+            # is not inherited by every child. Give each recording analyzer
+            # one numerical thread; parallelism comes from recordings, while
+            # the later model trainer retains the parent's full thread pool.
+            for name in thread_variables:
+                os.environ[name] = "1"
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=multiprocessing.get_context("spawn"),
+            ) as pool:
+                futures = {
+                    pool.submit(
+                        _student_audio_feature_cache_task, task
+                    ): identity
+                    for identity, task in tasks.items()
+                }
+                for future in as_completed(futures):
+                    if cancel_check is not None:
+                        cancel_check()
+                    identity = futures[future]
+                    cache_metadata[identity] = future.result()
+                    completed += 1
+                    publish_progress()
+        finally:
+            for name, value in previous_thread_values.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    for index, recording_id in enumerate(active_recording_ids, start=1):
+        metadata = cache_metadata[identity_by_recording[recording_id]]
+        cache = json.loads(Path(str(metadata["path"])).read_text(encoding="utf-8"))
+        features = cache["features"]
+        step_ms = int(cache["step_ms"])
+        for row in rows_by_recording.get(recording_id, ()):
+            offset_ms = max(0, int(row.get("recording_offset_ms") or 0))
+            feature_index = min(
+                len(features) - 1,
+                round(offset_ms / step_ms),
+            )
+            row["features"] = list(features[feature_index])
+            row["feature_preprocessing_version"] = (
+                STUDENT_AUDIO_FEATURE_VERSION
+            )
+        if cancel_check is not None and index % 4 == 0:
+            cancel_check()
     return {
         "version": STUDENT_AUDIO_FEATURE_VERSION,
-        "recordings": len(caches),
+        "recordings": len(active_recording_ids),
         "examples": len(examples),
-        "cache_paths": [caches[key]["path"] for key in sorted(caches)],
-        "cache_hits": sum(bool(cache["cached"]) for cache in caches.values()),
+        "cache_paths": [
+            cache_metadata[key]["path"] for key in sorted(cache_metadata)
+        ],
+        "cache_hits": sum(
+            bool(cache["cached"]) for cache in cache_metadata.values()
+        ),
+        "feature_workers": worker_count,
     }
 
 

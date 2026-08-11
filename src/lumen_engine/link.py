@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import platform
 import secrets
+import signal
 import shutil
 import subprocess
 import sys
@@ -62,6 +63,35 @@ SUPPORTED_JOB_TYPES = (
     SONGFORMER_JOB,
     STUDENT_TRAIN_JOB,
 )
+
+
+def _process_group_rss_bytes(process_group_id: int) -> int:
+    """Measure a runner and all of its feature-worker descendants."""
+
+    total_kib = 0
+    try:
+        entries = tuple(Path("/proc").iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8")
+            fields = stat[stat.rfind(")") + 2 :].split()
+            if int(fields[2]) != process_group_id:
+                continue
+            for line in (entry / "status").read_text(
+                encoding="utf-8"
+            ).splitlines():
+                if line.startswith("VmRSS:"):
+                    total_kib += int(line.split()[1])
+                    break
+        except (OSError, ValueError, IndexError):
+            continue
+    return total_kib * 1024
+
+
 EDM_CONTRACT_FIELDS = (
     "code_revision",
     "code_clean",
@@ -1511,6 +1541,16 @@ class LinkNodeExecutor:
         progress_path = work / "progress.json"
         runner_result_path = work / "runner-result.json"
         spec_path = work / "specification.json"
+        threads = max(
+            1,
+            min(
+                self.max_threads,
+                int(
+                    manifest.get("resources", {}).get("threads")
+                    or self.max_threads
+                ),
+            ),
+        )
         _atomic_json(
             spec_path,
             {
@@ -1522,6 +1562,13 @@ class LinkNodeExecutor:
                 ),
                 "examples_sha256": str(examples_object["sha256"]),
                 "prepared_examples_path": str(prepared),
+                "feature_cache_root": str(
+                    self.spool.root / "student-feature-cache"
+                ),
+                # Feature extraction is per-recording Python work. Use the
+                # Threadripper's physical-core scale without spawning one
+                # memory-hungry process per logical thread.
+                "feature_workers": min(24, threads),
                 "output_path": str(output),
                 "result_path": str(runner_result_path),
                 "recordings": [
@@ -1539,16 +1586,6 @@ class LinkNodeExecutor:
             },
         )
         started = time.monotonic()
-        threads = max(
-            1,
-            min(
-                self.max_threads,
-                int(
-                    manifest.get("resources", {}).get("threads")
-                    or self.max_threads
-                ),
-            ),
-        )
         environment = dict(os.environ)
         environment.update(
             {
@@ -1583,6 +1620,7 @@ class LinkNodeExecutor:
         )
         peak_rss = 0
         stage = "student_feature_preparation"
+        reported_stages = {stage}
         if progress_callback is not None:
             progress_callback(
                 {
@@ -1591,7 +1629,7 @@ class LinkNodeExecutor:
                     "peak_rss_bytes": 0,
                     "memory_limit_bytes": self.max_memory_bytes,
                     "threads": threads,
-                    "stage": "student_training",
+                    "stage": "student_feature_preparation",
                 }
             )
         while True:
@@ -1599,38 +1637,47 @@ class LinkNodeExecutor:
                 stdout, stderr = process.communicate(timeout=1.0)
                 break
             except subprocess.TimeoutExpired:
+                current_rss = _process_group_rss_bytes(process.pid)
+                peak_rss = max(peak_rss, current_rss)
                 try:
-                    for line in Path(
-                        f"/proc/{process.pid}/status"
-                    ).read_text(encoding="utf-8").splitlines():
-                        if line.startswith("VmRSS:"):
-                            peak_rss = max(
-                                peak_rss, int(line.split()[1]) * 1024
-                            )
-                            break
-                except (OSError, ValueError, IndexError):
-                    pass
-                try:
-                    stage = str(_read_json(progress_path).get("stage") or stage)
+                    child_progress = _read_json(progress_path)
+                    stage = str(child_progress.get("stage") or stage)
+                    reported_stages.add(stage)
                 except (OSError, ValueError, json.JSONDecodeError):
-                    pass
+                    child_progress = {}
                 if progress_callback is not None:
                     progress_callback(
                         {
                             "elapsed_s": time.monotonic() - started,
-                            "rss_bytes": peak_rss,
+                            "rss_bytes": current_rss,
                             "peak_rss_bytes": peak_rss,
                             "memory_limit_bytes": self.max_memory_bytes,
                             "threads": threads,
                             "stage": stage,
+                            **{
+                                name: child_progress[name]
+                                for name in (
+                                    "progress",
+                                    "recordings_complete",
+                                    "recordings_total",
+                                    "feature_workers",
+                                )
+                                if name in child_progress
+                            },
                         }
                     )
                 if peak_rss > self.max_memory_bytes:
-                    process.terminate()
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                     try:
                         process.communicate(timeout=10.0)
                     except subprocess.TimeoutExpired:
-                        process.kill()
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         process.communicate()
                     raise RuntimeError(
                         "student training exceeded the compute-node memory limit"
@@ -1638,6 +1685,27 @@ class LinkNodeExecutor:
         if process.returncode != 0:
             raise RuntimeError(
                 (stderr or stdout or "student runner failed")[-4000:]
+            )
+        try:
+            stage_history = list(
+                _read_json(progress_path).get("stage_history") or ()
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            stage_history = []
+        if (
+            progress_callback is not None
+            and "student_training" in stage_history
+            and "student_training" not in reported_stages
+        ):
+            progress_callback(
+                {
+                    "elapsed_s": time.monotonic() - started,
+                    "rss_bytes": peak_rss,
+                    "peak_rss_bytes": peak_rss,
+                    "memory_limit_bytes": self.max_memory_bytes,
+                    "threads": threads,
+                    "stage": "student_training",
+                }
             )
         runner_result = _read_json(runner_result_path)
         trained = dict(runner_result["result"])
@@ -1794,12 +1862,17 @@ class LinkNodeRuntime:
         try:
             def publish_progress(resources: dict[str, Any]) -> None:
                 stage = str(resources.get("stage") or "inference")
+                progress = resources.get("progress")
                 self.spool.update_job(
                     job_id,
                     status="running",
                     stage=stage,
-                    progress=None,
-                    progress_kind="indeterminate",
+                    progress=(
+                        float(progress) if progress is not None else None
+                    ),
+                    progress_kind=(
+                        "fraction" if progress is not None else "indeterminate"
+                    ),
                     resources=resources,
                 )
 
