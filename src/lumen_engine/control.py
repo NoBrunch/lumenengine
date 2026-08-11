@@ -4891,7 +4891,11 @@ class LumenApplication:
                 "started_unix_ms": int(
                     student_job.get("created_unix_ms") or 0
                 ) or None,
-                "resources": deepcopy(remote.get("resources") or {}),
+                "resources": deepcopy(
+                    (link_entry or {}).get("resources")
+                    or remote.get("resources")
+                    or {}
+                ),
                 "job_id": str(student_job["id"]),
             }
         with self._lock:

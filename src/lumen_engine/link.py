@@ -3569,6 +3569,128 @@ class LumenLinkCoordinator:
             self.store.finish_teacher_run(run_id, status="failed", error=str(error))
             raise
 
+    def _validate_student_candidate_isolated(
+        self,
+        *,
+        candidate_path: Path,
+        original_path: Path,
+        prepared_path: Path,
+        payload: dict[str, Any],
+        student_audio_feature_version: str,
+        work_root: Path,
+    ) -> dict[str, Any]:
+        """Run the memory-heavy local gate in a disposable child process."""
+
+        from lumen_engine.offline import _offline_memory_limit_bytes
+
+        specification_path = work_root / "local-validation.json"
+        result_path = work_root / "local-validation.result.json"
+        try:
+            result_path.unlink()
+        except FileNotFoundError:
+            pass
+        _atomic_json(
+            specification_path,
+            {
+                "schema": "lumen.link.student-validation.v1",
+                "candidate_path": str(candidate_path),
+                "original_path": str(original_path),
+                "prepared_path": str(prepared_path),
+                "payload": payload,
+                "student_audio_feature_version": (
+                    student_audio_feature_version
+                ),
+                "result_path": str(result_path),
+            },
+        )
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+            }
+        )
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "lumen_engine.link_validation",
+                str(specification_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            start_new_session=True,
+        )
+        started = time.monotonic()
+        peak_rss = 0
+        memory_limit = _offline_memory_limit_bytes()
+        timeout_s = 30 * 60
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=1.0)
+                break
+            except subprocess.TimeoutExpired:
+                elapsed_s = time.monotonic() - started
+                current_rss = _process_group_rss_bytes(process.pid)
+                peak_rss = max(peak_rss, current_rss)
+                if self.active is not None:
+                    self.active["resources"] = {
+                        "elapsed_s": elapsed_s,
+                        "rss_bytes": current_rss,
+                        "peak_rss_bytes": peak_rss,
+                        "memory_limit_bytes": memory_limit,
+                        "threads": 1,
+                    }
+                    self._invalidate_status()
+                if peak_rss > memory_limit or elapsed_s > timeout_s:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.communicate(timeout=10.0)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.communicate()
+                    reason = (
+                        "exceeded the local offline memory limit"
+                        if peak_rss > memory_limit
+                        else "exceeded the local validation timeout"
+                    )
+                    raise LinkProtocolError(
+                        f"student candidate {reason}"
+                    )
+        if process.returncode != 0:
+            raise LinkProtocolError(
+                (
+                    stderr
+                    or stdout
+                    or "student candidate local validation failed"
+                )[-4000:]
+            )
+        try:
+            validated = _read_json(result_path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise LinkProtocolError(
+                "student candidate local validation returned no receipt"
+            ) from error
+        if (
+            validated.get("schema")
+            != "lumen.link.student-validation.result.v1"
+            or not isinstance(validated.get("local_gate"), dict)
+        ):
+            raise LinkProtocolError(
+                "student candidate local validation receipt is invalid"
+            )
+        return dict(validated["local_gate"])
+
     def _import_student(
         self,
         client: LinkClient,
@@ -3577,8 +3699,6 @@ class LumenLinkCoordinator:
         result: dict[str, Any],
     ) -> dict[str, Any]:
         """Verify, independently gate, and atomically activate a candidate."""
-        from lumen_engine.student import StreamingStructureStudent
-
         def publish_import_stage(stage: str, progress: float) -> None:
             if self.active is None:
                 return
@@ -3671,19 +3791,6 @@ class LumenLinkCoordinator:
                 "remote evaluation artifact does not match result envelope"
             )
 
-        def load_rows(path: Path) -> list[dict[str, Any]]:
-            rows: list[dict[str, Any]] = []
-            with path.open("r", encoding="utf-8") as source:
-                for line in source:
-                    if line.strip():
-                        value = json.loads(line)
-                        if not isinstance(value, dict):
-                            raise LinkProtocolError(
-                                "student examples contain a non-object row"
-                            )
-                        rows.append(value)
-            return rows
-
         publish_import_stage("student_local_validation", 0.45)
         original_path = Path(
             str(job["payload"]["examples_path"])
@@ -3692,41 +3799,16 @@ class LumenLinkCoordinator:
             raise LinkProtocolError(
                 "local student examples changed during remote execution"
             )
-        original_rows = load_rows(original_path)
-        prepared_rows = load_rows(downloaded["prepared_examples"])
-        if len(original_rows) != len(prepared_rows):
-            raise LinkProtocolError("prepared student row count changed")
-        for original, prepared in zip(original_rows, prepared_rows):
-            original_target = {
-                key: value
-                for key, value in original.items()
-                if key not in {"features", "feature_preprocessing_version"}
-            }
-            prepared_target = {
-                key: value
-                for key, value in prepared.items()
-                if key not in {"features", "feature_preprocessing_version"}
-            }
-            if original_target != prepared_target:
-                raise LinkProtocolError(
-                    "remote feature preparation changed student supervision"
-                )
-            if prepared.get("feature_preprocessing_version") != result.get(
-                "student_audio_feature_version"
-            ):
-                raise LinkProtocolError(
-                    "prepared student feature contract is invalid"
-                )
-        model = StreamingStructureStudent.load(
-            downloaded["candidate_model"]
+        local_gate = self._validate_student_candidate_isolated(
+            candidate_path=downloaded["candidate_model"],
+            original_path=original_path,
+            prepared_path=downloaded["prepared_examples"],
+            payload=job["payload"],
+            student_audio_feature_version=str(
+                result["student_audio_feature_version"]
+            ),
+            work_root=import_root,
         )
-        local_gate = _student_gate_assessment(
-            model, prepared_rows, job["payload"]
-        )
-        if sorted(model.approved_axes) != local_gate["approved_axes"]:
-            raise LinkProtocolError(
-                "candidate approved axes fail local held-out validation"
-            )
         if (
             bool(remote_report.get("activated"))
             != local_gate["activated"]

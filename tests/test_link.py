@@ -1633,9 +1633,6 @@ class LinkTests(unittest.TestCase):
         )
         coordinator.active = {"stage": "importing", "progress": None}
 
-        class FakeModel:
-            approved_axes = {"energy"}
-
         client = ArtifactClient()
         rejected_gate = {
             **local_gate,
@@ -1644,14 +1641,9 @@ class LinkTests(unittest.TestCase):
             "inactive_axes": ["energy"],
         }
 
-        class RejectedModel:
-            approved_axes = set()
-
-        with patch(
-            "lumen_engine.student.StreamingStructureStudent.load",
-            return_value=RejectedModel(),
-        ), patch(
-            "lumen_engine.link._student_gate_assessment",
+        with patch.object(
+            coordinator,
+            "_validate_student_candidate_isolated",
             return_value=rejected_gate,
         ):
             with self.assertRaisesRegex(
@@ -1661,11 +1653,9 @@ class LinkTests(unittest.TestCase):
                 coordinator._import_student(
                     client, job, job_manifest, result
                 )
-        with patch(
-            "lumen_engine.student.StreamingStructureStudent.load",
-            return_value=FakeModel(),
-        ), patch(
-            "lumen_engine.link._student_gate_assessment",
+        with patch.object(
+            coordinator,
+            "_validate_student_candidate_isolated",
             return_value=local_gate,
         ):
             imported = coordinator._import_student(
@@ -1730,11 +1720,9 @@ class LinkTests(unittest.TestCase):
                 },
             },
         }
-        with patch(
-            "lumen_engine.student.StreamingStructureStudent.load",
-            return_value=RejectedModel(),
-        ), patch(
-            "lumen_engine.link._student_gate_assessment",
+        with patch.object(
+            coordinator,
+            "_validate_student_candidate_isolated",
             return_value=rejected_gate,
         ):
             rejected = coordinator._import_student(
@@ -1750,11 +1738,9 @@ class LinkTests(unittest.TestCase):
         # A missing rejected/accepted candidate invalidates the receipt and
         # forces artifact recovery rather than claiming a phantom success.
         Path(imported["candidate_model_path"]).unlink()
-        with patch(
-            "lumen_engine.student.StreamingStructureStudent.load",
-            return_value=FakeModel(),
-        ), patch(
-            "lumen_engine.link._student_gate_assessment",
+        with patch.object(
+            coordinator,
+            "_validate_student_candidate_isolated",
             return_value=local_gate,
         ):
             coordinator._import_student(client, job, job_manifest, result)
@@ -1763,6 +1749,58 @@ class LinkTests(unittest.TestCase):
             output.with_name("student.previous.npz").read_bytes(),
             b"previous-model",
         )
+
+    def test_student_local_validation_runs_in_disposable_process(self):
+        store = SongMemoryStore(self.root / "isolated-validation.sqlite3")
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "isolated-validation-research",
+            state_root=self.root / "isolated-validation-state",
+            config_path=self.root / "isolated-validation-state/config.json",
+        )
+        candidate = self.root / "isolated-validation-candidate.npz"
+        model = StreamingStructureStudent(hidden_size=4)
+        model.approved_axes = set()
+        model.save(candidate)
+        original = self.root / "isolated-validation-original.jsonl"
+        prepared = self.root / "isolated-validation-prepared.jsonl"
+        row = {
+            "recording_id": "recording:isolated-validation",
+            "recording_offset_ms": 0,
+            "split_group_id": "group:isolated-validation",
+            "split": "train",
+            "features": [0.0] * 15,
+            "functional": "unknown",
+            "energy": "groove",
+            "content": "unknown",
+            "boundary": 0,
+        }
+        original.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        prepared.write_text(
+            json.dumps({
+                **row,
+                "features": [0.25] * 15,
+                "feature_preprocessing_version": (
+                    STUDENT_AUDIO_FEATURE_VERSION
+                ),
+            }) + "\n",
+            encoding="utf-8",
+        )
+        work = self.root / "isolated-validation-work"
+        work.mkdir()
+
+        local_gate = coordinator._validate_student_candidate_isolated(
+            candidate_path=candidate,
+            original_path=original,
+            prepared_path=prepared,
+            payload={"applicable_axes": ["energy"]},
+            student_audio_feature_version=STUDENT_AUDIO_FEATURE_VERSION,
+            work_root=work,
+        )
+
+        self.assertEqual(local_gate["approved_axes"], [])
+        self.assertEqual(local_gate["split_counts"]["train"], 1)
+        self.assertTrue((work / "local-validation.result.json").is_file())
 
     def test_disable_restores_queued_jobs_and_restart_still_drains_active(self):
         store = SongMemoryStore(self.root / "disable.sqlite3")

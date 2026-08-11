@@ -14,6 +14,9 @@ result. Git commit history remains the detailed engineering log.
   revalidation, and atomic activation instead of appearing idle or stuck.
 - Made student snapshot preparation single-flight across browsers so two
   simultaneous Train and Validate requests cannot build competing snapshots.
+- Moved the returned student's memory-heavy local qualification into a bounded
+  disposable process, preserving independent activation checks without leaving
+  the 16 GiB live computer holding the expanded training corpus afterward.
 - Made Lumen Link workload status describe durable local state instead of a
   capped 20-item receipt window, separated local/imported totals from the
   compute node's retained spool counts, and quarantined legacy partial teacher
