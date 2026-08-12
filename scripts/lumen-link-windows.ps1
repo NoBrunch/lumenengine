@@ -11,6 +11,8 @@ param(
     [string]$ThreadripperAddress = "192.168.50.1",
     [string]$LumenAddress = "192.168.50.2",
     [int]$WorkerPort = 8765,
+    [ValidatePattern('^~(/[A-Za-z0-9._-]+)+$')]
+    [string]$WslProjectRoot = "~/lumenengine",
     [switch]$EnableSshBootstrap,
     [int]$SshBootstrapPort = 9022,
     [switch]$RefreshOnly
@@ -22,8 +24,12 @@ $SshFirewallName = "Lumen Link SSH Bootstrap"
 $TaskName = "Lumen Link WSL Network Refresh"
 $ProgramRoot = Join-Path $env:ProgramData "LumenLink"
 $RefreshScript = Join-Path $ProgramRoot "refresh-portproxy.ps1"
-$DashboardShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Lumen Link Dashboard.url"
+$DashboardShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Lumen Link Dashboard.lnk"
+$LegacyDashboardShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Lumen Link Dashboard.url"
+$DashboardIcon = Join-Path $ProgramRoot "lumen-link.ico"
+$StartupLog = Join-Path $ProgramRoot "startup.log"
 $DashboardAddress = "127.0.0.1"
+$WslStartupCommand = "cd $WslProjectRoot && ./scripts/lumen-link-wsl startup --apply"
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -109,6 +115,7 @@ function Set-PortProxy {
 
 function Install-NatRefreshTask {
     New-Item -ItemType Directory -Force -Path $ProgramRoot | Out-Null
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     $sshLines = if ($EnableSshBootstrap) {
         @"
 netsh interface portproxy delete v4tov4 listenaddress=$ThreadripperAddress listenport=$SshBootstrapPort 2>`$null | Out-Null
@@ -117,9 +124,19 @@ netsh interface portproxy add v4tov4 listenaddress=$ThreadripperAddress listenpo
     } else { "" }
     $content = @"
 `$ErrorActionPreference = "Stop"
+`$startupReady = `$false
+`$nextStartupAttempt = Get-Date
 while (`$true) {
   try {
-    & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null
+    if (-not `$startupReady -and (Get-Date) -ge `$nextStartupAttempt) {
+      "`$(Get-Date -Format o) checking Git, configuration and research deployment" | Out-File "$StartupLog" -Append -Encoding UTF8
+      & wsl.exe -d "$Distro" -- bash -lc '$WslStartupCommand' 2>&1 | Out-File "$StartupLog" -Append -Encoding UTF8
+      if (`$LASTEXITCODE -ne 0) { throw "WSL startup verification failed with exit code `$LASTEXITCODE" }
+      `$startupReady = `$true
+    }
+    if (`$startupReady) {
+      & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null
+    }
     `$raw = (& wsl.exe -d "$Distro" -- hostname -I) -join " "
     `$wslAddress = ((`$raw -split "\s+") | Where-Object { `$_ -match '^\d+\.\d+\.\d+\.\d+`$' })[0]
     if (-not `$wslAddress) { throw "Could not resolve the WSL address" }
@@ -128,7 +145,10 @@ while (`$true) {
     netsh interface portproxy delete v4tov4 listenaddress=$DashboardAddress listenport=$WorkerPort 2>`$null | Out-Null
     netsh interface portproxy add v4tov4 listenaddress=$DashboardAddress listenport=$WorkerPort connectaddress=`$wslAddress connectport=$WorkerPort | Out-Null
 $sshLines
-  } catch { }
+  } catch {
+    "`$(Get-Date -Format o) `$_" | Out-File "$StartupLog" -Append -Encoding UTF8
+    `$nextStartupAttempt = (Get-Date).AddMinutes(5)
+  }
   Start-Sleep -Seconds 30
 }
 "@
@@ -143,14 +163,31 @@ $sshLines
         -Trigger $trigger `
         -RunLevel Highest `
         -Force | Out-Null
+    Start-ScheduledTask -TaskName $TaskName
 }
 
 function Install-MirroredStartupTask {
     New-Item -ItemType Directory -Force -Path $ProgramRoot | Out-Null
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     $content = @"
 `$ErrorActionPreference = "Stop"
+`$startupReady = `$false
+`$nextStartupAttempt = Get-Date
 while (`$true) {
-  try { & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null } catch { }
+  try {
+    if (-not `$startupReady -and (Get-Date) -ge `$nextStartupAttempt) {
+      "`$(Get-Date -Format o) checking Git, configuration and research deployment" | Out-File "$StartupLog" -Append -Encoding UTF8
+      & wsl.exe -d "$Distro" -- bash -lc '$WslStartupCommand' 2>&1 | Out-File "$StartupLog" -Append -Encoding UTF8
+      if (`$LASTEXITCODE -ne 0) { throw "WSL startup verification failed with exit code `$LASTEXITCODE" }
+      `$startupReady = `$true
+    }
+    if (`$startupReady) {
+      & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null
+    }
+  } catch {
+    "`$(Get-Date -Format o) `$_" | Out-File "$StartupLog" -Append -Encoding UTF8
+    `$nextStartupAttempt = (Get-Date).AddMinutes(5)
+  }
   Start-Sleep -Seconds 30
 }
 "@
@@ -165,11 +202,42 @@ while (`$true) {
         -Trigger $trigger `
         -RunLevel Highest `
         -Force | Out-Null
+    Start-ScheduledTask -TaskName $TaskName
 }
 
 function Install-DashboardShortcut {
-    $content = "[InternetShortcut]`r`nURL=http://${DashboardAddress}:$WorkerPort/dashboard`r`n"
-    Set-Content -Path $DashboardShortcut -Value $content -Encoding ASCII
+    New-Item -ItemType Directory -Force -Path $ProgramRoot | Out-Null
+    Add-Type -AssemblyName System.Drawing
+    $bitmap = [System.Drawing.Bitmap]::new(64, 64)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $graphics.Clear([System.Drawing.Color]::FromArgb(11, 17, 20))
+    $orbitPen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(101, 216, 207), 3)
+    $accentPen = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(79, 136, 173), 3)
+    $coreBrush = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(131, 239, 229))
+    $graphics.DrawEllipse($orbitPen, 7, 20, 50, 24)
+    $graphics.DrawEllipse($accentPen, 20, 7, 24, 50)
+    $graphics.FillEllipse($coreBrush, 25, 25, 14, 14)
+    $iconHandle = $bitmap.GetHicon()
+    $icon = [System.Drawing.Icon]::FromHandle($iconHandle)
+    $stream = [System.IO.File]::Open($DashboardIcon, [System.IO.FileMode]::Create)
+    try { $icon.Save($stream) } finally { $stream.Dispose() }
+    $icon.Dispose()
+    $coreBrush.Dispose()
+    $accentPen.Dispose()
+    $orbitPen.Dispose()
+    $graphics.Dispose()
+    $bitmap.Dispose()
+
+    Remove-Item -Path $LegacyDashboardShortcut -Force -ErrorAction SilentlyContinue
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($DashboardShortcut)
+    $shortcut.TargetPath = Join-Path $env:SystemRoot "explorer.exe"
+    $shortcut.Arguments = "http://${DashboardAddress}:$WorkerPort/dashboard"
+    $shortcut.WorkingDirectory = $env:USERPROFILE
+    $shortcut.IconLocation = "$DashboardIcon,0"
+    $shortcut.Description = "Lumen Link local dashboard"
+    $shortcut.Save()
 }
 
 if (-not $Apply) {
@@ -182,13 +250,21 @@ if (-not (Test-IsAdministrator)) {
 
 $effectiveMode = Get-EffectiveMode
 if ($RefreshOnly) {
-    if ($effectiveMode -ne "Nat") { exit 0 }
-    $wslAddress = Get-WslAddress
-    Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress
-    Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress -ListenAddress $DashboardAddress
-    if ($EnableSshBootstrap) {
-        Set-PortProxy -ListenPort $SshBootstrapPort -ConnectPort 22 -ConnectAddress $wslAddress
+    if ($effectiveMode -eq "Nat") {
+        $wslAddress = Get-WslAddress
+        Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress
+        Set-PortProxy -ListenPort $WorkerPort -ConnectPort $WorkerPort -ConnectAddress $wslAddress -ListenAddress $DashboardAddress
+        if ($EnableSshBootstrap) {
+            Set-PortProxy -ListenPort $SshBootstrapPort -ConnectPort 22 -ConnectAddress $wslAddress
+        }
+        Install-NatRefreshTask
+    } else {
+        Install-MirroredStartupTask
     }
+    Install-DashboardShortcut
+    Write-Host "Lumen Link startup automation and local dashboard shortcut refreshed."
+    Write-Host "  Dashboard: http://${DashboardAddress}:$WorkerPort/dashboard"
+    Write-Host "  Startup:   Git check, configure, verify, then start"
     exit 0
 }
 if (-not $InterfaceAlias) {

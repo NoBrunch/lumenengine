@@ -8,6 +8,13 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Made the Threadripper login watchdog check Git, configure, verify and start
+  Lumen Link automatically with bounded retry and offline fallback; replaced
+  the legacy dashboard `.url` with an icon-bearing `.lnk` that opens only the
+  local `127.0.0.1` dashboard address.
+- Renamed the pending timeline count as optional quality checks and stated
+  explicitly that technically valid completed teacher results do not wait for
+  operator approval before student training.
 - Stopped queueing EDMFormer for songs beyond its validated 420-second
   whole-song context while retaining SongFormer coverage, classified earlier
   long-song rejections as known limitations, and separated unresolved Link

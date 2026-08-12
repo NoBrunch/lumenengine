@@ -40,6 +40,7 @@ Commands:
   install-ssh --apply --lumen-public-key-file PATH
                        Install the Lumen PC public key for bootstrap SSH
   verify               Run non-mutating deployment and research verification
+  startup --apply      Update, configure, verify and start after WSL boots
   capabilities         Authenticate the running worker and verify job support
   start                 Start the already-installed user service
   stop                  Stop the user service
@@ -421,6 +422,38 @@ print("  RESULT student model: candidate artifact plus held-out evaluation")
 PY
 }
 
+startup_finalize() {
+    if [[ "$APPLY" != "1" ]]; then
+        printf 'startup requires --apply because it updates configuration and service state.\n' >&2
+        return 2
+    fi
+    render_configuration "$CPU_THREADS"
+    verify
+    systemctl --user start lumen-link-worker.service
+    verify_running_capabilities
+    printf 'Lumen Link startup completed and the verified worker is running.\n'
+}
+
+startup_update() {
+    if [[ "$APPLY" != "1" ]]; then
+        printf 'startup requires --apply because it updates Git, configuration and service state.\n' >&2
+        return 2
+    fi
+    systemctl --user stop lumen-link-worker.service 2>/dev/null || true
+    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no)" ]]; then
+        printf 'WARNING: tracked local changes prevent an automatic Git update; verifying the current revision.\n' >&2
+    elif timeout 120s git -C "$PROJECT_ROOT" pull --ff-only; then
+        printf 'Lumen Link source is current at %s.\n' "$(git -C "$PROJECT_ROOT" rev-parse --short HEAD)"
+    else
+        printf 'WARNING: Git update was unavailable; verifying the current local revision instead.\n' >&2
+    fi
+    # Git may have replaced this script. Execute the newly checked-out code for
+    # configuration and verification instead of continuing with stale shell
+    # functions held by the original process.
+    exec "${PROJECT_ROOT}/scripts/lumen-link-wsl" startup-finalize --apply \
+        --cpu-threads "$CPU_THREADS"
+}
+
 run_worker() {
     [[ -r "$WORKER_CONFIG" ]] || { printf 'Worker config is not readable: %s\n' "$WORKER_CONFIG" >&2; return 1; }
     local -a worker_arguments=()
@@ -489,6 +522,8 @@ case "$COMMAND" in
         ;;
     install-ssh) install_ssh_key "$PUBLIC_KEY_FILE" ;;
     verify) verify ;;
+    startup) startup_update ;;
+    startup-finalize) startup_finalize ;;
     capabilities) verify_running_capabilities ;;
     start) systemctl --user start lumen-link-worker.service ;;
     stop) systemctl --user stop lumen-link-worker.service ;;

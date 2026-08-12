@@ -88,6 +88,10 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn(".local/share/lumen-link/pyenv", script)
         self.assertIn('"$pinned_python" -m venv', script)
         self.assertIn("verify_running_capabilities", script)
+        self.assertIn("startup_update", script)
+        self.assertIn('git -C "$PROJECT_ROOT" pull --ff-only', script)
+        self.assertIn("startup-finalize --apply", script)
+        self.assertIn('systemctl --user stop lumen-link-worker.service', script)
         self.assertIn(
             'expected = ["teacher.edmformer", "teacher.songformer", "student.train"]',
             script,
@@ -102,14 +106,34 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn("UMask=0077", service)
         self.assertIn("Restart=always", service)
 
+        startup_without_apply = subprocess.run(
+            [str(ROOT / "scripts/lumen-link-wsl"), "startup"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(startup_without_apply.returncode, 2)
+        self.assertIn("startup requires --apply", startup_without_apply.stderr)
+
     def test_windows_setup_has_explicit_apply_and_restricted_firewall(self) -> None:
         script = (ROOT / "scripts/lumen-link-windows.ps1").read_text(
             encoding="utf-8"
         )
         self.assertIn("[switch]$Apply", script)
         self.assertIn('if (-not $Apply)', script)
+        self.assertIn("Lumen Link Dashboard.lnk", script)
         self.assertIn("Lumen Link Dashboard.url", script)
         self.assertIn('$DashboardAddress = "127.0.0.1"', script)
+        self.assertIn(
+            '$shortcut.Arguments = "http://${DashboardAddress}:$WorkerPort/dashboard"',
+            script,
+        )
+        self.assertIn('$shortcut.IconLocation = "$DashboardIcon,0"', script)
+        self.assertIn("./scripts/lumen-link-wsl startup --apply", script)
+        self.assertIn("checking Git, configuration and research deployment", script)
+        self.assertIn("AddMinutes(5)", script)
+        self.assertIn("Stop-ScheduledTask -TaskName $TaskName", script)
+        self.assertIn("Start-ScheduledTask -TaskName $TaskName", script)
         self.assertIn("Start-Sleep -Seconds 30", script)
         self.assertIn("-RemoteAddress $LumenAddress", script)
         self.assertIn("-LocalAddress $ThreadripperAddress", script)

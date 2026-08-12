@@ -1469,7 +1469,7 @@ function renderStructureLibrary() {
   const selected = library.selected_recording;
   setText(
     "structure-timeline-count",
-    `${Number(library.needs_review || 0)} TO REVIEW · ${Number(library.recordings || 0)} SONGS`,
+    `${Number(library.needs_review || 0)} QUALITY CHECKS · ${Number(library.recordings || 0)} SONGS`,
   );
   setText(
     "structure-library-status",

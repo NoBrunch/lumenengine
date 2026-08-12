@@ -468,14 +468,23 @@ within ten seconds; **LUMEN WAITING** means the worker is available but has not
 heard from the coordinator recently. The page never exposes song identity,
 recording identity, manifests, tokens or the pairing secret.
 
-The installed Windows scheduled watchdog starts WSL, repairs NAT forwarding
-when required, and restarts the worker service every 30 seconds. The WSL
-service itself uses `Restart=always`. After the one-time installation, normal
-Lumen or Windows restarts do not require terminal commands to reconnect.
+The installed Windows scheduled watchdog starts WSL and, once per Windows
+login, checks Git, applies the current worker configuration, verifies the
+pinned environments and models, and starts the worker. If the Git remote is
+temporarily unavailable, it verifies and starts the current local revision.
+Failed verification leaves the worker stopped and retries after five minutes.
+After successful startup, the watchdog repairs NAT forwarding and service
+state every 30 seconds. The WSL service itself uses `Restart=always`.
+
+The setup installs a real **Lumen Link Dashboard** shortcut with a Lumen icon
+and removes the obsolete `.url` shortcut. Its target is always the
+Threadripper-local address `http://127.0.0.1:8765/dashboard`; the dedicated
+`192.168.50.1` address is only for traffic arriving from the Lumen computer.
 
 ## Updating Lumen Link
 
-Stop only the offline worker, then update the public source inside WSL:
+The scheduled startup task normally performs this automatically. To update
+immediately without restarting Windows, run inside WSL:
 
 ```bash
 cd ~/lumenengine
@@ -484,6 +493,14 @@ git pull --ff-only
 ./scripts/lumen-link-wsl configure --apply
 ./scripts/lumen-link-wsl verify
 ./scripts/lumen-link-wsl start
+```
+
+After pulling a version that adds or changes Windows integration, refresh the
+scheduled task and shortcut once from elevated PowerShell without touching the
+already configured Ethernet adapter:
+
+```powershell
+& "\\wsl.localhost\Ubuntu\home\lumen\lumenengine\scripts\lumen-link-windows.ps1" -Apply -RefreshOnly
 ```
 
 Do not run `git clean` against the state tree or copy Lumen's SQLite database

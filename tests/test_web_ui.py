@@ -186,6 +186,7 @@ class OperatorInterfaceContractTests(unittest.TestCase):
 
     def test_timeline_editor_has_readable_times_and_review_advances(self) -> None:
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        markup = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         stylesheet = (ROOT / "web" / "styles.css").read_text(
             encoding="utf-8"
         )
@@ -193,6 +194,12 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn('class="structure-time-readout"', script)
         self.assertIn("Opened the next song awaiting review", script)
         self.assertIn('data-timeline-review="unreviewed"', script)
+        self.assertIn("QUALITY CHECKS", script)
+        self.assertIn("This quality queue does not block training", markup)
+        self.assertIn(
+            "Training may use a technically valid completed teacher result",
+            markup,
+        )
         self.assertIn(".sequence-editor-panel {", stylesheet)
         self.assertIn("grid-column: 1 / 3;", stylesheet)
         self.assertIn(".structure-time-readout { min-width: 13rem; }", stylesheet)

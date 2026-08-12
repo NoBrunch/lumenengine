@@ -466,7 +466,7 @@
                 <p class="control-help">Build an ordered phrase for one group. Saving places it at the current song position; Live recalls it at a phrase boundary while the audio sample clock remains in charge of beats.</p>
                 <div id="teacher-timeline-summary" class="teacher-timeline-summary">No cached teacher timeline for this recording yet.</div>
                 <details class="structure-timeline-inspector" open>
-                  <summary><span><b>Analyzed song database &amp; timeline review</b><small>Browse every retained song, see whether it trained the active model, then inspect, approve, correct, or reject its generated structure.</small></span><strong id="structure-timeline-count">0 SONGS</strong></summary>
+                  <summary><span><b>Analyzed song database &amp; timeline quality review</b><small>Browse every retained song and optionally audit, correct, or reject its generated structure. This quality queue does not block training.</small></span><strong id="structure-timeline-count">0 SONGS</strong></summary>
                   <div class="structure-library-toolbar">
                     <label><span>Find a song</span><input id="structure-song-search" type="search" placeholder="Title or artist"></label>
                     <label><span>Show</span><select id="structure-song-filter"><option value="all" selected>All analyzed songs</option><option value="needs_review">Needs review</option><option value="reviewed">Reviewed</option><option value="diagnostic_only">Diagnostic only</option></select></label>
@@ -485,7 +485,7 @@
                     <div class="structure-selected-duration"><b id="structure-selected-position">0:00</b><span>of</span><b id="structure-selected-total">0:00</b></div>
                   </div>
                   <div id="structure-overview" class="structure-overview"><span class="empty-state">Select an analyzed song to display its section map.</span></div>
-                  <p class="control-help">Needs review means EDMFormer or SongFormer produced a current exact-song timeline. EDMFormer supplies techno energy; SongFormer supplies function and content. Lumen keeps both sources visible, fuses their useful axes, and preserves every correction without overwriting the teacher original.</p>
+                  <p class="control-help">Needs review means EDMFormer or SongFormer produced a current exact-song timeline that has not received an optional quality decision. Training may use a technically valid completed teacher result without waiting for approval. EDMFormer supplies techno energy; SongFormer supplies function and content. Corrections override the affected training labels without overwriting the teacher original.</p>
                   <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
                 </details>
                 <div class="sequence-heading-controls">
