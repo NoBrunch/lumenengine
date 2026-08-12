@@ -51,12 +51,18 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn('id="link-queued-detail"', html)
         self.assertIn("queue.recent_imports", script)
         self.assertIn("verified lifetime total", script)
+        self.assertIn("queue.failed_attention", script)
+        self.assertIn("retained historical", script)
+        self.assertIn("void refreshResearch();", script)
         self.assertIn("app.bootstrap?.research?.preparation?.running", script)
         self.assertIn("app.bootstrap?.research?.preparation?.pending", script)
         self.assertIn(
             "app.bootstrap?.research?.student_preparation?.running", script
         )
-        self.assertIn("researchRunning ? 10 : 300", script)
+        self.assertIn(
+            'researchRunning ? 10 : app.page === "audio" ? 50 : 300',
+            script,
+        )
         self.assertIn("research.preparation?.started_unix_ms", script)
         self.assertIn("Preparing student-training snapshot", script)
         self.assertIn("studentPreparationRunning", script)

@@ -76,10 +76,19 @@ function blockWakeTouches(milliseconds = 1200) {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") blockWakeTouches();
+  if (document.visibilityState === "visible") {
+    blockWakeTouches();
+    if (app.bootstrap) void refreshResearch();
+  }
 });
-window.addEventListener("pageshow", () => blockWakeTouches());
-window.addEventListener("focus", () => blockWakeTouches());
+window.addEventListener("pageshow", () => {
+  blockWakeTouches();
+  if (app.bootstrap) void refreshResearch();
+});
+window.addEventListener("focus", () => {
+  blockWakeTouches();
+  if (app.bootstrap) void refreshResearch();
+});
 
 function initializeParticipantIdentity() {
   const storageKey = "lumen.feedback.participant.v1";
@@ -369,6 +378,7 @@ function setPage(name) {
   }
   if (name === "audio") {
     renderTrainingDataset(app.status?.training || {}, app.status?.engine || {});
+    void refreshResearch();
     window.setTimeout(drawScope, 30);
   }
   if (name === "system") renderDmx(app.status || {});
@@ -677,7 +687,7 @@ async function pollStatus() {
     );
     if (
       (app.page === "audio" || researchRunning)
-      && app.pollCount % (researchRunning ? 10 : 300) === 0
+      && app.pollCount % (researchRunning ? 10 : app.page === "audio" ? 50 : 300) === 0
     ) void refreshResearch();
     const spotifyVisible = app.page === "music";
     if (spotifyVisible && app.pollCount % 50 === 0 && app.system?.spotify?.token_present) {
@@ -2523,8 +2533,18 @@ function renderLink(link = {}) {
     ["link-queued", localQueue.queued ?? queue.queued],
     ["link-running", queue.running ?? remoteQueue.running],
     ["link-completed", completedCount],
-    ["link-failed", queue.failed ?? linkQueue.failed ?? remoteQueue.failed],
+    ["link-failed", queue.failed_attention ?? queue.failed ?? linkQueue.failed ?? remoteQueue.failed],
   ]) setText(id, Number(value || 0).toLocaleString());
+  const historicalFailures = Number(
+    queue.failed_historical ?? queue.failed ?? linkQueue.failed ?? 0,
+  );
+  const knownLimitations = Number(queue.failed_known_limitations || 0);
+  setText(
+    "link-failed-detail",
+    historicalFailures
+      ? `${historicalFailures.toLocaleString()} retained historical · ${knownLimitations.toLocaleString()} known limit`
+      : "no unresolved failures",
+  );
   setText(
     "link-queued-detail",
     `${Number(remoteQueue.queued || 0).toLocaleString()} staged remotely · eligible local queue`,

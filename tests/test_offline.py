@@ -18,6 +18,7 @@ from lumen_engine.memory import (
 )
 from lumen_engine.offline import (
     EDMFORMER_JOB,
+    EDMFORMER_MAX_DURATION_MS,
     MIN_TEACHER_DURATION_MS,
     SONGFORMER_JOB,
     STUDENT_ACTIVATION_GATE_VERSION,
@@ -58,6 +59,98 @@ def _complete_supervision() -> dict:
 
 
 class OfflineResearchTests(unittest.TestCase):
+    def test_long_song_skips_only_unvalidated_edmformer_teacher(self):
+        class LongRecordingCoordinator(ResearchJobCoordinator):
+            def _prepare_recording(self, recording):
+                del recording
+                audio = self.audio_root / "long.wav"
+                audio.parent.mkdir(parents=True, exist_ok=True)
+                audio.write_bytes(b"long-song")
+                return PreparedRecording(
+                    recording_id="recording:long",
+                    audio_path=audio,
+                    content_sha256=hashlib.sha256(audio.read_bytes()).hexdigest(),
+                    duration_ms=EDMFORMER_MAX_DURATION_MS + 1_400,
+                    song_id=1,
+                    capture_session_id="capture:long",
+                    split_group_id="spotify:long",
+                    split="train",
+                    structure_supervision=_complete_supervision(),
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            export = root / "export"
+            export.mkdir()
+            (export / "dataset.json").write_text(
+                json.dumps({
+                    "format": "lumen_training_dataset",
+                    "validation": {"valid": True},
+                }),
+                encoding="utf-8",
+            )
+            (export / "recordings.jsonl").write_text("{}\n", encoding="utf-8")
+            store = SongMemoryStore(root / "lumen.sqlite3")
+
+            result = LongRecordingCoordinator(
+                store,
+                training_root=root / "training",
+                research_root=root / "research",
+            ).prepare_export(
+                export, queue_edmformer=True, queue_songformer=True
+            )
+
+            jobs = store.list_analysis_jobs()
+            self.assertEqual([job["job_type"] for job in jobs], [SONGFORMER_JOB])
+            self.assertEqual(result["jobs_queued"], 1)
+            self.assertEqual(
+                result["teachers_skipped"],
+                [{
+                    "recording_id": "recording:long",
+                    "job_type": EDMFORMER_JOB,
+                    "reason": "edmformer_duration_exceeds_validated_context",
+                    "duration_ms": EDMFORMER_MAX_DURATION_MS + 1_400,
+                    "maximum_duration_ms": EDMFORMER_MAX_DURATION_MS,
+                    "detail": (
+                        "SongFormer remains eligible; EDMFormer has no "
+                        "validated whole-song path beyond 420 seconds."
+                    ),
+                }],
+            )
+
+    def test_long_edmformer_failure_is_a_known_exclusion_not_active_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            research = root / "research"
+            store = SongMemoryStore(root / "lumen.sqlite3")
+            job_id = store.enqueue_analysis_job(
+                job_type=EDMFORMER_JOB,
+                payload={
+                    "recording_id": "recording:long",
+                    "content_sha256": "a" * 64,
+                    "duration_ms": EDMFORMER_MAX_DURATION_MS + 1,
+                    "teacher_normalization_version": TEACHER_NORMALIZATION_VERSION,
+                    "structure_supervision": _complete_supervision(),
+                },
+            )
+            store.update_analysis_job(
+                job_id,
+                status="failed",
+                error="published 420-second context",
+            )
+
+            readiness = training_readiness(store, research_root=research)
+
+            self.assertEqual(readiness["teacher_errors"], [])
+            excluded = next(
+                item for item in readiness["excluded_teacher_jobs"]
+                if item["job_id"] == job_id
+            )
+            self.assertEqual(
+                excluded["reason"],
+                "edmformer_duration_exceeds_validated_context",
+            )
+
     def test_rejected_teacher_timeline_is_excluded_from_student_targets(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

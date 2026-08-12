@@ -1327,6 +1327,46 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(status["queue"]["recent_imports"], 0)
         self.assertEqual(status["queue"]["link"]["complete"], 25)
 
+    def test_workload_separates_attention_from_retained_failure_history(self):
+        store = SongMemoryStore(self.root / "link-failures.sqlite3")
+        failures = [
+            (
+                {"execution_target": "threadripper", "recording_id": "legacy"},
+                "Lumen Link rejected this legacy teacher job because its recording is partial",
+            ),
+            (
+                {
+                    "execution_target": "threadripper",
+                    "recording_id": "long",
+                    "duration_ms": 421_400,
+                },
+                "published 420-second context",
+            ),
+            (
+                {"execution_target": "threadripper", "recording_id": "broken"},
+                "unexpected model failure",
+            ),
+        ]
+        for payload, error in failures:
+            job_id = store.enqueue_analysis_job(
+                job_type=EDMFORMER_JOB, payload=payload
+            )
+            store.update_analysis_job(job_id, status="failed", error=error)
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "link-failures-research",
+            state_root=self.root / "link-failures-state",
+            config_path=self.root / "link-failures-state/config.json",
+        )
+        coordinator._refresh_job_snapshot(force=True)
+
+        queue = coordinator.status()["queue"]
+
+        self.assertEqual(queue["failed_historical"], 3)
+        self.assertEqual(queue["failed_attention"], 1)
+        self.assertEqual(queue["failed_known_limitations"], 1)
+        self.assertEqual(queue["failed_archived"], 1)
+
     def test_deterministic_local_import_rejection_fails_once_and_advances(self):
         store = SongMemoryStore(self.root / "import-reject.sqlite3")
         job_id = store.enqueue_analysis_job(

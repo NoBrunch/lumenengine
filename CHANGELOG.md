@@ -8,6 +8,13 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Stopped queueing EDMFormer for songs beyond its validated 420-second
+  whole-song context while retaining SongFormer coverage, classified earlier
+  long-song rejections as known limitations, and separated unresolved Link
+  failures from the durable historical failure total.
+- Refresh the Audio Laboratory research truth immediately on entry, focus, and
+  tab resume so a completed current candidate cannot leave an old stale-snapshot
+  instruction displayed in a long-lived browser tab.
 - Made Train and Validate publish snapshot materialization progress by song
   group, follow exclusive Threadripper feature/training/validation stages from
   the Audio Laboratory, and name local artifact verification, held-out

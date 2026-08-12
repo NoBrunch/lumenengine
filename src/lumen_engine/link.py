@@ -65,6 +65,44 @@ SUPPORTED_JOB_TYPES = (
 )
 
 
+def _failed_job_disposition(
+    job: dict[str, Any], jobs: list[dict[str, Any]]
+) -> str:
+    """Separate unresolved failures from retained history and known limits."""
+
+    if str(job.get("status") or "") != "failed":
+        return "not_failed"
+    payload = job.get("payload") or {}
+    error = str(job.get("error") or "")
+    if "rejected this legacy teacher job" in error:
+        return "archived_ineligible"
+    if (
+        job.get("job_type") == EDMFORMER_JOB
+        and (
+            int(payload.get("duration_ms") or 0) > 420_000
+            or "published 420-second context" in error
+        )
+    ):
+        return "known_duration_limit"
+    signature = (
+        str(job.get("job_type") or ""),
+        str(payload.get("recording_id") or ""),
+        str(payload.get("content_sha256") or ""),
+    )
+    if signature[1] and signature[2] and any(
+        other.get("status") == "complete"
+        and (
+            str(other.get("job_type") or ""),
+            str((other.get("payload") or {}).get("recording_id") or ""),
+            str((other.get("payload") or {}).get("content_sha256") or ""),
+        )
+        == signature
+        for other in jobs
+    ):
+        return "resolved_by_later_completion"
+    return "attention_required"
+
+
 def _process_group_rss_bytes(process_group_id: int) -> int:
     """Measure a runner and all of its feature-worker descendants."""
 
@@ -3975,6 +4013,10 @@ class LumenLinkCoordinator:
             job_id = str(raw.get("job_id") or raw.get("id") or "")
             receipt = imports_by_id.get(job_id)
             canonical = local_by_id.get(job_id)
+            if canonical is not None and canonical.get("status") == "failed":
+                item["failure_disposition"] = _failed_job_disposition(
+                    canonical, self._job_snapshot
+                )
             item["local_import_state"] = (
                 "imported" if receipt is not None else "pending"
             )
@@ -4033,6 +4075,26 @@ class LumenLinkCoordinator:
             )
             for state in ("queued", "running", "complete", "failed", "canceled")
         }
+        link_failed_jobs = [
+            job
+            for job in local_jobs
+            if job.get("status") == "failed"
+            and job.get("job_type") in SUPPORTED_JOB_TYPES
+            and (
+                (job.get("payload") or {}).get("execution_target")
+                == "threadripper"
+                or (job.get("result") or {}).get("execution_target")
+                == "threadripper"
+            )
+        ]
+        failure_dispositions = [
+            _failed_job_disposition(job, local_jobs)
+            for job in link_failed_jobs
+        ]
+        failed_attention = failure_dispositions.count("attention_required")
+        failed_known_limitations = failure_dispositions.count(
+            "known_duration_limit"
+        )
         compatibility = {
             job_type: self._remote_is_compatible(job_type)
             for job_type in SUPPORTED_JOB_TYPES
@@ -4113,6 +4175,14 @@ class LumenLinkCoordinator:
                 ),
                 "completed": link_counts["complete"],
                 "failed": link_counts["failed"],
+                "failed_attention": failed_attention,
+                "failed_historical": link_counts["failed"],
+                "failed_known_limitations": failed_known_limitations,
+                "failed_archived": (
+                    link_counts["failed"]
+                    - failed_attention
+                    - failed_known_limitations
+                ),
                 "locally_imported": link_counts["complete"],
                 "recent_imports": len(self.recent_imports),
                 "bytes_pending": queue_bytes,

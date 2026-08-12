@@ -52,6 +52,7 @@ EDMFORMER_JOB = "teacher.edmformer"
 SONGFORMER_JOB = "teacher.songformer"
 STUDENT_TRAIN_JOB = "student.train"
 MIN_TEACHER_DURATION_MS = 10_000
+EDMFORMER_MAX_DURATION_MS = 420_000
 DEFAULT_OFFLINE_MAX_RSS_GIB = 5.5
 APPLIANCE_OFFLINE_MEMORY_FILE = Path(
     "/etc/lumen-appliance/offline-memory-gib"
@@ -338,13 +339,26 @@ class ResearchJobCoordinator:
                     item.content_sha256,
                     priority=edm_priority,
                 ):
-                    jobs.append(
-                        self.store.enqueue_analysis_job(
-                            job_type=EDMFORMER_JOB,
-                            payload=common_payload,
-                            priority=edm_priority,
+                    if item.duration_ms > EDMFORMER_MAX_DURATION_MS:
+                        skipped.append({
+                            "recording_id": item.recording_id,
+                            "job_type": EDMFORMER_JOB,
+                            "reason": "edmformer_duration_exceeds_validated_context",
+                            "duration_ms": item.duration_ms,
+                            "maximum_duration_ms": EDMFORMER_MAX_DURATION_MS,
+                            "detail": (
+                                "SongFormer remains eligible; EDMFormer has no "
+                                "validated whole-song path beyond 420 seconds."
+                            ),
+                        })
+                    else:
+                        jobs.append(
+                            self.store.enqueue_analysis_job(
+                                job_type=EDMFORMER_JOB,
+                                payload=common_payload,
+                                priority=edm_priority,
+                            )
                         )
-                    )
                 if queue_songformer and not self._already_queued(
                     SONGFORMER_JOB,
                     item.recording_id,
@@ -689,6 +703,13 @@ class ResearchJobCoordinator:
                 unavailable.append({
                     "recording_id": recording_id,
                     "reason": "materialized_teacher_audio_missing",
+                    "audio_path": str(audio_path),
+                })
+                continue
+            if int(payload.get("duration_ms") or 0) > EDMFORMER_MAX_DURATION_MS:
+                unavailable.append({
+                    "recording_id": recording_id,
+                    "reason": "edmformer_duration_exceeds_validated_context",
                     "audio_path": str(audio_path),
                 })
                 continue
@@ -3445,6 +3466,15 @@ def training_readiness(
         ):
             excluded_job_reasons[job_id] = (
                 "obsolete_teacher_normalization_version"
+            )
+            continue
+        if (
+            job_type == EDMFORMER_JOB
+            and int(payload.get("duration_ms") or 0)
+            > EDMFORMER_MAX_DURATION_MS
+        ):
+            excluded_job_reasons[job_id] = (
+                "edmformer_duration_exceeds_validated_context"
             )
             continue
         current_teacher_inventory_jobs.append(job)
