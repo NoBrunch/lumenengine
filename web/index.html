@@ -484,35 +484,9 @@
                     <div><h2 id="structure-selected-title">No song selected</h2><p id="structure-selected-artist">Choose a song above</p></div>
                     <div class="structure-selected-duration"><b id="structure-selected-position">0:00</b><span>of</span><b id="structure-selected-total">0:00</b></div>
                   </div>
-                  <div class="structure-review-transport" aria-label="Selected song playback">
-                    <button id="structure-play" type="button" class="primary">▶ Play this song</button>
-                    <button id="structure-pause" type="button">❚❚ Pause</button>
-                    <button id="structure-back" type="button">−10 sec</button>
-                    <button id="structure-forward" type="button">+10 sec</button>
-                    <label><span>Song position</span><input id="structure-seek" type="range" min="0" max="1000" step="1" value="0"></label>
-                    <span id="structure-playback-state" class="panel-note">Choose an analyzed Spotify song</span>
-                  </div>
                   <div id="structure-overview" class="structure-overview"><span class="empty-state">Select an analyzed song to display its section map.</span></div>
-                  <div id="structure-segment-editor" class="structure-segment-editor hidden">
-                    <div class="structure-segment-heading"><div><span>Selected section</span><b id="structure-segment-number">Section 1</b></div><div><b id="structure-segment-time">0:00–0:00</b><small>Drag either edge in the timeline to change time.</small></div></div>
-                    <div class="structure-segment-fields">
-                      <label><span>Song role · SongFormer</span><select id="structure-merged-functional"></select></label>
-                      <label><span>Energy · EDMFormer</span><select id="structure-merged-energy"></select></label>
-                      <label><span>Content · SongFormer</span><select id="structure-merged-content"></select></label>
-                      <label><span>Change at start</span><select id="structure-merged-event"></select></label>
-                    </div>
-                    <div class="structure-segment-actions">
-                      <button id="structure-split" type="button">+ Add section at playhead</button>
-                      <button id="structure-delete-segment" type="button">Delete selected section</button>
-                      <label><span>Correction note</span><input id="structure-merged-note" maxlength="1000" placeholder="Optional: what did the models misunderstand?"></label>
-                      <button id="structure-save-merged" type="button" class="primary">Save corrected combined timeline</button>
-                    </div>
-                  </div>
-                  <p class="control-help">The combined timeline places EDMFormer energy and SongFormer song role/content on the same boundaries. Drag a boundary, select a section to correct its labels, or add a section at the playhead. Saving creates a new operator correction and leaves both teacher originals intact. Training may use a technically valid completed teacher result without waiting for approval.</p>
-                  <details class="structure-source-evidence">
-                    <summary><span><b>Teacher source evidence and quality decisions</b><small>Inspect model confidence, raw labels, and approve or reject each original result.</small></span></summary>
-                    <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
-                  </details>
+                  <p class="control-help">Needs review means EDMFormer or SongFormer produced a current exact-song timeline that has not received an optional quality decision. Training may use a technically valid completed teacher result without waiting for approval. EDMFormer supplies techno energy; SongFormer supplies function and content. Corrections override the affected training labels without overwriting the teacher original.</p>
+                  <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
                 </details>
                 <div class="sequence-heading-controls">
                   <label><span>Sequence name</span><input id="sequence-name" type="text" maxlength="80" placeholder="Example: build into drop"></label>

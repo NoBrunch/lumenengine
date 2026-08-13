@@ -204,26 +204,6 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("grid-column: 1 / 3;", stylesheet)
         self.assertIn(".structure-time-readout { min-width: 13rem; }", stylesheet)
 
-    def test_timeline_review_combines_teachers_and_edits_directly(self) -> None:
-        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
-        markup = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-        stylesheet = (ROOT / "web" / "styles.css").read_text(
-            encoding="utf-8"
-        )
-
-        self.assertIn('id="structure-play"', markup)
-        self.assertIn('id="structure-seek"', markup)
-        self.assertIn('id="structure-split"', markup)
-        self.assertIn('id="structure-save-merged"', markup)
-        self.assertIn("function buildMergedStructureDraft", script)
-        self.assertIn("function beginStructureBoundaryDrag", script)
-        self.assertIn('window.addEventListener("pointermove", move)', script)
-        self.assertIn("function splitMergedStructureSegment", script)
-        self.assertIn("function playSelectedStructureSong", script)
-        self.assertIn("playhead updates locally", script)
-        self.assertIn(".structure-boundary-handle {", stylesheet)
-        self.assertIn(".structure-source-lane", stylesheet)
-
     def test_sequence_and_gesture_editors_expose_simple_workflows(self) -> None:
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         markup = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
