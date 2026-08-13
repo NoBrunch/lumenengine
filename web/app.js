@@ -3169,8 +3169,15 @@ async function runLinkAction(action, button) {
     const result = await api(`/api/link/${action}`, { method: "POST", body: {} });
     app.link = result.link || result.status || result;
     renderLink(app.link);
-    setLinkActionFeedback(result.message || `${title} completed.`, "success");
-    toast(title, result.message || "The link state was updated.", "success");
+    const connection = app.link?.connection || {};
+    if (action === "test" && connection.state !== "ready") {
+      const reason = connection.detail || connection.error || `Worker reported ${connection.state || "offline"}.`;
+      setLinkActionFeedback(`Connection test completed: ${reason}`, "error");
+      toast("Lumen Link is not ready", reason, "error");
+    } else {
+      setLinkActionFeedback(result.message || `${title} completed.`, "success");
+      toast(title, result.message || "The link state was updated.", "success");
+    }
   } catch (error) {
     setLinkActionFeedback(`${title} failed: ${error.message}`, "error");
     toast(`${title} failed`, error.message, "error");

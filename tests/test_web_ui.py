@@ -298,6 +298,8 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("a silently disabled control made revision drift", script)
         self.assertIn("function setLinkActionFeedback", script)
         self.assertIn("Testing…", script)
+        self.assertIn("Connection test completed: ${reason}", script)
+        self.assertIn('toast("Lumen Link is not ready", reason, "error")', script)
         self.assertIn("failed: ${error.message}", script)
 
     def test_center_fixture_preview_matches_characterized_mechanics(self) -> None:
