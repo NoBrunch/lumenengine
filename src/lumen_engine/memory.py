@@ -2930,10 +2930,10 @@ class SongMemoryStore:
     ) -> str:
         """Save an immutable operator revision without altering its source.
 
-        ``segments`` is a complete corrected copy of the base segmentation.
-        Time boundaries may be adjusted, and blank labels remain blank.  The
-        original raw label is always copied from the teacher timeline so later
-        training and audits retain what the teacher actually emitted.
+        ``segments`` is a complete corrected timeline. Boundaries may be moved,
+        inserted, or removed, and blank labels remain blank. Source evidence is
+        copied from the overlapping base segment so the client cannot replace
+        immutable teacher provenance when an operator splits a section.
         """
         base = self.structure_timeline(base_timeline_id)
         if base is None:
@@ -2942,21 +2942,42 @@ class SongMemoryStore:
             raise ValueError("base structure timeline has no recording identity")
         if not segments:
             raise ValueError("at least one corrected segment is required")
-        if len(segments) != len(base["segments"]):
-            raise ValueError("correction must contain every base segment")
 
         corrected: list[dict[str, Any]] = []
         allowed_labels = (
             "functional_label", "energy_label", "content_label"
         )
-        for index, (source, supplied) in enumerate(
-            zip(base["segments"], segments, strict=True)
-        ):
+        for index, supplied in enumerate(segments):
             if int(supplied.get("segment_index", index)) != index:
                 raise ValueError("correction segment indexes must be contiguous")
-            start_ms = int(supplied.get("start_ms", source["start_ms"]))
-            end_value = supplied.get("end_ms", source.get("end_ms"))
+            start_ms = int(supplied.get("start_ms", 0))
+            end_value = supplied.get("end_ms")
             end_ms = int(end_value) if end_value is not None else None
+            if start_ms < 0 or end_ms is None or end_ms <= start_ms:
+                raise ValueError(
+                    "corrected structure segments require increasing finite times"
+                )
+            midpoint = start_ms + (end_ms - start_ms) / 2
+
+            def source_score(candidate: dict[str, Any]) -> tuple[int, float]:
+                source_start = int(candidate.get("start_ms") or 0)
+                source_end_value = candidate.get("end_ms")
+                source_end = (
+                    int(source_end_value)
+                    if source_end_value is not None else end_ms
+                )
+                overlap = max(
+                    0, min(end_ms, source_end) - max(start_ms, source_start)
+                )
+                contains_midpoint = int(
+                    source_start <= midpoint < source_end
+                )
+                return contains_midpoint, overlap
+
+            source_index, source = max(
+                enumerate(base["segments"]),
+                key=lambda pair: source_score(pair[1]),
+            )
             original_provenance = source.get("provenance") or {}
             event = supplied.get(
                 "event",
@@ -2983,7 +3004,7 @@ class SongMemoryStore:
                 "provenance": {
                     "source": "operator_correction",
                     "base_timeline_id": base_timeline_id,
-                    "base_segment_index": index,
+                    "base_segment_index": source_index,
                     "base_provenance": original_provenance,
                     # ``transition_event`` is the normalized teacher/student
                     # contract. Older operator corrections used ``event``;
@@ -3008,11 +3029,23 @@ class SongMemoryStore:
                     )
             corrected.append(item)
 
+        if int(corrected[0]["start_ms"]) != 0:
+            raise ValueError("corrected structure timeline must start at zero")
         for index in range(1, len(corrected)):
-            previous_end = corrected[index - 1].get("end_ms")
+            previous_end = int(corrected[index - 1]["end_ms"])
             current_start = int(corrected[index]["start_ms"])
-            if previous_end is not None and int(previous_end) > current_start:
-                raise ValueError("corrected structure segments must not overlap")
+            if previous_end != current_start:
+                raise ValueError(
+                    "corrected structure segments must be continuous"
+                )
+        base_end = base["segments"][-1].get("end_ms")
+        if (
+            base_end is not None
+            and int(corrected[-1]["end_ms"]) != int(base_end)
+        ):
+            raise ValueError(
+                "corrected structure timeline must retain the recording end"
+            )
 
         return self.save_structure_timeline(
             provenance="operator_correction",

@@ -6014,7 +6014,36 @@ class LumenApplication:
             # a transport command. The next console read is therefore one
             # player request rather than a complete account/library rebuild.
             self._spotify_playback_cached_at.clear()
+        # Spotify may take a moment to expose a transport change. Reconcile
+        # shortly after the accepted command so Live receives the new identity
+        # without waiting for the normal background media interval. The review
+        # UI advances its own playhead immediately while this finishes.
+        threading.Thread(
+            target=self._refresh_spotify_after_command,
+            name="lumen-spotify-command-refresh",
+            daemon=True,
+        ).start()
         return {"accepted": True, "action": action}
+
+    def _refresh_spotify_after_command(self) -> None:
+        time.sleep(0.2)
+        try:
+            payload = SpotifyWebAPI(self._spotify_valid_token).playback()
+            self._remember_spotify_payload(payload)
+            summary = spotify_playback_summary(payload)
+            with self._spotify_console_lock:
+                now = time.time()
+                for cache_key, console in self._spotify_console_cache.items():
+                    console["playback"] = deepcopy(summary)
+                    console["observed_at_unix_ms"] = round(now * 1000)
+                    self._spotify_playback_cached_at[cache_key] = now
+            with self._lock:
+                self._status_sequence += 1
+        except Exception:
+            # The normal media poll remains authoritative and will retry. A
+            # delayed Spotify response must not turn an accepted command into
+            # a false operator error.
+            return
 
     def _remember_spotify_payload(
         self,

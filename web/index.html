@@ -484,26 +484,53 @@
                     <div><h2 id="structure-selected-title">No song selected</h2><p id="structure-selected-artist">Choose a song above</p></div>
                     <div class="structure-selected-duration"><b id="structure-selected-position">0:00</b><span>of</span><b id="structure-selected-total">0:00</b></div>
                   </div>
+                  <div class="structure-review-transport" aria-label="Selected song playback">
+                    <button id="structure-play" type="button" class="primary">▶ Play this song</button>
+                    <button id="structure-pause" type="button">❚❚ Pause</button>
+                    <button id="structure-back" type="button">−10 sec</button>
+                    <button id="structure-forward" type="button">+10 sec</button>
+                    <label><span>Song position</span><input id="structure-seek" type="range" min="0" max="1000" step="1" value="0"></label>
+                    <span id="structure-playback-state" class="panel-note">Choose an analyzed Spotify song</span>
+                  </div>
                   <div id="structure-overview" class="structure-overview"><span class="empty-state">Select an analyzed song to display its section map.</span></div>
-                  <p class="control-help">Needs review means EDMFormer or SongFormer produced a current exact-song timeline that has not received an optional quality decision. Training may use a technically valid completed teacher result without waiting for approval. EDMFormer supplies techno energy; SongFormer supplies function and content. Corrections override the affected training labels without overwriting the teacher original.</p>
-                  <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
+                  <div id="structure-segment-editor" class="structure-segment-editor hidden">
+                    <div class="structure-segment-heading"><div><span>Selected section</span><b id="structure-segment-number">Section 1</b></div><div><b id="structure-segment-time">0:00–0:00</b><small>Drag either edge in the timeline to change time.</small></div></div>
+                    <div class="structure-segment-fields">
+                      <label><span>Song role · SongFormer</span><select id="structure-merged-functional"></select></label>
+                      <label><span>Energy · EDMFormer</span><select id="structure-merged-energy"></select></label>
+                      <label><span>Content · SongFormer</span><select id="structure-merged-content"></select></label>
+                      <label><span>Change at start</span><select id="structure-merged-event"></select></label>
+                    </div>
+                    <div class="structure-segment-actions">
+                      <button id="structure-split" type="button">+ Add section at playhead</button>
+                      <button id="structure-delete-segment" type="button">Delete selected section</button>
+                      <label><span>Correction note</span><input id="structure-merged-note" maxlength="1000" placeholder="Optional: what did the models misunderstand?"></label>
+                      <button id="structure-save-merged" type="button" class="primary">Save corrected combined timeline</button>
+                    </div>
+                  </div>
+                  <p class="control-help">The combined timeline places EDMFormer energy and SongFormer song role/content on the same boundaries. Drag a boundary, select a section to correct its labels, or add a section at the playhead. Saving creates a new operator correction and leaves both teacher originals intact. Training may use a technically valid completed teacher result without waiting for approval.</p>
+                  <details class="structure-source-evidence">
+                    <summary><span><b>Teacher source evidence and quality decisions</b><small>Inspect model confidence, raw labels, and approve or reject each original result.</small></span></summary>
+                    <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
+                  </details>
                 </details>
                 <div class="sequence-heading-controls">
                   <label><span>Sequence name</span><input id="sequence-name" type="text" maxlength="80" placeholder="Example: build into drop"></label>
                   <label><span>Fixture group</span><select id="sequence-scope"><option value="movers">Movers</option><option value="center">Center multi-effect</option><option value="overall">Whole rig</option></select></label>
                   <label><span>Energy state</span><select id="sequence-section"><option value="">Use current detection</option><option value="silence">Silence</option><option value="intro">Intro</option><option value="groove">Groove</option><option value="breakdown">Breakdown</option><option value="build">Build</option><option value="drop">Drop</option><option value="outro">Outro</option></select></label>
                 </div>
+                <div class="sequence-quick-start"><span>Start with a phrase shape:</span><button type="button" data-sequence-template="steady">Steady look</button><button type="button" data-sequence-template="build">Build → drop</button><button type="button" data-sequence-template="breakdown">Breakdown → release</button></div>
                 <div id="sequence-steps" class="sequence-steps"></div>
                 <div class="sequence-editor-actions"><button id="sequence-add-step">+ Add step</button><button id="sequence-save-here" class="primary">Save complete cue sequence at this position</button><button id="sequence-clear">New blank sequence</button><button id="sequence-undo-history" disabled>Undo last edit/delete</button></div>
                 <div class="sequence-history"><h4>Saved for this song</h4><div id="sequence-history-list" class="sequence-history-list"></div></div>
               </section>
               <section class="panel gesture-movement-panel">
                 <div class="panel-titlebar"><h3>Gesture Movement Editor</h3><span id="gesture-movement-status" class="panel-note">Live associations</span></div>
-                <p class="control-help">Choose the movement routines Lumen may use when its expression engine calls a gesture. Select a movement card above to edit that routine’s Movers or Center characteristics in Motion Studio.</p>
+                <p class="control-help">First choose what Lumen is trying to express, then check the movements it may use. Play or edit any movement from its card; Save associations makes the checked choices live.</p>
                 <div class="gesture-movement-editor">
-                  <label><span>Gesture</span><select id="gesture-movement-gesture"><option value="hold">Hold</option><option value="breathe">Breathe</option><option value="converge">Converge</option><option value="expand">Expand</option><option value="sweep">Sweep</option><option value="pulse">Pulse</option><option value="release">Release</option></select></label>
-                  <fieldset><legend>Associated movements</legend><div id="gesture-movement-options" class="gesture-movement-options"></div></fieldset>
-                  <div class="gesture-movement-actions"><button id="gesture-movement-add" type="button">+ Add selected movement</button><button id="gesture-movement-edit" type="button">Edit selected movement</button><button id="gesture-movement-save" type="button" class="primary">Save associations</button></div>
+                  <label><span>1 · Expression gesture</span><select id="gesture-movement-gesture"><option value="hold">Hold</option><option value="breathe">Breathe</option><option value="converge">Converge</option><option value="expand">Expand</option><option value="sweep">Sweep</option><option value="pulse">Pulse</option><option value="release">Release</option></select><small id="gesture-movement-description">Hold keeps the room visually settled.</small></label>
+                  <fieldset><legend>2 · Movements Lumen may choose</legend><div id="gesture-movement-options" class="gesture-movement-options"></div></fieldset>
+                  <div class="gesture-movement-actions"><span>3 · Apply your checked choices</span><button id="gesture-movement-save" type="button" class="primary">Save associations</button></div>
                 </div>
               </section>
               <section class="panel rehearsal-guide-panel">

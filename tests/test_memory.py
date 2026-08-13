@@ -894,9 +894,62 @@ class MemoryTests(unittest.TestCase):
                 corrected["metadata"]["corrects_timeline_id"], original_id
             )
 
+            split_id = store.save_structure_correction(
+                base_timeline_id=original_id,
+                participant_id="operator-1",
+                note="Inserted a missing build section.",
+                segments=[
+                    {
+                        "segment_index": 0,
+                        "start_ms": 0,
+                        "end_ms": 20_000,
+                        "energy_label": "groove",
+                    },
+                    {
+                        "segment_index": 1,
+                        "start_ms": 20_000,
+                        "end_ms": 30_000,
+                        "energy_label": "build",
+                        "event": "build_start",
+                    },
+                    {
+                        "segment_index": 2,
+                        "start_ms": 30_000,
+                        "end_ms": 60_000,
+                        "energy_label": "breakdown",
+                    },
+                ],
+            )
+            split = store.structure_timeline(split_id)
+            assert split is not None
+            self.assertEqual(len(split["segments"]), 3)
+            self.assertEqual(
+                split["segments"][1]["provenance"]["base_segment_index"],
+                0,
+            )
+            self.assertEqual(split["segments"][1]["raw_label"], "Drop")
+            with self.assertRaisesRegex(ValueError, "must be continuous"):
+                store.save_structure_correction(
+                    base_timeline_id=original_id,
+                    segments=[
+                        {
+                            "segment_index": 0,
+                            "start_ms": 0,
+                            "end_ms": 20_000,
+                            "energy_label": "groove",
+                        },
+                        {
+                            "segment_index": 1,
+                            "start_ms": 21_000,
+                            "end_ms": 60_000,
+                            "energy_label": "drop",
+                        },
+                    ],
+                )
+
             history = store.structure_timelines_for_recording(recording_id)
             self.assertEqual({item["id"] for item in history}, {
-                original_id, corrected_id,
+                original_id, corrected_id, split_id,
             })
             teacher = next(item for item in history if item["id"] == original_id)
             self.assertEqual(teacher["teacher"]["name"], "EDMFormer")
@@ -910,7 +963,7 @@ class MemoryTests(unittest.TestCase):
             assert recalled is not None
             self.assertEqual(recalled["axes"]["energy"]["label"], "breakdown")
             self.assertEqual(
-                recalled["axes"]["energy"]["timeline_id"], corrected_id
+                recalled["axes"]["energy"]["timeline_id"], split_id
             )
 
     def test_operator_approval_adds_trust_without_changing_model_confidence(

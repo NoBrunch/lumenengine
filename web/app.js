@@ -59,6 +59,10 @@ const app = {
   teaching: null,
   structureLibrary: null,
   selectedStructureRecordingId: null,
+  structureMergedDraft: null,
+  structureSelectedSegment: 0,
+  structureBoundaryDrag: null,
+  structurePlayback: null,
   sequenceDraft: [{ routine: "breathe", duration_beats: 8, intensity: 0.72, brightness: 0.72, motion_speed: 0.5, travel_size: 1, activity_density: 1, beat_sync: 1, palette: "", strobe: 0 }],
   editingSequenceId: null,
   editingPlacementId: null,
@@ -626,6 +630,7 @@ async function initialize() {
   updateClock();
   window.setInterval(updateClock, 1000);
   window.setInterval(updateSpotifyProgressDisplay, 250);
+  window.setInterval(() => updateStructureOverviewPlayhead(app.status || {}), 100);
   window.requestAnimationFrame(drawCenterMotion);
   try {
     app.bootstrap = await api("/api/bootstrap");
@@ -819,6 +824,15 @@ function renderRehearsal(rehearsal = {}) {
 
 function renderGestureMovements(rehearsal = app.status?.rehearsal || {}) {
   const gesture = $("gesture-movement-gesture")?.value || "hold";
+  const descriptions = {
+    hold: "Hold keeps the room visually settled.",
+    breathe: "Breathe gives quiet passages slow, gentle motion.",
+    converge: "Converge brings beams inward as tension focuses.",
+    expand: "Expand opens the room as the music grows.",
+    sweep: "Sweep carries attention across the room.",
+    pulse: "Pulse makes movement answer strong rhythmic accents.",
+    release: "Release lets tension fall away after a peak.",
+  };
   const associations = rehearsal.gesture_movements
     || app.bootstrap?.settings?.gesture_movements || {};
   const selected = new Set(
@@ -828,9 +842,10 @@ function renderGestureMovements(rehearsal = app.status?.rehearsal || {}) {
   const options = $("gesture-movement-options");
   const renderKey = JSON.stringify([gesture, [...selected].sort(), routines.map((routine) => routine.id)]);
   if (options && app.gestureMovementRenderKey !== renderKey) {
-    options.innerHTML = routines.map((routine) => `<label class="gesture-movement-option"><input type="checkbox" value="${escapeHtml(routine.id)}" ${selected.has(routine.id) ? "checked" : ""}><span>${escapeHtml(routine.name)}</span><button type="button" data-edit-gesture-routine="${escapeHtml(routine.id)}" title="Edit ${escapeHtml(routine.name)} in Motion Studio">Edit</button></label>`).join("");
+    options.innerHTML = routines.map((routine) => `<div class="gesture-movement-option${selected.has(routine.id) ? " selected" : ""}"><label><input type="checkbox" value="${escapeHtml(routine.id)}" ${selected.has(routine.id) ? "checked" : ""}><span><b>${escapeHtml(routine.name)}</b><small>${escapeHtml(routine.description || "Movement routine")}</small></span></label><div><button type="button" data-play-gesture-routine="${escapeHtml(routine.id)}">Play</button><button type="button" data-edit-gesture-routine="${escapeHtml(routine.id)}">Edit shape</button></div></div>`).join("");
     app.gestureMovementRenderKey = renderKey;
   }
+  setText("gesture-movement-description", descriptions[gesture] || "Choose which movements express this gesture.");
   setText(
     "gesture-movement-status",
     app.gestureMovementDirty
@@ -1493,34 +1508,196 @@ function structureOverviewTimeline(library = {}) {
     || null;
 }
 
+function structureTeacherKind(timeline = {}) {
+  const source = `${timeline.teacher?.name || ""} ${timeline.provenance || ""}`.toLowerCase();
+  if (timeline.provenance === "operator_correction") return "operator";
+  if (source.includes("edmformer")) return "edmformer";
+  if (source.includes("songformer")) return "songformer";
+  return "teacher";
+}
+
+function structureSegmentAt(timeline, positionMs) {
+  return (timeline?.segments || []).find((segment) => (
+    Number(segment.start_ms || 0) <= positionMs
+    && (segment.end_ms === null || segment.end_ms === undefined || Number(segment.end_ms) > positionMs)
+  )) || timeline?.segments?.at(-1) || null;
+}
+
+function buildMergedStructureDraft(library = {}) {
+  const selected = library.selected_recording;
+  const timelines = library.structure_timelines || [];
+  if (!selected || !timelines.length) return null;
+  const operator = timelines.find((item) => item.provenance === "operator_correction");
+  const edm = timelines.find((item) => structureTeacherKind(item) === "edmformer" && item.review?.status !== "rejected");
+  const song = timelines.find((item) => structureTeacherKind(item) === "songformer" && item.review?.status !== "rejected");
+  const fallback = timelines.find((item) => item.review_eligible !== false) || timelines[0];
+  const base = operator || edm || song || fallback;
+  const duration = Math.max(1, Number(selected.duration_ms || base?.segments?.at(-1)?.end_ms || 1));
+  if (operator) {
+    return {
+      recordingId: selected.recording_id,
+      baseTimelineId: operator.id,
+      sourceNames: ["Operator correction"],
+      durationMs: duration,
+      dirty: false,
+      segments: operator.segments.map((segment, index) => ({
+        ...segment,
+        segment_index: index,
+        start_ms: Number(segment.start_ms || 0),
+        end_ms: Number(segment.end_ms ?? duration),
+        event: structureTransitionEvent(segment),
+      })),
+    };
+  }
+  const sourceTimelines = [edm, song].filter(Boolean);
+  if (!sourceTimelines.length) sourceTimelines.push(fallback);
+  const boundaries = new Set([0, duration]);
+  sourceTimelines.forEach((timeline) => (timeline?.segments || []).forEach((segment) => {
+    boundaries.add(Math.max(0, Math.min(duration, Number(segment.start_ms || 0))));
+    if (segment.end_ms !== null && segment.end_ms !== undefined) {
+      boundaries.add(Math.max(0, Math.min(duration, Number(segment.end_ms))));
+    }
+  }));
+  const rawBoundaries = [...boundaries].filter(Number.isFinite).sort((a, b) => a - b);
+  const clusters = rawBoundaries.reduce((result, boundary) => {
+    const current = result.at(-1);
+    if (current && boundary - current.at(-1) <= 750 && boundary !== duration) current.push(boundary);
+    else result.push([boundary]);
+    return result;
+  }, []);
+  const ordered = clusters.map((cluster, index) => (
+    index === 0 ? 0 : index === clusters.length - 1 ? duration
+      : Math.round(cluster.reduce((sum, value) => sum + value, 0) / cluster.length)
+  ));
+  const segments = ordered.slice(0, -1).map((start, index) => {
+    const end = ordered[index + 1];
+    const midpoint = start + (end - start) / 2;
+    const edmSegment = structureSegmentAt(edm, midpoint);
+    const songSegment = structureSegmentAt(song, midpoint);
+    const fallbackSegment = structureSegmentAt(fallback, midpoint) || {};
+    const eventSegment = [edmSegment, songSegment, fallbackSegment].find((segment) => (
+      segment && Math.abs(Number(segment.start_ms || 0) - start) <= 1000
+        && structureTransitionEvent(segment)
+    ));
+    return {
+      segment_index: index,
+      start_ms: Math.round(start),
+      end_ms: Math.round(end),
+      functional_label: songSegment?.functional_label || fallbackSegment.functional_label || null,
+      energy_label: edmSegment?.energy_label || fallbackSegment.energy_label || null,
+      content_label: songSegment?.content_label || fallbackSegment.content_label || null,
+      event: eventSegment ? structureTransitionEvent(eventSegment) : null,
+      edm_source: edmSegment || null,
+      song_source: songSegment || null,
+    };
+  }).filter((segment) => segment.end_ms > segment.start_ms);
+  return {
+    recordingId: selected.recording_id,
+    baseTimelineId: base.id,
+    sourceNames: sourceTimelines.map((timeline) => timeline.teacher?.name || label(timeline.provenance || "teacher")),
+    durationMs: duration,
+    dirty: false,
+    segments,
+  };
+}
+
+function ensureMergedStructureDraft(library = {}) {
+  const recordingId = library.selected_recording?.recording_id;
+  if (!app.structureMergedDraft || app.structureMergedDraft.recordingId !== recordingId) {
+    app.structureMergedDraft = buildMergedStructureDraft(library);
+    app.structureSelectedSegment = 0;
+  }
+  return app.structureMergedDraft;
+}
+
 function renderStructureOverview(library = {}) {
   const container = $("structure-overview");
   if (!container) return;
   const selected = library.selected_recording;
-  const timeline = structureOverviewTimeline(library);
-  if (!selected || !timeline?.segments?.length) {
+  const draft = ensureMergedStructureDraft(library);
+  if (!selected || !draft?.segments?.length) {
     container.innerHTML = '<span class="empty-state">Select an analyzed song to display its section map.</span>';
+    $("structure-segment-editor")?.classList.add("hidden");
     return;
   }
-  const duration = Math.max(1, Number(selected.duration_ms || timeline.segments.at(-1)?.end_ms || 1));
-  const segments = timeline.segments.map((segment, index) => {
+  const duration = draft.durationMs;
+  const segments = draft.segments.map((segment, index) => {
     const start = Math.max(0, Number(segment.start_ms || 0));
     const end = Math.max(start, Number(segment.end_ms ?? duration));
     const width = Math.max(0.4, (end - start) / duration * 100);
     const energy = segment.energy_label || "unknown";
     const primary = segment.functional_label || energy || segment.raw_label || "unknown";
-    return `<button class="structure-overview-segment energy-${escapeHtml(energy)}" data-overview-segment="${index}" style="width:${width}%" title="${escapeHtml(`${songTime(start)}–${songTime(end)} · ${label(primary)} · ${label(energy)}`)}"><b>${escapeHtml(label(primary))}</b><small>${songTime(start)}</small></button>`;
+    const handle = index < draft.segments.length - 1
+      ? `<i class="structure-boundary-handle" data-structure-boundary="${index}" title="Drag to move this boundary"></i>` : "";
+    return `<button class="structure-overview-segment energy-${escapeHtml(energy)}${index === app.structureSelectedSegment ? " selected" : ""}" data-overview-segment="${index}" style="width:${width}%" title="${escapeHtml(`${songTime(start)}–${songTime(end)} · ${label(primary)} · ${label(energy)}`)}"><b>${escapeHtml(label(primary))}</b><span>${escapeHtml(label(energy))}</span><small>${songTime(start)}</small>${handle}</button>`;
   }).join("");
-  container.innerHTML = `<div class="structure-overview-track">${segments}<i id="structure-overview-playhead"></i></div><div class="structure-overview-legend"><span>Breakdown</span><span>Build</span><span>Drop</span><span>Groove</span><em>${escapeHtml(timeline.teacher?.name || timeline.provenance || "Timeline")}</em></div>`;
+  const sourceLane = (kind, axis, heading) => {
+    const timeline = (library.structure_timelines || []).find((item) => structureTeacherKind(item) === kind);
+    if (!timeline?.segments?.length) return `<div class="structure-source-lane missing"><b>${heading}</b><span>No result</span></div>`;
+    return `<div class="structure-source-lane"><b>${heading}</b><div>${timeline.segments.map((segment) => {
+      const start = Number(segment.start_ms || 0);
+      const end = Number(segment.end_ms ?? duration);
+      const value = segment[axis] || segment.raw_label || "unknown";
+      return `<span style="left:${start / duration * 100}%;width:${Math.max(.3, (end - start) / duration * 100)}%" title="${escapeHtml(`${songTime(start)}–${songTime(end)} · ${label(value)}`)}">${escapeHtml(label(value))}</span>`;
+    }).join("")}</div></div>`;
+  };
+  container.innerHTML = `<div class="structure-combined-label"><b>Combined correction</b><span>Function + content from SongFormer · energy from EDMFormer</span></div><div class="structure-overview-track">${segments}<i id="structure-overview-playhead"></i></div>${sourceLane("songformer", "functional_label", "SongFormer · song role")}${sourceLane("edmformer", "energy_label", "EDMFormer · energy")}<div class="structure-overview-legend"><span>Drag the handles between sections to correct timing.</span><em>${draft.dirty ? "Unsaved changes" : escapeHtml(draft.sourceNames.join(" + "))}</em></div>`;
+  renderMergedSegmentEditor();
   updateStructureOverviewPlayhead(app.status || {});
+}
+
+function renderMergedSegmentEditor() {
+  const editor = $("structure-segment-editor");
+  const draft = app.structureMergedDraft;
+  const segment = draft?.segments?.[app.structureSelectedSegment];
+  if (!editor || !segment) {
+    editor?.classList.add("hidden");
+    return;
+  }
+  editor.classList.remove("hidden");
+  setText("structure-segment-number", `Section ${app.structureSelectedSegment + 1} of ${draft.segments.length}`);
+  setText("structure-segment-time", `${songTime(segment.start_ms)}–${songTime(segment.end_ms)}`);
+  const fillSelect = (id, values, current, empty) => {
+    const select = $(id);
+    if (!select) return;
+    select.innerHTML = values.map((value) => `<option value="${escapeHtml(value)}"${value === (current || "") ? " selected" : ""}>${escapeHtml(value ? label(value) : empty)}</option>`).join("");
+  };
+  fillSelect("structure-merged-functional", STRUCTURE_LABELS.functional, segment.functional_label, "Not supplied");
+  fillSelect("structure-merged-energy", STRUCTURE_LABELS.energy, segment.energy_label, "Not supplied");
+  fillSelect("structure-merged-content", STRUCTURE_LABELS.content, segment.content_label, "Not supplied");
+  fillSelect("structure-merged-event", STRUCTURE_EVENTS, segment.event, "No change event");
+  if ($("structure-delete-segment")) $("structure-delete-segment").disabled = draft.segments.length <= 1;
+}
+
+function currentStructurePlaybackPosition() {
+  const playback = app.structurePlayback;
+  if (!playback || playback.recordingId !== app.selectedStructureRecordingId) return 0;
+  const elapsed = playback.isPlaying ? Date.now() - playback.syncedAt : 0;
+  return Math.min(playback.durationMs || Infinity, Math.max(0, playback.positionMs + elapsed));
 }
 
 function updateStructureOverviewPlayhead(status = {}) {
   const selectedId = app.structureLibrary?.selected_recording_id;
-  const playingId = app.teaching?.recording_id || status.song_teaching?.recording_id;
   const selected = app.structureLibrary?.selected_recording;
-  const isPlaying = Boolean(selectedId && selectedId === playingId);
-  const position = isPlaying ? Number(status.media?.live_position_ms || app.teaching?.position_ms || 0) : 0;
+  const mediaMatches = Boolean(
+    selected?.provider_item_id
+    && status.media?.provider_item_id
+    && String(status.media.provider_item_id).replace("spotify:track:", "")
+      === String(selected.provider_item_id).replace("spotify:track:", "")
+  );
+  const observedPlaying = Boolean(selectedId && mediaMatches);
+  if (observedPlaying) {
+    const observed = Number(status.media?.live_position_ms || app.teaching?.position_ms || 0);
+    const local = currentStructurePlaybackPosition();
+    const commandSettled = !app.structurePlayback?.commandedAt || Date.now() - app.structurePlayback.commandedAt > 2500;
+    const observedIsPlaying = status.media?.is_playing !== false;
+    const playbackChanged = app.structurePlayback?.isPlaying !== observedIsPlaying;
+    if (!app.structurePlayback || (commandSettled && (Math.abs(observed - local) > 3000 || playbackChanged))) {
+      app.structurePlayback = { recordingId: selectedId, positionMs: observed, durationMs: Number(selected?.duration_ms || 0), isPlaying: status.media?.is_playing !== false, syncedAt: Date.now(), commandedAt: 0 };
+    }
+  }
+  const isPlaying = Boolean(app.structurePlayback?.recordingId === selectedId && app.structurePlayback.isPlaying);
+  const position = currentStructurePlaybackPosition();
   const duration = Number(selected?.duration_ms || 0);
   const progress = duration > 0 ? clamp(position / duration) : 0;
   const playhead = $("structure-overview-playhead");
@@ -1528,7 +1705,11 @@ function updateStructureOverviewPlayhead(status = {}) {
     playhead.style.left = `${progress * 100}%`;
     playhead.classList.toggle("inactive", !isPlaying);
   }
-  setText("structure-selected-position", isPlaying ? songTime(position) : "Not playing");
+  setText("structure-selected-position", songTime(position));
+  setText("structure-playback-state", isPlaying ? "Playing through Spotify · playhead updates locally" : position ? "Paused" : "Ready to play through Spotify");
+  if ($("structure-seek") && document.activeElement !== $("structure-seek")) {
+    $("structure-seek").value = duration ? Math.round(progress * 1000) : 0;
+  }
 }
 
 const STRUCTURE_LABELS = {
@@ -1689,6 +1870,149 @@ async function saveStructureCorrection(timelineId) {
   }
 }
 
+function setStructurePlayback(positionMs, isPlaying) {
+  const selected = app.structureLibrary?.selected_recording;
+  if (!selected) return;
+  app.structurePlayback = {
+    recordingId: selected.recording_id,
+    positionMs: Math.max(0, Math.min(Number(selected.duration_ms || Infinity), Number(positionMs || 0))),
+    durationMs: Number(selected.duration_ms || 0),
+    isPlaying,
+    syncedAt: Date.now(),
+    commandedAt: Date.now(),
+  };
+  updateStructureOverviewPlayhead(app.status || {});
+}
+
+async function playSelectedStructureSong() {
+  const selected = app.structureLibrary?.selected_recording;
+  if (!selected) return toast("Choose a song first", "Select an analyzed song from the database.", "error");
+  if (selected.provider !== "spotify" || !selected.provider_item_id) {
+    return toast("This recording cannot be started here", "Direct playback currently requires a Spotify recording identity.", "error");
+  }
+  const positionMs = currentStructurePlaybackPosition();
+  const uri = selected.provider_item_id.startsWith("spotify:track:")
+    ? selected.provider_item_id
+    : `spotify:track:${selected.provider_item_id}`;
+  setStructurePlayback(positionMs, true);
+  const started = await spotifyCommand("play", { uri, position_ms: Math.round(positionMs) });
+  if (!started) setStructurePlayback(positionMs, false);
+  if (started && positionMs > 250) await spotifyCommand("seek", { position_ms: Math.round(positionMs) });
+}
+
+async function pauseSelectedStructureSong() {
+  setStructurePlayback(currentStructurePlaybackPosition(), false);
+  await spotifyCommand("pause");
+}
+
+async function seekSelectedStructureSong(positionMs) {
+  const wasPlaying = Boolean(app.structurePlayback?.isPlaying);
+  setStructurePlayback(positionMs, wasPlaying);
+  await spotifyCommand("seek", { position_ms: Math.round(positionMs) });
+}
+
+function updateMergedStructureField(field, value) {
+  const segment = app.structureMergedDraft?.segments?.[app.structureSelectedSegment];
+  if (!segment) return;
+  segment[field] = value || null;
+  app.structureMergedDraft.dirty = true;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function splitMergedStructureSegment(positionMs = currentStructurePlaybackPosition()) {
+  const draft = app.structureMergedDraft;
+  if (!draft?.segments?.length) return;
+  let splitAt = Math.round(Number(positionMs || 0));
+  let index = draft.segments.findIndex((segment) => splitAt > segment.start_ms + 100 && splitAt < segment.end_ms - 100);
+  if (index < 0) {
+    const selected = draft.segments[app.structureSelectedSegment];
+    index = app.structureSelectedSegment;
+    splitAt = Math.round(selected.start_ms + (selected.end_ms - selected.start_ms) / 2);
+  }
+  const source = draft.segments[index];
+  if (!source || splitAt <= source.start_ms + 100 || splitAt >= source.end_ms - 100) return;
+  const added = { ...source, start_ms: splitAt, segment_index: index + 1, event: null };
+  source.end_ms = splitAt;
+  draft.segments.splice(index + 1, 0, added);
+  draft.segments.forEach((segment, segmentIndex) => { segment.segment_index = segmentIndex; });
+  draft.dirty = true;
+  app.structureSelectedSegment = index + 1;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function deleteMergedStructureSegment() {
+  const draft = app.structureMergedDraft;
+  const index = app.structureSelectedSegment;
+  if (!draft || draft.segments.length <= 1) return;
+  if (index > 0) {
+    draft.segments[index - 1].end_ms = draft.segments[index].end_ms;
+    draft.segments.splice(index, 1);
+    app.structureSelectedSegment = index - 1;
+  } else {
+    draft.segments[1].start_ms = draft.segments[0].start_ms;
+    draft.segments.splice(0, 1);
+    app.structureSelectedSegment = 0;
+  }
+  draft.segments.forEach((segment, segmentIndex) => { segment.segment_index = segmentIndex; });
+  draft.dirty = true;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+async function saveMergedStructureCorrection() {
+  const draft = app.structureMergedDraft;
+  if (!draft?.baseTimelineId || !draft.segments.length) return;
+  try {
+    await api("/api/structure/correct", { method: "POST", body: {
+      base_timeline_id: draft.baseTimelineId,
+      recording_id: app.selectedStructureRecordingId,
+      segments: draft.segments.map((segment, index) => ({
+        segment_index: index,
+        start_ms: Math.round(segment.start_ms),
+        end_ms: Math.round(segment.end_ms),
+        functional_label: segment.functional_label || null,
+        energy_label: segment.energy_label || null,
+        content_label: segment.content_label || null,
+        event: segment.event || null,
+      })),
+      note: $("structure-merged-note")?.value || null,
+      participant_id: app.participantId,
+      participant_name: app.participantName || null,
+    }});
+    app.structureMergedDraft = null;
+    await refreshStructureLibrary(app.selectedStructureRecordingId);
+    await refreshSongTeaching(true);
+    toast("Combined timeline saved", "Your timing and labels now override both model interpretations for this recording; the originals remain available below.", "success");
+  } catch (error) {
+    toast("Combined timeline could not be saved", error.message, "error");
+  }
+}
+
+function beginStructureBoundaryDrag(event, boundaryIndex) {
+  const draft = app.structureMergedDraft;
+  const track = event.target.closest(".structure-overview-track");
+  if (!draft || !track || boundaryIndex < 0 || boundaryIndex >= draft.segments.length - 1) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const bounds = track.getBoundingClientRect();
+  const move = (pointerEvent) => {
+    const raw = clamp((pointerEvent.clientX - bounds.left) / Math.max(1, bounds.width)) * draft.durationMs;
+    const minimum = draft.segments[boundaryIndex].start_ms + 100;
+    const maximum = draft.segments[boundaryIndex + 1].end_ms - 100;
+    const boundary = Math.round(Math.max(minimum, Math.min(maximum, raw)) / 10) * 10;
+    draft.segments[boundaryIndex].end_ms = boundary;
+    draft.segments[boundaryIndex + 1].start_ms = boundary;
+    draft.dirty = true;
+    renderStructureOverview(app.structureLibrary || {});
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    renderStructureOverview(app.structureLibrary || {});
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+}
+
 function renderSequenceDraft() {
   const container = $("sequence-steps");
   if (!container) return;
@@ -1696,26 +2020,24 @@ function renderSequenceDraft() {
   container.innerHTML = app.sequenceDraft.map((step, index) => {
     const rowStart = startBeat;
     startBeat += Number(step.duration_beats || 0);
-    const paletteOptions = [
-      ["", "Automatic"], ["party_vivid", "Party vivid"], ["midnight_teal", "Midnight teal"],
-      ["cool", "Cool"], ["warm", "Warm"], ["magenta_blue", "Magenta / blue"],
-      ["cyan_violet", "Cyan / violet"], ["red_amber", "Red / amber"],
-    ].map(([value, name]) => `<option value="${value}"${step.palette === value ? " selected" : ""}>${name}</option>`).join("");
     const routineOptions = ["breathe", "fan_sweep", "figure_eight", "opposing_chase", "beat_nod", "counter_rotate"]
       .map((routine) => `<option value="${routine}"${step.routine === routine ? " selected" : ""}>${label(routine)}</option>`).join("");
     return `<div class="sequence-step" data-sequence-step="${index}">
-      <div class="sequence-step-number"><b>${index + 1}</b><span>beat ${rowStart.toFixed(0)}</span></div>
-      <label><span>Movement</span><select data-step-field="routine">${routineOptions}</select></label>
-      <label><span>Length</span><input data-step-field="duration_beats" type="number" min="1" max="128" step="1" value="${Number(step.duration_beats || 8)}"></label>
-      <label><span>Intensity <output>${Math.round(Number(step.intensity || 0) * 100)}%</output></span><input data-step-field="intensity" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.intensity || 0) * 100)}"></label>
-      <label><span>Brightness <output>${Math.round(Number(step.brightness ?? step.intensity ?? 0) * 100)}%</output></span><input data-step-field="brightness" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.brightness ?? step.intensity ?? 0) * 100)}"></label>
-      <label><span>Motion speed <output>${Math.round(Number(step.motion_speed ?? 0.5) * 100)}%</output></span><input data-step-field="motion_speed" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.motion_speed ?? 0.5) * 100)}"></label>
+      <div class="sequence-step-number"><b>${index + 1}</b><span>Starts at beat ${rowStart.toFixed(0)}</span></div>
+      <div class="sequence-step-main">
+        <label><span>Movement</span><select data-step-field="routine">${routineOptions}</select></label>
+        <label><span>Length in beats</span><input data-step-field="duration_beats" type="number" min="1" max="128" step="1" value="${Number(step.duration_beats || 8)}"></label>
+        <label><span>Brightness <output>${Math.round(Number(step.brightness ?? step.intensity ?? 0) * 100)}%</output></span><input data-step-field="brightness" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.brightness ?? step.intensity ?? 0) * 100)}"></label>
+        <label><span>Movement speed <output>${Math.round(Number(step.motion_speed ?? 0.5) * 100)}%</output></span><input data-step-field="motion_speed" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.motion_speed ?? 0.5) * 100)}"></label>
+      </div>
+      <details class="sequence-step-advanced"><summary>Fine tuning</summary><div>
+      <label><span>Expression intensity <output>${Math.round(Number(step.intensity || 0) * 100)}%</output></span><input data-step-field="intensity" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.intensity || 0) * 100)}"></label>
       <label><span>Travel <output>${Math.round(Number(step.travel_size ?? 1) * 100)}%</output></span><input data-step-field="travel_size" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.travel_size ?? 1) * 100)}"></label>
       <label><span>Activity <output>${Math.round(Number(step.activity_density ?? 1) * 100)}%</output></span><input data-step-field="activity_density" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.activity_density ?? 1) * 100)}"></label>
       <label><span>Beat sync <output>${Math.round(Number(step.beat_sync ?? 1) * 100)}%</output></span><input data-step-field="beat_sync" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.beat_sync ?? 1) * 100)}"></label>
-      <label><span>Palette</span><select data-step-field="palette">${paletteOptions}</select></label>
       <label><span>Strobe <output>${Number(step.strobe || 0) ? `${Math.round(Number(step.strobe) * 100)}%` : "Off"}</output></span><input data-step-field="strobe" type="range" min="0" max="100" step="1" value="${Math.round(Number(step.strobe || 0) * 100)}"></label>
-      <button data-step-remove="${index}"${app.sequenceDraft.length === 1 ? " disabled" : ""}>Remove</button>
+      </div></details>
+      <div class="sequence-step-actions"><button data-step-move="-1" data-step-index="${index}"${index === 0 ? " disabled" : ""}>↑ Earlier</button><button data-step-move="1" data-step-index="${index}"${index === app.sequenceDraft.length - 1 ? " disabled" : ""}>↓ Later</button><button data-step-duplicate="${index}">Duplicate</button><button data-step-remove="${index}"${app.sequenceDraft.length === 1 ? " disabled" : ""}>Remove</button></div>
     </div>`;
   }).join("");
 }
@@ -3646,9 +3968,11 @@ async function spotifyCommand(action, values = {}) {
     });
     if (action === "transfer") app.spotifyTransferDeviceId = "";
     window.setTimeout(() => refreshSpotifyConsole(false), action === "next" || action === "previous" ? 650 : 350);
+    return true;
   } catch (error) {
     toast("Spotify command failed", error.message, "error");
     window.setTimeout(() => refreshSpotifyConsole(false), 100);
+    return false;
   }
 }
 
@@ -5013,35 +5337,23 @@ function installHandlers() {
     renderMotionEditor(app.status?.rehearsal?.motion_editor || {});
   });
   $("gesture-movement-gesture")?.addEventListener("change", () => renderGestureMovements());
-  $("gesture-movement-options")?.addEventListener("change", () => {
+  $("gesture-movement-options")?.addEventListener("change", (event) => {
     const gesture = $("gesture-movement-gesture")?.value || "hold";
     app.gestureMovementDrafts[gesture] = $$("#gesture-movement-options input:checked").map((input) => input.value);
     app.gestureMovementDirty = true;
+    event.target.closest(".gesture-movement-option")?.classList.toggle("selected", event.target.checked);
     setText("gesture-movement-status", "UNSAVED ASSOCIATION CHANGES");
   });
-  $("gesture-movement-options")?.addEventListener("click", (event) => {
+  $("gesture-movement-options")?.addEventListener("click", async (event) => {
+    const play = event.target.closest("[data-play-gesture-routine]");
     const edit = event.target.closest("[data-edit-gesture-routine]");
-    if (!edit) return;
-    patchRehearsal({ routine: edit.dataset.editGestureRoutine, tour: false });
-    $("motion-editor-scope")?.scrollIntoView({ behavior: "smooth", block: "center" });
-  });
-  $("gesture-movement-add")?.addEventListener("click", () => {
-    const routine = app.status?.rehearsal?.routine;
-    const checkbox = $$('#gesture-movement-options input').find((input) => input.value === routine);
-    if (checkbox) {
-      checkbox.checked = true;
-      const gesture = $("gesture-movement-gesture")?.value || "hold";
-      app.gestureMovementDrafts[gesture] = $$("#gesture-movement-options input:checked").map((input) => input.value);
-      app.gestureMovementDirty = true;
+    if (play) {
+      await patchRehearsal({ routine: play.dataset.playGestureRoutine, tour: false });
+      if (app.status?.engine?.mode !== "rehearsal" || !app.status?.engine?.running) startRehearsal();
+    } else if (edit) {
+      patchRehearsal({ routine: edit.dataset.editGestureRoutine, tour: false });
+      $("motion-editor-scope")?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-    setText("gesture-movement-status", `${label($("gesture-movement-gesture")?.value || "hold")} · unsaved changes`);
-  });
-  $("gesture-movement-edit")?.addEventListener("click", () => {
-    const routine = app.status?.rehearsal?.routine;
-    if (!routine) return toast("Choose a movement to edit", "Select a Movement Lab routine first.", "error");
-    patchRehearsal({ routine, tour: false });
-    $("motion-editor-scope")?.focus();
-    $("motion-editor-scope")?.scrollIntoView({ behavior: "smooth", block: "center" });
   });
   $("gesture-movement-save")?.addEventListener("click", saveGestureMovements);
   $$('[data-center-motion-control]').forEach((input) => {
@@ -5087,6 +5399,22 @@ function installHandlers() {
     });
     renderSequenceDraft();
   });
+  $$("[data-sequence-template]").forEach((button) => button.addEventListener("click", () => {
+    const defaults = { travel_size: 1, activity_density: 1, beat_sync: 1, palette: "", strobe: 0 };
+    const templates = {
+      steady: [{ routine: "breathe", duration_beats: 16, intensity: .55, brightness: .55, motion_speed: .35 }],
+      build: [
+        { routine: "fan_sweep", duration_beats: 16, intensity: .55, brightness: .55, motion_speed: .45 },
+        { routine: "opposing_chase", duration_beats: 8, intensity: .92, brightness: .92, motion_speed: .88 },
+      ],
+      breakdown: [
+        { routine: "breathe", duration_beats: 16, intensity: .3, brightness: .28, motion_speed: .2 },
+        { routine: "figure_eight", duration_beats: 8, intensity: .7, brightness: .72, motion_speed: .55 },
+      ],
+    };
+    app.sequenceDraft = (templates[button.dataset.sequenceTemplate] || templates.steady).map((step) => ({ ...defaults, ...step }));
+    renderSequenceDraft();
+  }));
   $("sequence-save-here")?.addEventListener("click", () => saveSequenceHere(false));
   installWakeProtectedAction(
     $("remote-sequence-save"),
@@ -5099,9 +5427,21 @@ function installHandlers() {
   });
   $("sequence-steps")?.addEventListener("click", (event) => {
     const remove = event.target.closest("[data-step-remove]");
-    if (!remove || app.sequenceDraft.length <= 1) return;
     syncSequenceDraftFromDom();
-    app.sequenceDraft.splice(Number(remove.dataset.stepRemove), 1);
+    const duplicate = event.target.closest("[data-step-duplicate]");
+    const move = event.target.closest("[data-step-move]");
+    if (remove && app.sequenceDraft.length > 1) {
+      app.sequenceDraft.splice(Number(remove.dataset.stepRemove), 1);
+    } else if (duplicate) {
+      const index = Number(duplicate.dataset.stepDuplicate);
+      app.sequenceDraft.splice(index + 1, 0, { ...app.sequenceDraft[index] });
+    } else if (move) {
+      const index = Number(move.dataset.stepIndex);
+      const destination = index + Number(move.dataset.stepMove);
+      if (destination < 0 || destination >= app.sequenceDraft.length) return;
+      const [step] = app.sequenceDraft.splice(index, 1);
+      app.sequenceDraft.splice(destination, 0, step);
+    } else return;
     renderSequenceDraft();
   });
   $("sequence-steps")?.addEventListener("input", (event) => {
@@ -5159,6 +5499,24 @@ function installHandlers() {
     app.selectedStructureRecordingId = recordingId;
     void refreshStructureLibrary(recordingId);
   });
+  $("structure-play")?.addEventListener("click", playSelectedStructureSong);
+  $("structure-pause")?.addEventListener("click", pauseSelectedStructureSong);
+  $("structure-back")?.addEventListener("click", () => seekSelectedStructureSong(currentStructurePlaybackPosition() - 10_000));
+  $("structure-forward")?.addEventListener("click", () => seekSelectedStructureSong(currentStructurePlaybackPosition() + 10_000));
+  $("structure-seek")?.addEventListener("input", (event) => {
+    const duration = Number(app.structureLibrary?.selected_recording?.duration_ms || 0);
+    setStructurePlayback(duration * Number(event.target.value || 0) / 1000, Boolean(app.structurePlayback?.isPlaying));
+  });
+  $("structure-seek")?.addEventListener("change", () => seekSelectedStructureSong(currentStructurePlaybackPosition()));
+  [
+    ["structure-merged-functional", "functional_label"],
+    ["structure-merged-energy", "energy_label"],
+    ["structure-merged-content", "content_label"],
+    ["structure-merged-event", "event"],
+  ].forEach(([id, field]) => $(id)?.addEventListener("change", (event) => updateMergedStructureField(field, event.target.value)));
+  $("structure-split")?.addEventListener("click", () => splitMergedStructureSegment());
+  $("structure-delete-segment")?.addEventListener("click", deleteMergedStructureSegment);
+  $("structure-save-merged")?.addEventListener("click", saveMergedStructureCorrection);
   $("structure-song-search")?.addEventListener("input", () => {
     renderStructureSongOptions();
     renderStructureCatalogTable();
@@ -5192,12 +5550,12 @@ function installHandlers() {
   $("structure-overview")?.addEventListener("click", (event) => {
     const segment = event.target.closest("[data-overview-segment]");
     if (!segment) return;
-    const row = $("structure-timeline-list")?.querySelector(
-      `[data-structure-segment="${segment.dataset.overviewSegment}"]`,
-    );
-    row?.scrollIntoView({ behavior: "smooth", block: "center" });
-    row?.classList.add("selected");
-    window.setTimeout(() => row?.classList.remove("selected"), 1800);
+    app.structureSelectedSegment = Number(segment.dataset.overviewSegment);
+    renderStructureOverview(app.structureLibrary || {});
+  });
+  $("structure-overview")?.addEventListener("pointerdown", (event) => {
+    const handle = event.target.closest("[data-structure-boundary]");
+    if (handle) beginStructureBoundaryDrag(event, Number(handle.dataset.structureBoundary));
   });
 
   $$("[data-control]").forEach((input) => {
