@@ -41,6 +41,8 @@ Commands:
                        Install the Lumen PC public key for bootstrap SSH
   verify               Run non-mutating deployment and research verification
   startup --apply      Update, configure, verify and start after WSL boots
+  update-if-needed --apply
+                       Update and restart only when origin/main advanced
   capabilities         Authenticate the running worker and verify job support
   start                 Start the already-installed user service
   stop                  Stop the user service
@@ -454,6 +456,64 @@ startup_update() {
         --cpu-threads "$CPU_THREADS"
 }
 
+update_if_needed() {
+    if [[ "$APPLY" != "1" ]]; then
+        printf 'update-if-needed requires --apply because a new revision may restart the worker.\n' >&2
+        return 2
+    fi
+    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no)" ]]; then
+        printf 'Periodic source check skipped: tracked local changes require operator review.\n' >&2
+        return 0
+    fi
+    if ! timeout 120s git -C "$PROJECT_ROOT" fetch --quiet origin main; then
+        printf 'Periodic source check unavailable; the verified worker remains running.\n' >&2
+        return 0
+    fi
+    local current upstream
+    current="$(git -C "$PROJECT_ROOT" rev-parse HEAD)"
+    upstream="$(git -C "$PROJECT_ROOT" rev-parse refs/remotes/origin/main)"
+    if [[ "$current" == "$upstream" ]]; then
+        return 0
+    fi
+    if ! git -C "$PROJECT_ROOT" merge-base --is-ancestor "$current" "$upstream"; then
+        printf 'Periodic source check found a non-fast-forward revision; operator review is required.\n' >&2
+        return 0
+    fi
+    if systemctl --user is-active --quiet lumen-link-worker.service; then
+        local remote_work
+        if ! remote_work="$("${PROJECT_ROOT}/.venv/bin/python" - "$WORKER_CONFIG" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+from lumen_engine.link import LinkClient
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+secret = Path(config["authentication"]["secret_file"]).read_text(
+    encoding="utf-8"
+).strip().encode()
+port = int(config["listen"]["port"])
+health = LinkClient(f"http://127.0.0.1:{port}", secret).health()
+queue = health.get("queue") or {}
+print(
+    int(health.get("active_slots") or 0)
+    + int(queue.get("queued") or 0)
+    + int(queue.get("running") or 0)
+)
+PY
+)"; then
+            printf 'Periodic source check could not verify an idle worker; update deferred.\n' >&2
+            return 0
+        fi
+        if (( remote_work > 0 )); then
+            printf 'New source is available, but %s remote job(s) must drain before update.\n' "$remote_work"
+            return 0
+        fi
+    fi
+    printf 'New Lumen revision is available; updating the idle worker.\n'
+    startup_update
+}
+
 run_worker() {
     [[ -r "$WORKER_CONFIG" ]] || { printf 'Worker config is not readable: %s\n' "$WORKER_CONFIG" >&2; return 1; }
     local -a worker_arguments=()
@@ -524,6 +584,7 @@ case "$COMMAND" in
     verify) verify ;;
     startup) startup_update ;;
     startup-finalize) startup_finalize ;;
+    update-if-needed) update_if_needed ;;
     capabilities) verify_running_capabilities ;;
     start) systemctl --user start lumen-link-worker.service ;;
     stop) systemctl --user stop lumen-link-worker.service ;;

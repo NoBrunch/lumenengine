@@ -468,13 +468,15 @@ within ten seconds; **LUMEN WAITING** means the worker is available but has not
 heard from the coordinator recently. The page never exposes song identity,
 recording identity, manifests, tokens or the pairing secret.
 
-The installed Windows scheduled watchdog starts WSL and, once per Windows
-login, checks Git, applies the current worker configuration, verifies the
-pinned environments and models, and starts the worker. If the Git remote is
-temporarily unavailable, it verifies and starts the current local revision.
-Failed verification leaves the worker stopped and retries after five minutes.
-After successful startup, the watchdog repairs NAT forwarding and service
-state every 30 seconds. The WSL service itself uses `Restart=always`.
+The installed Windows scheduled watchdog starts WSL, checks Git, applies the
+current worker configuration, verifies the pinned environments and models, and
+starts the worker. It then checks `origin/main` every five minutes. A newer
+fast-forward revision is installed only after queued and running remote jobs
+have drained; tracked changes, divergent history, or an unavailable remote are
+reported without stopping the verified worker. Failed startup verification
+leaves the worker stopped and retries after five minutes. The watchdog repairs
+NAT forwarding and service state every 30 seconds. The WSL service itself uses
+`Restart=always`.
 
 The setup installs a real **Lumen Link Dashboard** shortcut with a Lumen icon
 and removes the obsolete `.url` shortcut. Its target is always the

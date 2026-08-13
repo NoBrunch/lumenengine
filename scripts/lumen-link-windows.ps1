@@ -30,6 +30,7 @@ $DashboardIcon = Join-Path $ProgramRoot "lumen-link.ico"
 $StartupLog = Join-Path $ProgramRoot "startup.log"
 $DashboardAddress = "127.0.0.1"
 $WslStartupCommand = "cd $WslProjectRoot && ./scripts/lumen-link-wsl startup --apply"
+$WslUpdateCommand = "cd $WslProjectRoot && ./scripts/lumen-link-wsl update-if-needed --apply"
 
 function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -126,6 +127,7 @@ netsh interface portproxy add v4tov4 listenaddress=$ThreadripperAddress listenpo
 `$ErrorActionPreference = "Stop"
 `$startupReady = `$false
 `$nextStartupAttempt = Get-Date
+`$nextSourceCheck = (Get-Date).AddMinutes(5)
 while (`$true) {
   try {
     if (-not `$startupReady -and (Get-Date) -ge `$nextStartupAttempt) {
@@ -135,6 +137,12 @@ while (`$true) {
       `$startupReady = `$true
     }
     if (`$startupReady) {
+      if ((Get-Date) -ge `$nextSourceCheck) {
+        "`$(Get-Date -Format o) checking for a newer idle-safe Lumen revision" | Out-File "$StartupLog" -Append -Encoding UTF8
+        & wsl.exe -d "$Distro" -- bash -lc '$WslUpdateCommand' 2>&1 | Out-File "$StartupLog" -Append -Encoding UTF8
+        if (`$LASTEXITCODE -ne 0) { throw "WSL source check failed with exit code `$LASTEXITCODE" }
+        `$nextSourceCheck = (Get-Date).AddMinutes(5)
+      }
       & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null
     }
     `$raw = (& wsl.exe -d "$Distro" -- hostname -I) -join " "
@@ -173,6 +181,7 @@ function Install-MirroredStartupTask {
 `$ErrorActionPreference = "Stop"
 `$startupReady = `$false
 `$nextStartupAttempt = Get-Date
+`$nextSourceCheck = (Get-Date).AddMinutes(5)
 while (`$true) {
   try {
     if (-not `$startupReady -and (Get-Date) -ge `$nextStartupAttempt) {
@@ -182,6 +191,12 @@ while (`$true) {
       `$startupReady = `$true
     }
     if (`$startupReady) {
+      if ((Get-Date) -ge `$nextSourceCheck) {
+        "`$(Get-Date -Format o) checking for a newer idle-safe Lumen revision" | Out-File "$StartupLog" -Append -Encoding UTF8
+        & wsl.exe -d "$Distro" -- bash -lc '$WslUpdateCommand' 2>&1 | Out-File "$StartupLog" -Append -Encoding UTF8
+        if (`$LASTEXITCODE -ne 0) { throw "WSL source check failed with exit code `$LASTEXITCODE" }
+        `$nextSourceCheck = (Get-Date).AddMinutes(5)
+      }
       & wsl.exe -d "$Distro" -- bash -lc 'systemctl --user start lumen-link-worker.service' | Out-Null
     }
   } catch {
