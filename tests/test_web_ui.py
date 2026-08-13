@@ -270,6 +270,7 @@ class OperatorInterfaceContractTests(unittest.TestCase):
             "link-test-button",
             "link-enable-button",
             "link-pause-button",
+            "link-action-feedback",
             "link-engine-grid",
             "link-axis-authority",
             "link-artifact-flow",
@@ -295,6 +296,9 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn('state === "incompatible" ? "degraded"', script)
         self.assertIn("connection.detail", script)
         self.assertIn("a silently disabled control made revision drift", script)
+        self.assertIn("function setLinkActionFeedback", script)
+        self.assertIn("Testing…", script)
+        self.assertIn("failed: ${error.message}", script)
 
     def test_center_fixture_preview_matches_characterized_mechanics(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")

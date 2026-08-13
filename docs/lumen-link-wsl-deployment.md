@@ -479,9 +479,12 @@ NAT forwarding and service state every 30 seconds. The WSL service itself uses
 `Restart=always`.
 
 The setup installs a real **Lumen Link Dashboard** shortcut with a Lumen icon
-and removes the obsolete `.url` shortcut. Its target is always the
-Threadripper-local address `http://127.0.0.1:8765/dashboard`; the dedicated
-`192.168.50.1` address is only for traffic arriving from the Lumen computer.
+and removes the obsolete `.url` shortcut. The shortcut starts the scheduled
+watchdog, waits for the verified worker dashboard to answer, performs an
+idle-safe source check, and only then opens the Threadripper-local address
+`http://127.0.0.1:8765/dashboard`. It displays an explicit startup error instead
+of opening a dead page. The dedicated `192.168.50.1` address is only for traffic
+arriving from the Lumen computer.
 
 ## Updating Lumen Link
 

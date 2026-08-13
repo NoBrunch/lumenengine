@@ -384,6 +384,11 @@ if value.get("execution", {}).get("gated_job_types"):
 PY
     "${PROJECT_ROOT}/scripts/setup-research" verify
     printf 'Lumen Link WSL deployment verified.\n'
+    if systemctl --user is-active --quiet lumen-link-worker.service; then
+        printf 'Worker service is already running.\n'
+    else
+        printf 'Worker service is verified but STOPPED. Run: ./scripts/lumen-link-wsl start\n'
+    fi
 }
 
 verify_running_capabilities() {

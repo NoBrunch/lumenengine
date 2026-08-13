@@ -4595,6 +4595,25 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
 
 /* Lumen Link keeps heavyweight analysis visible and separate from Live. */
 .link-page-heading { align-items: center; }
+.link-page-heading .heading-actions { flex-wrap: wrap; justify-content: flex-end; }
+
+.link-action-feedback {
+  flex-basis: 100%;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: .4rem;
+  min-height: 1.2rem;
+  color: var(--muted);
+  font: .7rem var(--font-mono);
+}
+.link-action-feedback i { width: .45rem; height: .45rem; border-radius: 50%; background: #596463; }
+.link-action-feedback.pending { color: var(--amber); }
+.link-action-feedback.pending i { border: 1px solid var(--amber); border-top-color: transparent; background: transparent; animation: operator-task-spin .75s linear infinite; }
+.link-action-feedback.success { color: var(--green); }
+.link-action-feedback.success i { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.link-action-feedback.error { color: #e59a9e; }
+.link-action-feedback.error i { background: var(--red); box-shadow: 0 0 6px var(--red); }
 
 .link-state-badge {
   display: inline-flex;

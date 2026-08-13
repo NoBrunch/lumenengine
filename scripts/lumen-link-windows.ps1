@@ -24,6 +24,7 @@ $SshFirewallName = "Lumen Link SSH Bootstrap"
 $TaskName = "Lumen Link WSL Network Refresh"
 $ProgramRoot = Join-Path $env:ProgramData "LumenLink"
 $RefreshScript = Join-Path $ProgramRoot "refresh-portproxy.ps1"
+$DashboardLauncher = Join-Path $ProgramRoot "open-dashboard.ps1"
 $DashboardShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Lumen Link Dashboard.lnk"
 $LegacyDashboardShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Lumen Link Dashboard.url"
 $DashboardIcon = Join-Path $ProgramRoot "lumen-link.ico"
@@ -222,6 +223,34 @@ while (`$true) {
 
 function Install-DashboardShortcut {
     New-Item -ItemType Directory -Force -Path $ProgramRoot | Out-Null
+    $launcherContent = @"
+`$ErrorActionPreference = "Stop"
+function Wait-LumenLinkWorker {
+    `$deadline = (Get-Date).AddMinutes(2)
+    while ((Get-Date) -lt `$deadline) {
+        try {
+            `$response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 -Uri "http://${DashboardAddress}:$WorkerPort/dashboard/status"
+            if (`$response.StatusCode -eq 200) { return }
+        } catch { }
+        Start-Sleep -Seconds 2
+    }
+    throw "Lumen Link worker did not become ready within two minutes. See $StartupLog"
+}
+
+try {
+    Start-ScheduledTask -TaskName "$TaskName" -ErrorAction SilentlyContinue
+    Wait-LumenLinkWorker
+    "`$(Get-Date -Format o) desktop shortcut checking for a safe source update" | Out-File "$StartupLog" -Append -Encoding UTF8
+    & wsl.exe -d "$Distro" -- bash -lc '$WslUpdateCommand' 2>&1 | Out-File "$StartupLog" -Append -Encoding UTF8
+    if (`$LASTEXITCODE -ne 0) { throw "WSL source check failed with exit code `$LASTEXITCODE" }
+    Wait-LumenLinkWorker
+    Start-Process "http://${DashboardAddress}:$WorkerPort/dashboard"
+} catch {
+    Add-Type -AssemblyName PresentationFramework
+    [System.Windows.MessageBox]::Show(`$_.Exception.Message, "Lumen Link startup failed", "OK", "Error") | Out-Null
+}
+"@
+    Set-Content -Path $DashboardLauncher -Value $launcherContent -Encoding UTF8
     Add-Type -AssemblyName System.Drawing
     $bitmap = [System.Drawing.Bitmap]::new(64, 64)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -247,11 +276,11 @@ function Install-DashboardShortcut {
     Remove-Item -Path $LegacyDashboardShortcut -Force -ErrorAction SilentlyContinue
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($DashboardShortcut)
-    $shortcut.TargetPath = Join-Path $env:SystemRoot "explorer.exe"
-    $shortcut.Arguments = "http://${DashboardAddress}:$WorkerPort/dashboard"
+    $shortcut.TargetPath = Join-Path $PSHOME "powershell.exe"
+    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$DashboardLauncher`""
     $shortcut.WorkingDirectory = $env:USERPROFILE
     $shortcut.IconLocation = "$DashboardIcon,0"
-    $shortcut.Description = "Lumen Link local dashboard"
+    $shortcut.Description = "Start and verify Lumen Link, then open its local dashboard"
     $shortcut.Save()
 }
 

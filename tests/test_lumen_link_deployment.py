@@ -88,6 +88,7 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn(".local/share/lumen-link/pyenv", script)
         self.assertIn('"$pinned_python" -m venv', script)
         self.assertIn("verify_running_capabilities", script)
+        self.assertIn("Worker service is verified but STOPPED", script)
         self.assertIn("startup_update", script)
         self.assertIn("update_if_needed", script)
         self.assertIn('git -C "$PROJECT_ROOT" fetch --quiet origin main', script)
@@ -128,8 +129,13 @@ class LumenLinkDeploymentTests(unittest.TestCase):
         self.assertIn("Lumen Link Dashboard.lnk", script)
         self.assertIn("Lumen Link Dashboard.url", script)
         self.assertIn('$DashboardAddress = "127.0.0.1"', script)
+        self.assertIn("$DashboardLauncher", script)
+        self.assertIn("function Wait-LumenLinkWorker", script)
+        self.assertIn("desktop shortcut checking for a safe source update", script)
+        self.assertIn("Invoke-WebRequest -UseBasicParsing", script)
+        self.assertIn("Lumen Link startup failed", script)
         self.assertIn(
-            '$shortcut.Arguments = "http://${DashboardAddress}:$WorkerPort/dashboard"',
+            '$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File',
             script,
         )
         self.assertIn('$shortcut.IconLocation = "$DashboardIcon,0"', script)

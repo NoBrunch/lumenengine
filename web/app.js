@@ -43,6 +43,7 @@ const app = {
   link: null,
   linkRefreshing: false,
   linkFetchedAt: 0,
+  linkAction: null,
   calibrationActive: false,
   calibrationCaptures: {},
   rehearsalTimer: null,
@@ -3089,14 +3090,20 @@ function renderLink(link = {}) {
   );
 
   const testButton = $("link-test-button");
-  if (testButton) testButton.disabled = app.linkRefreshing || !link.configured || state === "testing";
+  if (testButton) {
+    testButton.disabled = Boolean(app.linkAction) || app.linkRefreshing || !link.configured || state === "testing";
+    testButton.textContent = app.linkAction === "test" ? "Testing…" : "Test connection";
+  }
   const enableButton = $("link-enable-button");
   if (enableButton) {
     // Keep Enable clickable for an authenticated but incompatible worker. The
     // server performs a fresh check and returns the exact update instruction;
     // a silently disabled control made revision drift look like a dead UI.
-    enableButton.disabled = app.linkRefreshing || (!link.enabled && !link.configured);
-    enableButton.textContent = link.enabled ? "Disable link" : "Enable link";
+    enableButton.disabled = Boolean(app.linkAction) || app.linkRefreshing || (!link.enabled && !link.configured);
+    enableButton.textContent = app.linkAction === "enable"
+      ? "Enabling…"
+      : app.linkAction === "disable" ? "Disabling…"
+        : link.enabled ? "Disable link" : "Enable link";
     enableButton.classList.toggle("danger", Boolean(link.enabled));
     enableButton.classList.toggle("primary", !link.enabled);
     enableButton.title = link.enabled
@@ -3107,12 +3114,23 @@ function renderLink(link = {}) {
   }
   const pauseButton = $("link-pause-button");
   if (pauseButton) {
-    pauseButton.disabled = app.linkRefreshing || !link.enabled;
-    pauseButton.textContent = link.paused ? "Resume dispatch" : "Pause dispatch";
+    pauseButton.disabled = Boolean(app.linkAction) || app.linkRefreshing || !link.enabled;
+    pauseButton.textContent = app.linkAction === "pause"
+      ? "Pausing…"
+      : app.linkAction === "resume" ? "Resuming…"
+        : link.paused ? "Resume dispatch" : "Pause dispatch";
     pauseButton.title = link.paused
       ? "Allow new eligible jobs to be sent to the Threadripper."
       : "Stop new dispatch. A process already running on the Threadripper continues to its verified result.";
   }
+}
+
+function setLinkActionFeedback(message, kind = "") {
+  const feedback = $("link-action-feedback");
+  if (!feedback) return;
+  feedback.className = `link-action-feedback${kind ? ` ${kind}` : ""}`;
+  const text = feedback.querySelector("span");
+  if (text) text.textContent = message;
 }
 
 async function refreshLink(showErrors = false) {
@@ -3134,6 +3152,7 @@ async function refreshLink(showErrors = false) {
 }
 
 async function runLinkAction(action, button) {
+  if (app.linkAction) return;
   const titles = {
     test: ["Testing Lumen Link", "Authenticating the compute node and measuring the private connection."],
     enable: ["Enabling Lumen Link", "Opening the offline queue for eligible compute jobs."],
@@ -3142,16 +3161,23 @@ async function runLinkAction(action, button) {
     resume: ["Resuming remote work", "The Threadripper queue may accept eligible jobs again."],
   };
   const [title, detail] = titles[action] || ["Updating Lumen Link", "Applying the requested link state."];
+  app.linkAction = action;
+  setLinkActionFeedback(`${title}… ${detail}`, "pending");
+  renderLink(app.link || {});
   const task = beginOperatorTask(title, detail, button);
   try {
     const result = await api(`/api/link/${action}`, { method: "POST", body: {} });
     app.link = result.link || result.status || result;
     renderLink(app.link);
+    setLinkActionFeedback(result.message || `${title} completed.`, "success");
     toast(title, result.message || "The link state was updated.", "success");
   } catch (error) {
+    setLinkActionFeedback(`${title} failed: ${error.message}`, "error");
     toast(`${title} failed`, error.message, "error");
   } finally {
+    app.linkAction = null;
     finishOperatorTask(task);
+    renderLink(app.link || {});
     void refreshLink(false);
   }
 }

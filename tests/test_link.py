@@ -825,6 +825,56 @@ class LinkTests(unittest.TestCase):
             coordinator.active["job"]["worker_id"].startswith("lumen-link:")
         )
 
+    def test_active_restart_hydrates_compatibility_without_button_press(self):
+        store = SongMemoryStore(self.root / "active-contract-memory.sqlite3")
+        coordinator = LumenLinkCoordinator(
+            store,
+            research_root=self.root / "active-contract-research",
+            state_root=self.root / "active-contract-state",
+            config_path=self.root / "active-contract-state" / "config.json",
+        )
+        coordinator.active = {"stage": "remote", "job": {"id": "active"}}
+        contracts = {
+            EDMFORMER_JOB: TEST_CONTRACT,
+            SONGFORMER_JOB: SONG_TEST_CONTRACT,
+            STUDENT_TRAIN_JOB: STUDENT_TEST_CONTRACT,
+        }
+        coordinator.remote_status = {
+            "authenticated": True,
+            "capabilities": {
+                "supported_job_types": list(contracts),
+                "job_contracts": contracts,
+            },
+        }
+
+        def hydrate(job_type):
+            coordinator._local_contract_cache[job_type] = dict(
+                contracts[job_type]
+            )
+            return dict(contracts[job_type])
+
+        with (
+            patch.object(
+                coordinator.stop_event,
+                "wait",
+                side_effect=[False, True],
+            ),
+            patch.object(coordinator, "_poll_health"),
+            patch.object(
+                coordinator, "_local_contract", side_effect=hydrate
+            ) as contract_scan,
+            patch.object(coordinator, "route_queued_jobs"),
+            patch.object(coordinator, "_prefill_remote_queue"),
+            patch.object(coordinator, "_advance"),
+        ):
+            coordinator._loop()
+
+        self.assertEqual(contract_scan.call_count, 3)
+        self.assertTrue(all(
+            coordinator._remote_is_compatible(job_type)
+            for job_type in contracts
+        ))
+
     def test_enabled_coordinator_routes_automatic_edmformer_off_local_worker(self):
         store = SongMemoryStore(self.root / "route-memory.sqlite3")
         job_id = store.enqueue_analysis_job(
@@ -942,10 +992,13 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(status["connection"]["state"], "incompatible")
         self.assertIn("remote-", status["connection"]["detail"])
         self.assertIn("local-r", status["setup"]["next_action"])
-        self.assertIn("git pull --ff-only", status["setup"]["commands"])
+        self.assertEqual(
+            status["setup"]["commands"],
+            ["cd ~/lumenengine && ./scripts/lumen-link-wsl startup --apply"],
+        )
 
         with patch.object(coordinator, "_poll_health"):
-            with self.assertRaisesRegex(RuntimeError, "Update and restart"):
+            with self.assertRaisesRegex(RuntimeError, "startup --apply"):
                 coordinator.control("enable")
         self.assertFalse(
             json.loads((state_root / "config.json").read_text())["enabled"]

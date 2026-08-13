@@ -2542,7 +2542,8 @@ class LumenLinkCoordinator:
                     raise RuntimeError(
                         "Threadripper authenticated, but its compute contract "
                         f"is incompatible (worker code {remote_revision[:7]}). "
-                        "Update and restart the worker, then Test Connection again."
+                        "On the Threadripper, run: cd ~/lumenengine && "
+                        "./scripts/lumen-link-wsl startup --apply"
                     )
             value = _read_json(self.config_path) if self.config_path.is_file() else {}
             value.setdefault("endpoint", DEFAULT_LINK_ENDPOINT)
@@ -2617,12 +2618,15 @@ class LumenLinkCoordinator:
                 continue
             try:
                 self._poll_health()
-                if self.active is None:
-                    if self.can_import():
-                        for job_type in SUPPORTED_JOB_TYPES:
-                            self._remote_is_compatible(
-                                job_type, allow_contract_scan=True
-                            )
+                # Compatibility must be known after every application restart,
+                # including while a persisted remote job is still active. The
+                # status endpoint deliberately does no asset hashing, so hydrate
+                # its cached contracts here on the offline coordinator thread.
+                if self.can_import():
+                    for job_type in SUPPORTED_JOB_TYPES:
+                        self._remote_is_compatible(
+                            job_type, allow_contract_scan=True
+                        )
                 self.route_queued_jobs(refresh=False)
                 self._prefill_remote_queue()
                 self._advance()
@@ -4134,7 +4138,9 @@ class LumenLinkCoordinator:
                 )
                 next_action = (
                     f"Update the Threadripper worker from {remote_revision[:7]} "
-                    f"to {local_revision[:7]}, restart it, then Test Connection."
+                    f"to {local_revision[:7]}. On the Threadripper, run the "
+                    "single startup command shown below; Lumen will retest "
+                    "the connection automatically."
                 )
             else:
                 compatibility_detail = (
@@ -4142,8 +4148,9 @@ class LumenLinkCoordinator:
                     "match Lumen's compute contract."
                 )
                 next_action = (
-                    "Reconfigure and verify the Threadripper worker, then Test "
-                    "Connection again."
+                    "On the Threadripper, run the single startup command shown "
+                    "below; it updates, configures, verifies, and starts the "
+                    "worker in the required order."
                 )
         elif not configuration.enabled:
             setup_state = "ready_to_enable"
@@ -4209,10 +4216,7 @@ class LumenLinkCoordinator:
                 "port": 8765,
                 "commands": (
                     [
-                        "cd ~/lumenengine",
-                        "./scripts/lumen-link-wsl stop",
-                        "git pull --ff-only",
-                        "./scripts/lumen-link-wsl configure --apply && ./scripts/lumen-link-wsl verify && ./scripts/lumen-link-wsl start",
+                        "cd ~/lumenengine && ./scripts/lumen-link-wsl startup --apply",
                     ]
                     if setup_state == "incompatible"
                     else [
