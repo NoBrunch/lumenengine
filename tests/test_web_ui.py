@@ -25,6 +25,34 @@ class OperatorInterfaceContractTests(unittest.TestCase):
             self.assertNotIn(f'$("{element_id}")', script)
         self.assertNotIn("function renderRemoteSpotify", script)
 
+    def test_remote_layout_and_exact_strobe_teaching_match_operator_request(
+        self,
+    ) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        for removed_id in (
+            "remote-gesture",
+            "remote-song-teaching",
+            "remote-link-card",
+            "remote-link-state",
+        ):
+            self.assertNotIn(f'id="{removed_id}"', html)
+        self.assertNotIn("Teach a specific song action", html)
+        self.assertNotIn('id="remote-action-button"', html)
+        self.assertNotIn('id="remote-action-label"', html)
+        self.assertNotIn("Shape the response", html[html.index('id="remote-app"'):])
+        self.assertIn('class="embedded-shape-controls"', html)
+        for group in ("movers", "center"):
+            for prefix in ("remote", "rehearsal"):
+                self.assertIn(f'id="{prefix}-{group}-strobe"', html)
+                self.assertIn(f'id="{prefix}-{group}-strobe-number"', html)
+        self.assertIn('max="255"', html)
+        self.assertIn('api("/api/strobe-control"', script)
+        self.assertIn("settled,", script)
+        self.assertIn("700,", script)
+        self.assertIn("interaction_unix_ms", script)
+
     def test_rehearsal_palette_and_color_studio_are_removed(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
 
@@ -259,15 +287,18 @@ class OperatorInterfaceContractTests(unittest.TestCase):
             "link-approved-axes",
             "link-activation-state",
             "link-model-blockers",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        for removed_remote_link_id in (
             "remote-link-state",
             "remote-link-node",
             "remote-link-progress",
             "remote-link-model",
         ):
-            self.assertIn(f'id="{element_id}"', html)
+            self.assertNotIn(f'id="{removed_remote_link_id}"', html)
         self.assertIn("function renderLink", script)
-        self.assertIn('"/api/link/status?summary=1"', script)
-        self.assertIn(': "/api/link/status"', script)
+        self.assertNotIn('"/api/link/status?summary=1"', script)
+        self.assertIn('api("/api/link/status")', script)
         self.assertIn("api(`/api/link/${action}`", script)
         self.assertIn('runLinkAction("test"', script)
         self.assertIn('app.link?.enabled ? "disable" : "enable"', script)
@@ -354,7 +385,7 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn(".link-setup-body { grid-template-columns: 1fr; }", stylesheet)
         self.assertIn(".remote-link-path {", stylesheet)
         self.assertIn('setText("remote-link-state", statusLabel)', script)
-        self.assertIn("app.remote && app.pollCount % 100 === 0", script)
+        self.assertNotIn("app.remote && app.pollCount % 100 === 0", script)
         self.assertIn('if (/^[1-8]$/.test(event.key))', script)
         self.assertIn('"music", "link", "system"', script)
         self.assertIn("workspacePages.includes(requestedWorkspacePage)", script)

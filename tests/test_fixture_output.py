@@ -67,6 +67,43 @@ class FixtureOutputTests(unittest.TestCase):
         self.assertEqual(frame.get_channel(0, 37), 0)  # strobe
         self.assertTrue(any(frame.get_channel(0, channel) for channel in range(38, 42)))
 
+    def test_operator_mover_strobe_override_writes_exact_channel_value(self) -> None:
+        fixture = FixturePatch(
+            fixture_id="mover",
+            name="Mover",
+            profile_key="generic_rgbw_moving_head_11ch",
+            universe=0,
+            address=31,
+            position_m=Vec3(0, 0, 2),
+            housing_rotation=EulerXYZ(),
+            calibration=FixtureCalibration(-270, 270, -135, 135),
+            dimmer_channel=6,
+        )
+        frame = DMXFrame()
+        apply_moving_head_profile(
+            frame, fixture, decision(), strobe_dmx_override=137
+        )
+        self.assertEqual(frame.get_channel(0, 37), 137)
+
+    def test_operator_center_strobe_override_writes_exact_channel_value(self) -> None:
+        fixture = ProfileFixturePatch(
+            fixture_id="multi",
+            name="Multi",
+            profile_key="generic_multi_effect_19ch",
+            universe=0,
+            address=1,
+            position_m=Vec3(0, 0, 2),
+            housing_rotation=EulerXYZ(),
+        )
+        frame = DMXFrame()
+        apply_auxiliary_fixture(
+            frame,
+            fixture,
+            decision(),
+            strobe_dmx_override=219,
+        )
+        self.assertEqual(frame.get_channel(0, 6), 219)
+
     def test_opposing_chase_trades_mover_beam_and_color_each_beat(
         self,
     ) -> None:

@@ -259,51 +259,21 @@
                       <span>Intimacy</span><div><i id="meter-intimacy"></i></div><b id="value-intimacy">0.50</b>
                     </div>
                   </div>
-                  <div class="signal-strip" id="signal-strip" aria-hidden="true"></div>
-                </div>
-              </section>
-
-              <section class="panel influence-panel">
-                <div class="panel-titlebar">
-                  <h3>Operator influence</h3>
-                  <span class="panel-note">Changes are immediate</span>
-                </div>
-                <div class="preset-row">
-                  <button data-preset="restrained">Restrained</button>
-                  <button data-preset="balanced" class="active">Balanced</button>
-                  <button data-preset="open">Open room</button>
-                  <button data-preset="drive">Drive</button>
-                </div>
-                <p class="control-help">Master is the final output level. Intensity and Movement bias the generated energy and travel. Focus narrows or widens the room target; Warmth shifts the palette. “How much Lumen follows you” blends those choices into the automatic audio response.</p>
-                <div class="control-slider-grid">
-                  <label>
-                    <span><b>Master</b><output data-output="master">78%</output></span>
-                    <input type="range" min="0" max="100" value="78" data-control="master">
-                  </label>
-                  <label>
-                    <span><b>Intensity bias</b><output data-output="intensity">50%</output></span>
-                    <input type="range" min="0" max="100" value="50" data-control="intensity">
-                  </label>
-                  <label>
-                    <span><b>Movement bias</b><output data-output="motion">46%</output></span>
-                    <input type="range" min="0" max="100" value="46" data-control="motion">
-                  </label>
-                  <label>
-                    <span><b>Spatial focus</b><output data-output="focus">58%</output></span>
-                    <input type="range" min="0" max="100" value="58" data-control="focus">
-                  </label>
-                  <label>
-                    <span><b>Color warmth</b><output data-output="warmth">42%</output></span>
-                    <input type="range" min="0" max="100" value="42" data-control="warmth">
-                  </label>
-                  <label>
-                    <span><b>Palette family</b></span>
-                    <select data-control="palette"><option value="auto">Automatic</option><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select>
-                  </label>
-                  <label>
-                    <span><b>How much Lumen follows you</b><output data-output="influence">62%</output></span>
-                    <input type="range" min="0" max="100" value="62" data-control="influence">
-                  </label>
+                  <div class="embedded-shape-response">
+                    <div class="embedded-shape-heading"><b>Shape response</b><span>Operator influence</span></div>
+                    <div class="preset-row">
+                      <button data-preset="restrained">Restrained</button>
+                      <button data-preset="balanced" class="active">Balanced</button>
+                      <button data-preset="open">Open room</button>
+                      <button data-preset="drive">Drive</button>
+                    </div>
+                    <div class="embedded-shape-controls">
+                      <label><span>Intensity <output data-output="intensity">50%</output></span><input type="range" min="0" max="100" value="50" data-control="intensity"></label>
+                      <label><span>Movement <output data-output="motion">46%</output></span><input type="range" min="0" max="100" value="46" data-control="motion"></label>
+                      <label><span>Follows you <output data-output="influence">62%</output></span><input type="range" min="0" max="100" value="62" data-control="influence"></label>
+                      <label><span>Palette</span><select data-control="palette"><option value="auto">Automatic</option><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
+                    </div>
+                  </div>
                 </div>
               </section>
 
@@ -386,7 +356,8 @@
                   <label><span>Tempo <output id="rehearsal-bpm-value">120 BPM</output></span><input id="rehearsal-bpm" type="range" min="40" max="240" step="1" value="120"></label>
                   <label><span>Audition scale <output id="rehearsal-size-value">100%</output></span><input id="rehearsal-size" type="range" min="0" max="100" step="1" value="100"></label>
                   <label><span>Intensity <output id="rehearsal-intensity-value">68%</output></span><input id="rehearsal-intensity" type="range" min="0" max="100" step="1" value="68"></label>
-                  <label><span>Strobe <output id="rehearsal-strobe-value">Off</output></span><input id="rehearsal-strobe" type="range" min="0" max="100" step="1" value="0"></label>
+                  <label class="strobe-channel-control"><span>Movers strobe channel <output id="rehearsal-movers-strobe-value">0</output></span><span><input id="rehearsal-movers-strobe" type="range" min="0" max="255" step="1" value="0"><input id="rehearsal-movers-strobe-number" type="number" min="0" max="255" step="1" value="0"></span></label>
+                  <label class="strobe-channel-control"><span>Center strobe channel <output id="rehearsal-center-strobe-value">0</output></span><span><input id="rehearsal-center-strobe" type="range" min="0" max="255" step="1" value="0"><input id="rehearsal-center-strobe-number" type="number" min="0" max="255" step="1" value="0"></span></label>
                   <label class="check-control"><input id="rehearsal-isolate" type="checkbox" checked><span>Darken fixtures outside selected scope</span></label>
                 </div>
                 <button id="rehearsal-start" class="rehearsal-start">Start selected routine</button>
@@ -1285,31 +1256,6 @@
           </div>
         </section>
 
-        <section class="remote-gesture">
-          <div>
-            <span>LUMEN IS EXPRESSING</span>
-            <h2 id="remote-gesture">Standing by</h2>
-          </div>
-          <div class="remote-energy-orb" id="remote-energy-orb"><i></i><span id="remote-energy">0%</span></div>
-          <p id="remote-reason">Start the engine from the technical console.</p>
-        </section>
-
-        <section class="remote-section">
-          <div class="remote-section-heading"><h2>Shape the response</h2><span>Tap a character</span></div>
-          <div class="remote-presets">
-            <button data-preset="restrained"><i></i><b>Restrained</b><small>Slow and narrow</small></button>
-            <button data-preset="balanced" class="active"><i></i><b>Balanced</b><small>Let Lumen lead</small></button>
-            <button data-preset="open"><i></i><b>Open room</b><small>Wide and spacious</small></button>
-            <button data-preset="drive"><i></i><b>Drive</b><small>More attack</small></button>
-          </div>
-          <div class="remote-sliders">
-            <label><span>Intensity <output data-output="intensity">50%</output></span><input type="range" min="0" max="100" value="50" data-control="intensity"></label>
-            <label><span>Movement <output data-output="motion">46%</output></span><input type="range" min="0" max="100" value="46" data-control="motion"></label>
-            <label><span>How much Lumen follows you <output data-output="influence">62%</output></span><input type="range" min="0" max="100" value="62" data-control="influence"></label>
-            <label><span>Palette family</span><select data-control="palette"><option value="auto">Automatic</option><option value="party_vivid">Party vivid</option><option value="midnight_teal">Midnight teal</option><option value="cool">Cool blue/violet</option><option value="warm">Warm red/amber</option><option value="magenta_blue">Magenta/blue</option><option value="cyan_violet">Cyan/violet</option><option value="red_amber">Red/amber</option></select></label>
-          </div>
-        </section>
-
         <section class="remote-section">
           <div class="remote-section-heading"><h2>Teach this moment</h2><span id="remote-feedback-time">Now</span></div>
           <label class="feedback-target">Applies to
@@ -1339,42 +1285,17 @@
               <button data-feedback="cool_blue_purple" data-value="1">Cooler color</button><button data-feedback="warmer_color" data-value="1">Warmer color</button>
             </div>
             <div class="remote-preferred-actions">
-              <label><span>Preferred action</span><select id="remote-action-label"><option value="keep_current">Keep current sequence</option><option value="breathe">Breathe</option><option value="fan_sweep">Fan sweep</option><option value="figure_eight">Figure eight</option><option value="opposing_chase">Opposing chase</option><option value="beat_nod">Beat nod</option><option value="counter_rotate">Counter rotate</option></select></label>
-              <button id="remote-action-button">Use this action here</button>
               <label><span>Song context</span><select id="remote-context-label"><optgroup label="Energy state"><option value="silence">Silence</option><option value="intro">Intro</option><option value="groove">Groove</option><option value="breakdown">Breakdown</option><option value="build">Build</option><option value="drop">Drop</option><option value="outro">Outro</option></optgroup><optgroup label="Content role"><option value="vocal">Vocal</option><option value="instrumental">Instrumental</option><option value="solo">Solo</option><option value="transition">Transition material</option><option value="applause">Applause</option></optgroup><optgroup label="Transition event"><option value="section_start">Section start</option><option value="energy_rise">Energy rise</option><option value="energy_fall">Energy fall</option><option value="build_start">Build start</option><option value="drop_onset">Drop onset</option><option value="breakdown_onset">Breakdown onset</option><option value="groove_return">Groove return</option><option value="outro_start">Outro start</option><option value="track_end">Track end</option></optgroup></select></label>
               <button id="remote-context-button">Save this context</button>
             </div>
             <textarea id="remote-feedback-note" rows="3" placeholder="Say what you noticed in your own words…"></textarea>
             <button id="remote-feedback-note-button">Save this note</button>
           </div>
-        </section>
-
-        <section class="remote-section remote-song-teaching">
-          <details>
-            <summary><b>Teach a specific song action</b><span id="remote-sequence-position">Current position</span></summary>
-            <p>This is stronger than quick feedback: it places an exact group action on the identified song timeline and recalls it at a future phrase boundary.</p>
-            <div class="remote-training-grid">
-              <label><span>Group</span><select id="remote-sequence-scope"><option value="movers">Movers</option><option value="center">Center</option><option value="overall">Whole rig</option></select></label>
-              <label><span>Action</span><select id="remote-sequence-routine"><option value="breathe">Breathe</option><option value="fan_sweep">Fan sweep</option><option value="figure_eight">Figure eight</option><option value="opposing_chase">Opposing chase</option><option value="beat_nod">Beat nod</option><option value="counter_rotate">Counter rotate</option></select></label>
-              <label><span>Length</span><select id="remote-sequence-duration"><option value="4">4 beats</option><option value="8" selected>8 beats</option><option value="16">16 beats</option><option value="32">32 beats</option></select></label>
-              <label><span>Intensity</span><input id="remote-sequence-intensity" type="range" min="0" max="100" step="1" value="75"></label>
-            </div>
-            <button id="remote-sequence-save" class="remote-primary">Use this here</button>
-          </details>
-        </section>
-
-        <section class="remote-section remote-link-card">
-          <div class="remote-section-heading"><h2>Lumen Link</h2><span id="remote-link-state">OFFLINE</span></div>
-          <div class="remote-link-path">
-            <div><i></i><b>Lumen PC</b><small>Live authority</small></div>
-            <span id="remote-link-path"><i></i></span>
-            <div><i></i><b id="remote-link-node">Threadripper</b><small>Offline compute</small></div>
-          </div>
-          <div class="remote-link-facts">
-            <span><b id="remote-link-queued">0</b> queued</span>
-            <span><b id="remote-link-running">0</b> running</span>
-            <span><b id="remote-link-progress">—</b> current job</span>
-            <span><b id="remote-link-model">—</b> student</span>
+          <div class="remote-strobe-teaching">
+            <div><b>Teach strobe channels</b><small>Output follows immediately. Lumen records the value after you stop adjusting it.</small></div>
+            <label><span>Movers <output id="remote-movers-strobe-value">0</output></span><span><input id="remote-movers-strobe" type="range" min="0" max="255" step="1" value="0"><input id="remote-movers-strobe-number" type="number" min="0" max="255" step="1" value="0"></span></label>
+            <label><span>Center <output id="remote-center-strobe-value">0</output></span><span><input id="remote-center-strobe" type="range" min="0" max="255" step="1" value="0"><input id="remote-center-strobe-number" type="number" min="0" max="255" step="1" value="0"></span></label>
+            <span id="remote-strobe-feedback-state">No settled strobe lesson yet.</span>
           </div>
         </section>
 

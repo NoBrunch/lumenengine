@@ -274,6 +274,25 @@ class PerformanceRuntime:
         # They let feedback describe what the rig actually emitted rather
         # than merely the sequence Lumen intended to perform.
         self._dmx_history: deque[DmxHistorySample] = deque(maxlen=1536)
+        # Explicit operator channel values are a direct, temporary boundary
+        # override. They remain separate from learned semantic strobe
+        # preferences so an exact DMX audition never becomes geometry.
+        self._operator_strobe_dmx: dict[str, int | None] = {
+            "movers": None,
+            "center": None,
+        }
+
+    def set_operator_strobe_dmx(
+        self, lane: str, value: int | None
+    ) -> None:
+        normalized = str(lane).strip().casefold()
+        if normalized not in CHOREOGRAPHY_LANES:
+            raise ValueError("strobe lane must be movers or center")
+        self._operator_strobe_dmx[normalized] = (
+            None
+            if value is None
+            else round(clamp(float(value), 0.0, 255.0))
+        )
 
     def set_rehearsal(
         self,
@@ -584,6 +603,7 @@ class PerformanceRuntime:
         occurrences_by_lane: dict[str, int] | None = None,
         urgency_by_lane: dict[str, float] | None = None,
         lifetime: str = "global",
+        target_strobe_rate: float | None = None,
     ) -> dict[str, Any] | None:
         """Teach the next phrase without changing the one currently running."""
         planner = self._choreography_planner
@@ -658,6 +678,7 @@ class PerformanceRuntime:
                         scope=lane,
                         fixture_id=fixture_id,
                         created_unix_ms=created_unix_ms,
+                        target_strobe_rate=target_strobe_rate,
                     ),),
                     preferred=preferred,
                     dmx_history=self._recent_dmx_history(lane),
@@ -1977,6 +1998,7 @@ class PerformanceRuntime:
                         )
                     ),
                     latched_rgb=latched_rgb,
+                    strobe_dmx_override=self._operator_strobe_dmx["movers"],
                 )
                 if calibration_override is not None:
                     # The profile's speed channel is intentionally overridden
@@ -2131,6 +2153,7 @@ class PerformanceRuntime:
                 ),
                 latched_rgb=latched_rgb,
                 latched_secondary_rgb=latched_secondary_rgb,
+                strobe_dmx_override=self._operator_strobe_dmx["center"],
             )
 
         self.output.send(frame)

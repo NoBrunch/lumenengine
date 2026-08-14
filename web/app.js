@@ -47,6 +47,8 @@ const app = {
   calibrationActive: false,
   calibrationCaptures: {},
   rehearsalTimer: null,
+  strobeTimers: {},
+  strobeSettleTimers: {},
   motionTimer: null,
   motionEditorScope: null,
   colorPaletteDraft: [],
@@ -637,9 +639,11 @@ async function initialize() {
     setPage(app.page);
     renderBootstrap();
     renderStatus();
-    await refreshSongTeaching();
-    await refreshStructureLibrary();
-    if (!app.remote) refreshSpotifyConsole(false);
+    if (!app.remote) {
+      await refreshSongTeaching();
+      await refreshStructureLibrary();
+      refreshSpotifyConsole(false);
+    }
     app.disconnected = false;
     $("loading-screen").classList.add("loaded");
   } catch (error) {
@@ -674,11 +678,10 @@ async function pollStatus() {
     renderConnection(true);
     app.pollCount += 1;
     if (app.pollCount % 600 === 0) void refreshSystemStatus();
-    if (app.pollCount % 50 === 0) void refreshSongTeaching();
-    if (
-      (app.page === "link" && app.pollCount % 10 === 0)
-      || (app.remote && app.pollCount % 100 === 0)
-    ) void refreshLink(false);
+    if (!app.remote && app.pollCount % 50 === 0) void refreshSongTeaching();
+    if (app.page === "link" && app.pollCount % 10 === 0) {
+      void refreshLink(false);
+    }
     const researchRunning = Boolean(
       app.bootstrap?.research?.worker?.running
       || app.bootstrap?.research?.preparation?.running
@@ -800,7 +803,10 @@ function renderRehearsal(rehearsal = {}) {
     "rehearsal-bpm": rehearsal.bpm,
     "rehearsal-size": Number(rehearsal.size) * 100,
     "rehearsal-intensity": Number(rehearsal.intensity) * 100,
-    "rehearsal-strobe": Number(rehearsal.strobe) * 100,
+    "rehearsal-movers-strobe": Number(rehearsal.movers_strobe_dmx || 0),
+    "rehearsal-movers-strobe-number": Number(rehearsal.movers_strobe_dmx || 0),
+    "rehearsal-center-strobe": Number(rehearsal.center_strobe_dmx || 0),
+    "rehearsal-center-strobe-number": Number(rehearsal.center_strobe_dmx || 0),
   };
   for (const [id, value] of Object.entries(values)) {
     const element = $(id);
@@ -810,7 +816,8 @@ function renderRehearsal(rehearsal = {}) {
   setText("rehearsal-bpm-value", `${Math.round(Number(rehearsal.bpm || 120))} BPM`);
   setText("rehearsal-size-value", percent(rehearsal.size));
   setText("rehearsal-intensity-value", percent(rehearsal.intensity));
-  setText("rehearsal-strobe-value", Number(rehearsal.strobe || 0) ? percent(rehearsal.strobe) : "Off");
+  setText("rehearsal-movers-strobe-value", Math.round(Number(rehearsal.movers_strobe_dmx || 0)));
+  setText("rehearsal-center-strobe-value", Math.round(Number(rehearsal.center_strobe_dmx || 0)));
   if ($("rehearsal-output")) $("rehearsal-output").disabled = running;
   if ($("rehearsal-start")) $("rehearsal-start").disabled = running;
   if ($("rehearsal-stop")) $("rehearsal-stop").disabled = !running;
@@ -1318,7 +1325,8 @@ function rehearsalFormValues() {
     bpm: Number($("rehearsal-bpm")?.value || 120),
     size: Number($("rehearsal-size")?.value || 100) / 100,
     intensity: Number($("rehearsal-intensity")?.value || 68) / 100,
-    strobe: Number($("rehearsal-strobe")?.value || 0) / 100,
+    movers_strobe_dmx: Math.round(clamp($("rehearsal-movers-strobe")?.value, 0, 255)),
+    center_strobe_dmx: Math.round(clamp($("rehearsal-center-strobe")?.value, 0, 255)),
     isolate: Boolean($("rehearsal-isolate")?.checked),
   };
 }
@@ -2050,6 +2058,15 @@ function renderStatus() {
   setText("footer-message", fault ? engine.error : running ? `${label(engine.mode)} mode on ${engine.audio_device}` : "Lumen operator console connected");
   setText("remote-engine-state", label(engine.phase));
   setText("remote-output-state", status.output ? `${status.output.backend} · ${status.output.frames_sent || 0} frames` : "No output active");
+  for (const lane of ["movers", "center"]) {
+    const value = status.strobe_controls?.[lane];
+    if (value === null || value === undefined) continue;
+    for (const id of [`remote-${lane}-strobe`, `remote-${lane}-strobe-number`]) {
+      const element = $(id);
+      if (element && document.activeElement !== element) element.value = value;
+    }
+    setText(`remote-${lane}-strobe-value`, value);
+  }
   setText("audio-device-name", engine.audio_device);
   renderAudioDiagnostics(status.audio, engine);
   if (app.page === "audio") renderTrainingDataset(status.training || {}, engine);
@@ -2823,9 +2840,7 @@ async function refreshLink(showErrors = false) {
   if (app.linkRefreshing) return;
   app.linkRefreshing = true;
   try {
-    const result = await api(
-      app.remote ? "/api/link/status?summary=1" : "/api/link/status",
-    );
+    const result = await api("/api/link/status");
     app.link = result.link || result.status || result;
     app.linkFetchedAt = Date.now();
     renderLink(app.link);
@@ -4106,7 +4121,7 @@ function installFeedbackButton(button) {
   let cancelled = false;
   let touchArmed = false;
   button.addEventListener("pointerdown", (event) => {
-    start = { x: event.clientX, y: event.clientY, pointerType: event.pointerType };
+    start = { x: event.clientX, y: event.clientY, pointerType: event.pointerType, unixMs: Date.now() };
     cancelled = event.pointerType === "touch" && Date.now() < app.touchBlockedUntil;
     touchArmed = false;
   });
@@ -4127,7 +4142,7 @@ function installFeedbackButton(button) {
     touchArmed = false;
     confirmButtonPress(button);
     const surface = button.closest(".remote-section") ? "remote" : "desktop";
-    sendFeedback(button.dataset.feedback, button.dataset.value, null, surface);
+    sendFeedback(button.dataset.feedback, button.dataset.value, null, surface, start?.unixMs || Date.now());
   });
 }
 
@@ -4137,7 +4152,7 @@ function installWakeProtectedAction(button, action) {
   let start = null;
   let allowed = false;
   button.addEventListener("pointerdown", (event) => {
-    start = { x: event.clientX, y: event.clientY, type: event.pointerType };
+    start = { x: event.clientX, y: event.clientY, type: event.pointerType, unixMs: Date.now() };
     allowed = event.pointerType !== "touch" || Date.now() >= app.touchBlockedUntil;
   });
   button.addEventListener("pointermove", (event) => {
@@ -4153,7 +4168,7 @@ function installWakeProtectedAction(button, action) {
     }
     allowed = false;
     confirmButtonPress(button);
-    action(event);
+    action(event, start?.unixMs || Date.now());
   });
 }
 
@@ -4760,6 +4775,65 @@ function queueControl(control, value) {
   app.controlTimer = window.setTimeout(() => patchControl(control, value), 85);
 }
 
+function setStrobePair(prefix, value) {
+  const normalized = Math.round(clamp(value, 0, 255));
+  for (const id of [prefix, `${prefix}-number`]) {
+    if ($(id)) $(id).value = normalized;
+  }
+  setText(`${prefix}-value`, normalized);
+  return normalized;
+}
+
+async function patchRemoteStrobe(group, value, settled, interactionUnixMs) {
+  const clientEventId = settled
+    ? (window.crypto?.randomUUID?.()
+      || `strobe-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`)
+    : null;
+  try {
+    const result = await api("/api/strobe-control", {
+      method: "POST",
+      body: {
+        group,
+        value,
+        settled,
+        lifetime: $("remote-feedback-lifetime")?.value || "cue",
+        participant_id: app.participantId,
+        participant_name: app.participantName || null,
+        client_event_id: clientEventId,
+        interaction_unix_ms: interactionUnixMs,
+      },
+    });
+    if (app.status?.strobe_controls) app.status.strobe_controls[group] = result.value;
+    if (settled) {
+      if (result.feedback?.feedback_id && result.feedback.created !== false) {
+        app.feedbackReceipts.push(Number(result.feedback.feedback_id));
+        app.feedbackReceipts = app.feedbackReceipts.slice(-30);
+      }
+      setText(
+        "remote-strobe-feedback-state",
+        `${label(group)} DMX ${result.value} recorded for this musical moment.`,
+      );
+    }
+  } catch (error) {
+    setText("remote-strobe-feedback-state", `Strobe control failed: ${error.message}`);
+  }
+}
+
+function queueRemoteStrobe(group, value, interactionUnixMs = Date.now()) {
+  const normalized = setStrobePair(`remote-${group}-strobe`, value);
+  window.clearTimeout(app.strobeTimers[group]);
+  app.strobeTimers[group] = window.setTimeout(
+    () => patchRemoteStrobe(group, normalized, false, interactionUnixMs),
+    70,
+  );
+  window.clearTimeout(app.strobeSettleTimers[group]);
+  setText("remote-strobe-feedback-state", `Adjusting ${group}…`);
+  app.strobeSettleTimers[group] = window.setTimeout(
+    () => patchRemoteStrobe(group, normalized, true, interactionUnixMs),
+    700,
+  );
+}
+
 async function applyPreset(preset) {
   try {
     app.status = await api("/api/preset", { method: "POST", body: { preset } });
@@ -4771,7 +4845,7 @@ async function applyPreset(preset) {
   }
 }
 
-async function sendFeedback(labelValue, value, note = null, surface = "desktop") {
+async function sendFeedback(labelValue, value, note = null, surface = "desktop", interactionUnixMs = Date.now()) {
   const selector = $(surface === "remote" ? "remote-feedback-scope" : "feedback-scope");
   const lifetimeSelector = $(surface === "remote" ? "remote-feedback-lifetime" : "feedback-lifetime");
   const selected = selector?.value || "overall";
@@ -4797,6 +4871,7 @@ async function sendFeedback(labelValue, value, note = null, surface = "desktop")
         participant_id: app.participantId,
         participant_name: app.participantName || null,
         client_event_id: clientEventId,
+        interaction_unix_ms: interactionUnixMs,
       },
     });
     if (result.feedback_id && result.created !== false) {
@@ -4819,7 +4894,7 @@ async function sendFeedback(labelValue, value, note = null, surface = "desktop")
   }
 }
 
-async function sendTrainingAnnotation(kind, labelValue, surface = "desktop") {
+async function sendTrainingAnnotation(kind, labelValue, surface = "desktop", interactionUnixMs = Date.now()) {
   const selector = $(surface === "remote" ? "remote-feedback-scope" : "feedback-scope");
   const selected = selector?.value || "overall";
   const [scope, fixtureId, groupId] = kind === "musical_context"
@@ -4846,6 +4921,7 @@ async function sendTrainingAnnotation(kind, labelValue, surface = "desktop") {
         participant_id: app.participantId,
         participant_name: app.participantName || null,
         client_event_id: clientEventId,
+        interaction_unix_ms: interactionUnixMs,
       },
     });
     toast(
@@ -4985,15 +5061,27 @@ function installHandlers() {
   ["rehearsal-output", "rehearsal-scope", "rehearsal-isolate"].forEach((id) => {
     $(id)?.addEventListener("change", () => patchRehearsal(rehearsalFormValues()));
   });
-  ["rehearsal-bpm", "rehearsal-size", "rehearsal-intensity", "rehearsal-strobe"].forEach((id) => {
+  ["rehearsal-bpm", "rehearsal-size", "rehearsal-intensity"].forEach((id) => {
     $(id)?.addEventListener("input", () => {
       setText("rehearsal-bpm-value", `${$("rehearsal-bpm").value} BPM`);
       setText("rehearsal-size-value", `${$("rehearsal-size").value}%`);
       setText("rehearsal-intensity-value", `${$("rehearsal-intensity").value}%`);
-      setText("rehearsal-strobe-value", Number($("rehearsal-strobe").value) ? `${$("rehearsal-strobe").value}%` : "Off");
       queueRehearsal(rehearsalFormValues());
     });
   });
+  for (const group of ["movers", "center"]) {
+    for (const id of [`rehearsal-${group}-strobe`, `rehearsal-${group}-strobe-number`]) {
+      $(id)?.addEventListener("input", (event) => {
+        setStrobePair(`rehearsal-${group}-strobe`, event.target.value);
+        queueRehearsal(rehearsalFormValues());
+      });
+    }
+    for (const id of [`remote-${group}-strobe`, `remote-${group}-strobe-number`]) {
+      $(id)?.addEventListener("input", (event) => {
+        queueRemoteStrobe(group, event.target.value, Date.now());
+      });
+    }
+  }
   $("color-add-button")?.addEventListener("click", () => {
     const name = $("color-name-input")?.value.trim().replace(/[^a-zA-Z0-9_-]+/g, "_");
     const value = $("color-value-input")?.value.trim().toLowerCase();
@@ -5135,10 +5223,6 @@ function installHandlers() {
     renderSequenceDraft();
   }));
   $("sequence-save-here")?.addEventListener("click", () => saveSequenceHere(false));
-  installWakeProtectedAction(
-    $("remote-sequence-save"),
-    () => saveSequenceHere(true),
-  );
   $("sequence-clear")?.addEventListener("click", clearSequenceDraft);
   $("sequence-undo-history")?.addEventListener("click", () => {
     const undo = app.choreographyUndo;
@@ -5306,9 +5390,9 @@ function installHandlers() {
   });
   $("feedback-undo-button")?.addEventListener("click", undoLastFeedback);
   installWakeProtectedAction($("remote-feedback-undo"), undoLastFeedback);
-  installWakeProtectedAction($("remote-feedback-note-button"), () => {
+  installWakeProtectedAction($("remote-feedback-note-button"), (_event, interactionUnixMs) => {
     const note = $("remote-feedback-note").value.trim();
-    if (note) sendFeedback("operator_note", 0, note, "remote");
+    if (note) sendFeedback("operator_note", 0, note, "remote", interactionUnixMs);
   });
   $("remote-note-open")?.addEventListener("click", () => {
     $("remote-note-box").classList.toggle("hidden");
@@ -5320,11 +5404,8 @@ function installHandlers() {
   $("feedback-action-button")?.addEventListener("click", () => {
     sendTrainingAnnotation("preferred_action", $("feedback-action-label")?.value, "desktop");
   });
-  installWakeProtectedAction($("remote-context-button"), () => {
-    sendTrainingAnnotation("musical_context", $("remote-context-label")?.value, "remote");
-  });
-  installWakeProtectedAction($("remote-action-button"), () => {
-    sendTrainingAnnotation("preferred_action", $("remote-action-label")?.value, "remote");
+  installWakeProtectedAction($("remote-context-button"), (_event, interactionUnixMs) => {
+    sendTrainingAnnotation("musical_context", $("remote-context-label")?.value, "remote", interactionUnixMs);
   });
   $("feedback-history")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-delete-feedback]");

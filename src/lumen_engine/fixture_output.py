@@ -280,6 +280,7 @@ def apply_moving_head_profile(
     fixture_count: int = 1,
     chase_beat_position: float | None = None,
     latched_rgb: tuple[float, float, float] | None = None,
+    strobe_dmx_override: int | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -344,7 +345,11 @@ def apply_moving_head_profile(
                 choreography_strobe_enabled=choreography_strobe_enabled,
             )
         )
-        strobe = _direct_strobe_dmx(strobe_request)
+        strobe = (
+            round(clamp(float(strobe_dmx_override), 0.0, 255.0))
+            if strobe_dmx_override is not None
+            else _direct_strobe_dmx(strobe_request)
+        )
         _set_relative(
             frame,
             fixture.universe,
@@ -395,6 +400,7 @@ def apply_auxiliary_fixture(
     motion_beat_position: float | None = None,
     latched_rgb: tuple[float, float, float] | None = None,
     latched_secondary_rgb: tuple[float, float, float] | None = None,
+    strobe_dmx_override: int | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     if profile is None:
@@ -422,6 +428,7 @@ def apply_auxiliary_fixture(
             motion_beat_position,
             latched_rgb,
             latched_secondary_rgb,
+            strobe_dmx_override,
         )
         return
     dimmer = profile.channels.get("dimmer")
@@ -457,6 +464,7 @@ def _apply_generic_multi_effect(
     motion_beat_position: float | None = None,
     latched_rgb: tuple[float, float, float] | None = None,
     latched_secondary_rgb: tuple[float, float, float] | None = None,
+    strobe_dmx_override: int | None = None,
 ) -> None:
     profile = party_parrot_profile(fixture.profile_key)
     assert profile is not None
@@ -671,15 +679,19 @@ def _apply_generic_multi_effect(
         if center_tuning is None
         else max(center_tuning.strobe_level, choreography_strobe)
     )
-    strobe = _multi_effect_strobe_dmx(
-        _strobe_request(
-            observation,
-            energy,
-            strobe_feedback,
-            authored_strobe,
-            automatic=center_tuning is None,
-            strobe_rate_feedback=strobe_rate_feedback,
-            choreography_strobe_enabled=choreography_strobe_enabled,
+    strobe = (
+        round(clamp(float(strobe_dmx_override), 0.0, 255.0))
+        if strobe_dmx_override is not None
+        else _multi_effect_strobe_dmx(
+            _strobe_request(
+                observation,
+                energy,
+                strobe_feedback,
+                authored_strobe,
+                automatic=center_tuning is None,
+                strobe_rate_feedback=strobe_rate_feedback,
+                choreography_strobe_enabled=choreography_strobe_enabled,
+            )
         )
     )
 

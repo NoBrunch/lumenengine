@@ -461,6 +461,7 @@ class FeedbackSignal:
     scope: str = "overall"
     fixture_id: str | None = None
     created_unix_ms: int | None = None
+    target_strobe_rate: float | None = None
 
     def __post_init__(self) -> None:
         if not self.label.strip():
@@ -469,6 +470,8 @@ class FeedbackSignal:
         _unit(self.urgency, "feedback urgency")
         if self.occurrences < 1:
             raise ValueError("feedback occurrences must be positive")
+        if self.target_strobe_rate is not None:
+            _unit(self.target_strobe_rate, "target_strobe_rate")
 
 
 @dataclass(frozen=True, slots=True)
@@ -765,6 +768,24 @@ class SequencePreferenceModel:
                     continue
                 label = signal.label.casefold().strip().replace(" ", "_")
                 update_strength = self.learning_rate * mass
+                if label == "strobe_level" and signal.target_strobe_rate is not None:
+                    target = signal.target_strobe_rate
+                    self._update_metric(
+                        context_tokens,
+                        "strobe_enabled",
+                        (1.0 if target > 0.0 else -1.0) * update_strength,
+                        lane=normalized_lane,
+                        lifetime=normalized_lifetime,
+                    )
+                    if target > 0.0:
+                        self._update_metric(
+                            context_tokens,
+                            "strobe_rate",
+                            (target * 2.0 - 1.0) * update_strength,
+                            lane=normalized_lane,
+                            lifetime=normalized_lifetime,
+                        )
+                    continue
                 directional = _DIRECTIONAL_FEEDBACK.get(label)
                 if directional is not None:
                     metric, direction = directional
@@ -1423,7 +1444,11 @@ def _feedback_mass(
     now_unix_ms: int,
     half_life_days: float,
 ) -> float:
-    magnitude = abs(signal.value)
+    magnitude = (
+        1.0
+        if signal.target_strobe_rate is not None
+        else abs(signal.value)
+    )
     # Repeated taps communicate urgency but are one correlated observation,
     # not N independent training examples. Log growth keeps ten phones (or
     # ten rapid taps) meaningful without letting them dominate indefinitely.

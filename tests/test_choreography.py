@@ -166,6 +166,42 @@ class SequencePreferenceTests(unittest.TestCase):
             weights = model.state_dict()["weights"]
             self.assertIn(f"metric:{metric}", weights, label)
 
+    def test_exact_strobe_target_teaches_on_off_and_rate_and_round_trips(self) -> None:
+        context = MusicalContext(energy_label="drop", energy=0.9)
+        model = SequencePreferenceModel()
+        model.learn(CapturedChoreographyExample(
+            context=context,
+            performed=_rave_sequence(),
+            feedback=(FeedbackSignal(
+                label="strobe_level",
+                value=0.0,
+                target_strobe_rate=0.0,
+            ),),
+        ), event_id="strobe-off", lane="movers", lifetime="global")
+        off_state = model.state_dict()
+        enabled_key = "lane:movers|metric:strobe_enabled"
+        self.assertIn(enabled_key, off_state["weights"])
+        self.assertLess(off_state["weights"][enabled_key], 0)
+        restored = SequencePreferenceModel.from_state_dict(off_state)
+        signal = restored.state_dict()["events"]["strobe-off"]["example"][
+            "feedback"
+        ][0]
+        self.assertEqual(signal["target_strobe_rate"], 0.0)
+
+        model.learn(CapturedChoreographyExample(
+            context=context,
+            performed=_rave_sequence(),
+            feedback=(FeedbackSignal(
+                label="strobe_level",
+                value=0.8,
+                target_strobe_rate=0.8,
+            ),),
+        ), event_id="strobe-fast", lane="movers", lifetime="global")
+        weights = model.state_dict()["weights"]
+        rate_key = "lane:movers|metric:strobe_rate"
+        self.assertIn(rate_key, weights)
+        self.assertGreater(weights[rate_key], 0)
+
     def test_live_ranking_never_waits_for_feedback_model_mutation(self) -> None:
         model = SequencePreferenceModel()
         entered = threading.Event()

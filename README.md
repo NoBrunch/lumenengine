@@ -20,8 +20,8 @@ The application has two purpose-built surfaces:
   room and fixture editing, beam solving, DMX patching, calibration, audio
   analysis, song memory, hardware status, logs, and keyboard controls.
 - **Phone/tablet remote** at `http://<this-computer-ip>:4042/remote`: current
-  song and gesture, performance influence, quick character presets, feedback,
-  notes, and blackout. The System page displays the exact address for this PC.
+  song, moment feedback, exact mover/center strobe teaching, notes, and
+  blackout. The System page displays the exact address for this PC.
 
 The desktop console has three start modes:
 
@@ -64,7 +64,7 @@ The command-line tools below remain available for development and diagnostics.
   volume, device selection, album art, and now-playing metadata
 - A complete simulation from musical observations to virtual DMX
 - A dark, KDE-inspired technical desktop console with hotkeys
-- A responsive phone/tablet influence and feedback remote
+- A responsive phone/tablet feedback and strobe-teaching remote
 - Live room/beam visualization, target solving, patch and calibration editing
 - Real PCM waveform, packet heartbeat, dBFS/RMS/peak/clipping proof, rhythm
   lock, expression meters, event log, and DMX heatmap
@@ -72,7 +72,7 @@ The command-line tools below remain available for development and diagnostics.
 - **Lumen Link** private-LAN offload for full-song EDMFormer and SongFormer
   work, student training, and held-out evaluation on the Threadripper WSL
   node, with authenticated resumable transfers, deterministic artifact import,
-  resource telemetry, and a desktop/phone status dashboard
+  resource telemetry, and a desktop status dashboard
 
 ## Neural training collection
 

@@ -1243,14 +1243,53 @@ class ControlApplicationTests(unittest.TestCase):
         controls.patch({
             "routine": "fan_sweep", "scope": "center", "output": "virtual",
             "bpm": 900, "size": -2, "intensity": 2, "strobe": 0.4,
+            "movers_strobe_dmx": 900, "center_strobe_dmx": -12,
         })
         self.assertEqual(controls.routine, "fan_sweep")
         self.assertEqual(controls.scope, "center")
         self.assertEqual(controls.bpm, 240.0)
         self.assertEqual(controls.size, 0.0)
         self.assertEqual(controls.intensity, 1.0)
+        self.assertEqual(controls.movers_strobe_dmx, 255)
+        self.assertEqual(controls.center_strobe_dmx, 0)
         with self.assertRaises(ValueError):
             controls.patch({"routine": "not-a-routine"})
+
+    def test_settled_remote_strobe_is_direct_output_and_contextual_feedback(
+        self,
+    ) -> None:
+        self.application.start("demo")
+        deadline = time.monotonic() + 2.0
+        while (
+            self.application.snapshot()["decision"] is None
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        interaction_ms = round(time.time() * 1000) - 700
+        result = self.application.patch_strobe_control({
+            "group": "movers",
+            "value": 137,
+            "settled": True,
+            "lifetime": "cue",
+            "participant_id": "owner-test",
+            "client_event_id": "strobe-test-137",
+            "interaction_unix_ms": interaction_ms,
+        })
+        self.assertEqual(result["value"], 137)
+        self.assertEqual(result["strobe_controls"]["movers"], 137)
+        self.assertEqual(result["feedback"]["target_strobe_dmx"], 137)
+        self.assertGreaterEqual(result["feedback"]["timing_offset_ms"], 650)
+        feedback = self.application.memory.list_feedback(
+            result["feedback"]["song_id"]
+        )[-1]
+        self.assertEqual(feedback["label"], "strobe_level")
+        self.assertEqual(feedback["scope"], "group")
+        self.assertEqual(feedback["fixture_id"], "movers")
+        self.assertEqual(feedback["lane_context"]["target_strobe_dmx"], 137)
+        self.assertLessEqual(
+            feedback["lane_context"]["interaction_offset_ms"], 1000
+        )
+        self.application.stop()
 
     def test_live_performance_defaults_to_automatic_palette(self) -> None:
         self.assertEqual(OperatorControls().palette, "auto")

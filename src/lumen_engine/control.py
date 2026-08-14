@@ -269,6 +269,8 @@ class RehearsalControls:
     # stable, saturated color so motion can be judged without palette churn.
     palette: str = "pure_blue"
     strobe: float = 0.0
+    movers_strobe_dmx: int = 0
+    center_strobe_dmx: int = 0
     isolate: bool = True
     tour: bool = False
 
@@ -293,6 +295,13 @@ class RehearsalControls:
             self.size = clamp(float(values["size"]), 0.0, 1.0)
         if "strobe" in values:
             self.strobe = clamp(float(values["strobe"]), 0.0, 1.0)
+        for name in ("movers_strobe_dmx", "center_strobe_dmx"):
+            if name in values:
+                setattr(
+                    self,
+                    name,
+                    round(clamp(float(values[name]), 0.0, 255.0)),
+                )
         if "palette" in values:
             palette = str(values["palette"]).strip()
             if not _valid_palette_hint(palette):
@@ -505,6 +514,13 @@ class LumenApplication:
         self._runtime: PerformanceRuntime | None = None
         self.controls = OperatorControls()
         self.rehearsal = RehearsalControls()
+        # A raw channel override belongs only to this running process. The
+        # durable part is the contextual feedback example recorded after the
+        # operator settles on a value, not an output command replayed at boot.
+        self._operator_strobe_dmx: dict[str, int | None] = {
+            "movers": None,
+            "center": None,
+        }
         self.gesture_movements = _normalized_gesture_movements(
             self._settings.get("gesture_movements", {})
         )
@@ -749,6 +765,10 @@ class LumenApplication:
             "maximum_stages_ms": {},
         }
         self._analysis_history: deque[dict[str, Any]] = deque(maxlen=240)
+        # Keep slightly more than the accepted one-second interaction delay so
+        # feedback can be attached to what Lumen was doing when the operator
+        # touched the control, rather than when the HTTP request arrived.
+        self._teaching_history: deque[dict[str, Any]] = deque(maxlen=96)
         self._audio_age_history: deque[dict[str, Any]] = deque(maxlen=240)
         self._last_analysis_history_at: float | None = None
         self._analysis_generation = 0
@@ -2177,6 +2197,21 @@ class LumenApplication:
             decay = math.exp(-age_days / 21.0)
             label_effect = self._feedback_effect(str(row.get("label", "")))
             note_effect = self._feedback_note_effect(row.get("note"))
+            if str(row.get("label", "")) == "strobe_level":
+                target_rate = clamp(
+                    float(0.0 if row.get("value") is None else row["value"]),
+                    0.0,
+                    1.0,
+                )
+                label_effect = {
+                    "strobe_enabled": 0.80 if target_rate > 0.0 else -0.80,
+                    "strobe_rate": (
+                        (target_rate * 2.0 - 1.0) * 0.35
+                        if target_rate > 0.0
+                        else 0.0
+                    ),
+                }
+                note_effect = {}
             effect = {
                 axis: float(label_effect.get(axis, 0.0))
                 + float(note_effect.get(axis, 0.0))
@@ -2193,7 +2228,7 @@ class LumenApplication:
             weight = decay * min(
                 1.0,
                 1.0
-                if note_has_semantics
+                if note_has_semantics or str(row.get("label", "")) == "strobe_level"
                 else abs(float(1.0 if raw_value is None else raw_value)),
             )
             for key in context_keys:
@@ -3743,6 +3778,7 @@ class LumenApplication:
             if active_runtime is not None
             else None
         )
+        teaching_captured_at = time.monotonic()
         emit_trace = False
         emit_decision = False
         trace_session_id = ""
@@ -3776,6 +3812,13 @@ class LumenApplication:
             self._runtime_choreography_snapshot = (
                 current_choreography_snapshot
             )
+            self._teaching_history.append({
+                "monotonic_s": teaching_captured_at,
+                "frame": frame,
+                "observation": observation,
+                "audio_frame": self._training_audio_frame,
+                "choreography": current_choreography_snapshot,
+            })
             # The 30 Hz control clock deliberately publishes interpolated
             # frames between analyzer observations. Those ticks reuse the
             # latest measured dBFS instead of inventing -120 dBFS. Recording
@@ -4074,6 +4117,7 @@ class LumenApplication:
             "maximum_stages_ms": {},
         }
         self._analysis_history.clear()
+        self._teaching_history.clear()
         self._audio_age_history.clear()
         self._last_analysis_history_at = None
 
@@ -4262,6 +4306,8 @@ class LumenApplication:
             gesture_movements=self.gesture_movements,
         )
         runtime.replace_feedback(self._feedback_biases)
+        for lane, value in self._operator_strobe_dmx.items():
+            runtime.set_operator_strobe_dmx(lane, value)
         runtime.set_media_context(
             self.song_id, self.observation.section,
             self.media.artists[0] if self.media and self.media.artists else None,
@@ -4337,6 +4383,41 @@ class LumenApplication:
             self._status_sequence += 1
         return self.snapshot()
 
+    def patch_strobe_control(self, values: dict[str, Any]) -> dict[str, Any]:
+        lane = str(values.get("group", "")).strip().casefold()
+        if lane not in {"movers", "center"}:
+            raise ValueError("strobe group must be movers or center")
+        value = round(clamp(float(values.get("value", 0)), 0.0, 255.0))
+        settled = bool(values.get("settled", False))
+        with self._lock:
+            self._operator_strobe_dmx[lane] = value
+            runtime = self._runtime
+            if runtime is not None:
+                runtime.set_operator_strobe_dmx(lane, value)
+            self._status_sequence += 1
+        feedback = None
+        if settled:
+            feedback = self.add_feedback({
+                "label": "strobe_level",
+                "value": value / 255.0,
+                "target_strobe_dmx": value,
+                "scope": "group",
+                "group_id": lane,
+                "lifetime": str(values.get("lifetime", "cue")),
+                "participant_id": values.get("participant_id"),
+                "participant_name": values.get("participant_name"),
+                "client_event_id": values.get("client_event_id"),
+                "interaction_unix_ms": values.get("interaction_unix_ms"),
+                "note": f"Operator settled {lane} strobe channel at DMX {value}.",
+            })
+        return {
+            "group": lane,
+            "value": value,
+            "settled": settled,
+            "feedback": feedback,
+            "strobe_controls": dict(self._operator_strobe_dmx),
+        }
+
     def _apply_rehearsal_to_runtime(
         self, runtime: PerformanceRuntime
     ) -> None:
@@ -4346,8 +4427,14 @@ class LumenApplication:
             intensity=self.rehearsal.intensity,
             size=self.rehearsal.size,
             palette=self.rehearsal.palette,
-            strobe=self.rehearsal.strobe,
+            strobe=0.0,
             isolate=self.rehearsal.isolate,
+        )
+        runtime.set_operator_strobe_dmx(
+            "movers", self.rehearsal.movers_strobe_dmx
+        )
+        runtime.set_operator_strobe_dmx(
+            "center", self.rehearsal.center_strobe_dmx
         )
 
     def apply_preset(self, preset: str) -> dict[str, Any]:
@@ -4388,6 +4475,60 @@ class LumenApplication:
             self._add_event("control", f"Influence preset: {preset.title()}")
             self._status_sequence += 1
         return self.snapshot()
+
+    def _interaction_context(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a browser interaction against at most one second of history."""
+
+        now_unix_ms = round(time.time() * 1000)
+        try:
+            interaction_unix_ms = int(payload.get("interaction_unix_ms"))
+        except (TypeError, ValueError):
+            interaction_unix_ms = now_unix_ms
+        # Ignore a badly skewed client clock. A real UI/network delay is
+        # compensated, but never rewrite feedback farther than one second.
+        raw_delay_ms = now_unix_ms - interaction_unix_ms
+        timing_offset_ms = (
+            round(clamp(float(raw_delay_ms), 0.0, 1000.0))
+            if -250 <= raw_delay_ms <= 5_000
+            else 0
+        )
+        target_monotonic = time.monotonic() - timing_offset_ms / 1000.0
+        with self._live_state_lock:
+            nearest = (
+                min(
+                    self._teaching_history,
+                    key=lambda item: abs(
+                        float(item["monotonic_s"]) - target_monotonic
+                    ),
+                )
+                if self._teaching_history
+                else None
+            )
+            frame = self.frame if nearest is None else nearest["frame"]
+            observation = (
+                self.observation if nearest is None else nearest["observation"]
+            )
+            audio_frame = (
+                self._training_audio_frame
+                if nearest is None
+                else nearest["audio_frame"]
+            )
+            choreography = (
+                self._runtime_choreography_snapshot
+                if nearest is None
+                else nearest["choreography"]
+            )
+        position_ms = self._media_position_ms(
+            at_monotonic_s=target_monotonic
+        )
+        return {
+            "frame": frame,
+            "observation": observation,
+            "audio_frame": audio_frame,
+            "choreography": choreography or {},
+            "position_ms": position_ms,
+            "timing_offset_ms": timing_offset_ms,
+        }
 
     def request_fresh_gesture(self) -> dict[str, Any]:
         with self._lock:
@@ -6275,6 +6416,15 @@ class LumenApplication:
             for fixture in (*self.rig.fixtures, *self.rig.auxiliary_fixtures)
         ):
             raise ValueError("feedback fixture_id is not in the active rig")
+        target_strobe_dmx: int | None = None
+        if label == "strobe_level":
+            target_strobe_dmx = round(clamp(
+                float(payload.get("target_strobe_dmx", value * 255.0)),
+                0.0,
+                255.0,
+            ))
+            value = target_strobe_dmx / 255.0
+        interaction = self._interaction_context(payload)
         with self._feedback_lock:
             with self._lock:
                 song_id = self.song_id
@@ -6294,22 +6444,22 @@ class LumenApplication:
                     song_id = self.song_id
             assert song_id is not None
             with self._lock:
-                context_frame = self.frame
-                context_observation = self.observation
-                capture_audio_frame = self._training_audio_frame
+                context_frame = interaction["frame"]
+                context_observation = interaction["observation"]
+                capture_audio_frame = interaction["audio_frame"]
                 capture_session_id = (
                     self._session_id
                     if capture_audio_frame is not None
                     else None
                 )
-                position_ms = self._media_position_ms()
+                position_ms = interaction["position_ms"]
                 runtime = self._runtime
                 listening_session_id = self._session_id
             feedback_fixture = group_id if scope == "group" else fixture_id
             target_lanes = self._feedback_target_lanes(
                 scope, feedback_fixture
             )
-            choreography_snapshot = (
+            choreography_snapshot = interaction["choreography"] or (
                 runtime.choreography_snapshot()
                 if runtime is not None
                 else {}
@@ -6318,6 +6468,7 @@ class LumenApplication:
             lane_context = {
                 "version": 1,
                 "lifetime": lifetime,
+                "interaction_offset_ms": interaction["timing_offset_ms"],
                 "lanes": {
                     lane: {
                         "section": str(
@@ -6348,6 +6499,11 @@ class LumenApplication:
                     for lane in target_lanes
                 },
             }
+            if target_strobe_dmx is not None:
+                lane_context["target_strobe_dmx"] = target_strobe_dmx
+                lane_context["target_strobe_rate"] = (
+                    target_strobe_dmx / 255.0
+                )
             # A listener burst is a sliding five-second consensus window, not
             # a wall-clock bucket. Otherwise eight phones tapping together at
             # xx:x4.999 could be split merely because midnight's modulo clock
@@ -6369,6 +6525,11 @@ class LumenApplication:
                 ) == lifetime
                 and row["lane_context"].get("lanes")
                 == lane_context["lanes"]
+                and (
+                    label != "strobe_level"
+                    or row["lane_context"].get("target_strobe_dmx")
+                    == target_strobe_dmx
+                )
                 and self._feedback_consensus_start_ms(row)
                 <= consensus_now_ms
                 < self._feedback_consensus_start_ms(row) + 5_000
@@ -6476,6 +6637,15 @@ class LumenApplication:
                     ) == lifetime
                     and self._feedback_lane_context(row, lane)
                     == performed_context
+                    and (
+                        batch_label != "strobe_level"
+                        or (row.get("lane_context") or {}).get(
+                            "target_strobe_dmx"
+                        )
+                        == (persisted_feedback.get("lane_context") or {}).get(
+                            "target_strobe_dmx"
+                        )
+                    )
                     and self._feedback_consensus_start_ms(row)
                     == batch_start_ms
                 ]
@@ -6523,7 +6693,7 @@ class LumenApplication:
             learned_sequence: dict[str, Any] | None = None
             if (
                 runtime is not None
-                and abs(value) > 0.0
+                and (abs(value) > 0.0 or target_strobe_dmx is not None)
                 and label != "operator_note"
                 and feedback_created
             ):
@@ -6543,6 +6713,11 @@ class LumenApplication:
                     occurrences_by_lane=occurrences_by_lane,
                     urgency_by_lane=urgency_by_lane,
                     lifetime=lifetime,
+                    target_strobe_rate=(
+                        None
+                        if target_strobe_dmx is None
+                        else target_strobe_dmx / 255.0
+                    ),
                 )
                 if learned_sequence is not None:
                     self._save_choreography_model()
@@ -6588,6 +6763,8 @@ class LumenApplication:
             "model_event_id": model_event_id,
             "model_event_ids": model_event_ids,
             "sequence_learning": learned_sequence,
+            "timing_offset_ms": interaction["timing_offset_ms"],
+            "target_strobe_dmx": target_strobe_dmx,
         }
 
     def add_training_annotation(
@@ -6645,6 +6822,7 @@ class LumenApplication:
             raise ValueError("annotation fixture is not in the active rig")
         note = str(payload.get("note", "")).strip() or None
         intensity = clamp(float(payload.get("intensity", 1.0)), 0.1, 1.0)
+        interaction = self._interaction_context(payload)
         with self._feedback_lock:
             with self._lock:
                 song_id = self.song_id
@@ -6664,16 +6842,16 @@ class LumenApplication:
                     song_id = self.song_id
             assert song_id is not None
             with self._lock:
-                frame_snapshot = self.frame
-                observation_snapshot = self.observation
+                frame_snapshot = interaction["frame"]
+                observation_snapshot = interaction["observation"]
                 controls_snapshot = asdict(self.controls)
-                capture_audio_frame = self._training_audio_frame
+                capture_audio_frame = interaction["audio_frame"]
                 capture_session_id = (
                     self._session_id
                     if capture_audio_frame is not None
                     else None
                 )
-                position_ms = self._media_position_ms()
+                position_ms = interaction["position_ms"]
                 runtime = self._runtime
             decision: dict[str, Any] | None = None
             if frame_snapshot is not None:
@@ -6762,6 +6940,7 @@ class LumenApplication:
                 if kind == "musical_context" and annotation_created
                 else None
             ),
+            "timing_offset_ms": interaction["timing_offset_ms"],
         }
 
     def save_choreography_proposal(
@@ -7992,6 +8171,7 @@ class LumenApplication:
                 "error": self.last_error,
             },
             "controls": asdict(self.controls),
+            "strobe_controls": dict(self._operator_strobe_dmx),
             "rehearsal": {
                 **asdict(self.rehearsal),
                 "routines": list(REHEARSAL_ROUTINES),
@@ -8192,6 +8372,8 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.patch_controls(payload)
             elif path == "/api/rehearsal":
                 result = app.patch_rehearsal(payload)
+            elif path == "/api/strobe-control":
+                result = app.patch_strobe_control(payload)
             elif path == "/api/motion-routine":
                 result = app.patch_motion_routine(payload)
             elif path == "/api/preset":
