@@ -8,6 +8,8 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Removed the `/remote` Specific correction disclosure and made its complete
+  command suite, including Undo last, permanently visible.
 - Restored the compact preferred-gesture selector beside contextual feedback
   on `/remote`; the intentionally removed bulky song-specific action editor
   remains removed.

@@ -42,7 +42,16 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn('id="remote-action-button"', html)
         self.assertIn('id="remote-action-label"', html)
         self.assertIn('sendTrainingAnnotation("preferred_action"', script)
-        self.assertNotIn("Shape the response", html[html.index('id="remote-app"'):])
+        self.assertNotIn('id="remote-note-open"', html)
+        self.assertNotIn('$("remote-note-open")', script)
+        self.assertNotIn(
+            'id="remote-note-box" class="remote-note-box hidden"', html
+        )
+        self.assertIn('id="remote-note-box" class="remote-note-box"', html)
+        self.assertIn('id="remote-feedback-undo"', html)
+        remote_html = html[html.index('id="remote-app"'):]
+        self.assertNotIn("Specific correction", remote_html)
+        self.assertNotIn("Shape the response", remote_html)
         self.assertIn('class="embedded-shape-controls"', html)
         for group in ("movers", "center"):
             for prefix in ("remote", "rehearsal"):

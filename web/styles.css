@@ -4420,9 +4420,9 @@ body.remote-mode .remote-app { display: block; min-height: 100vh; }
 .remote-strobe-teaching label { display: grid; gap: 7px; }
 .remote-strobe-teaching label > span:first-child { display: flex; justify-content: space-between; color: #a4b4b1; font-size: 11px; }
 .remote-strobe-teaching output { color: var(--cyan); font-family: var(--font-mono); }
-.remote-feedback-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
-.remote-feedback-actions button, .remote-specific-feedback button { border: 1px solid #35494c; border-radius: 5px; padding: 10px 6px; background: #172629; color: #9eb4b0; font-size: 12px; }
+.remote-specific-feedback button { border: 1px solid #35494c; border-radius: 5px; padding: 10px 6px; background: #172629; color: #9eb4b0; font-size: 12px; }
 .remote-specific-feedback { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+#remote-feedback-undo { grid-column: 1 / -1; border-color: #526866; background: #101b1d; }
 .remote-spotify-track b, .remote-spotify-track span { display: block; }
 .remote-spotify-track b { color: #b7cbc7; font-size: 14px; }
 .remote-spotify-track span { margin-top: 4px; color: #718783; font-size: 11px; }

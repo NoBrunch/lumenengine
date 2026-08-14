@@ -5469,10 +5469,6 @@ function installHandlers() {
     const note = $("remote-feedback-note").value.trim();
     if (note) sendFeedback("operator_note", 0, note, "remote", interactionUnixMs);
   });
-  $("remote-note-open")?.addEventListener("click", () => {
-    $("remote-note-box").classList.toggle("hidden");
-    if (!$("remote-note-box").classList.contains("hidden")) $("remote-feedback-note").focus();
-  });
   $("feedback-context-button")?.addEventListener("click", () => {
     sendTrainingAnnotation("musical_context", $("feedback-context-label")?.value, "desktop");
   });
