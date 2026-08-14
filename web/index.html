@@ -353,6 +353,7 @@
                 <div class="rehearsal-controls">
                   <label><span>Output</span><select id="rehearsal-output"><option value="virtual">Preview only</option><option value="live">Live rig</option></select></label>
                   <label><span>Fixture scope</span><select id="rehearsal-scope"><option value="movers">Both movers</option><option value="center">Center effect</option><option value="overall">Whole rig</option></select></label>
+                  <label><span>Color</span><select id="rehearsal-palette"><option value="pure_blue">Solid · Pure blue</option></select></label>
                   <label><span>Tempo <output id="rehearsal-bpm-value">120 BPM</output></span><input id="rehearsal-bpm" type="range" min="40" max="240" step="1" value="120"></label>
                   <label><span>Audition scale <output id="rehearsal-size-value">100%</output></span><input id="rehearsal-size" type="range" min="0" max="100" step="1" value="100"></label>
                   <label><span>Intensity <output id="rehearsal-intensity-value">68%</output></span><input id="rehearsal-intensity" type="range" min="0" max="100" step="1" value="68"></label>
@@ -1285,6 +1286,8 @@
               <button data-feedback="cool_blue_purple" data-value="1">Cooler color</button><button data-feedback="warmer_color" data-value="1">Warmer color</button>
             </div>
             <div class="remote-preferred-actions">
+              <label><span>Preferred gesture</span><select id="remote-action-label"><option value="keep_current">Keep current sequence</option><option value="breathe">Breathe</option><option value="fan_sweep">Fan sweep</option><option value="figure_eight">Figure eight</option><option value="opposing_chase">Opposing chase</option><option value="beat_nod">Beat nod</option><option value="counter_rotate">Counter rotate</option></select></label>
+              <button id="remote-action-button">Use this gesture here</button>
               <label><span>Song context</span><select id="remote-context-label"><optgroup label="Energy state"><option value="silence">Silence</option><option value="intro">Intro</option><option value="groove">Groove</option><option value="breakdown">Breakdown</option><option value="build">Build</option><option value="drop">Drop</option><option value="outro">Outro</option></optgroup><optgroup label="Content role"><option value="vocal">Vocal</option><option value="instrumental">Instrumental</option><option value="solo">Solo</option><option value="transition">Transition material</option><option value="applause">Applause</option></optgroup><optgroup label="Transition event"><option value="section_start">Section start</option><option value="energy_rise">Energy rise</option><option value="energy_fall">Energy fall</option><option value="build_start">Build start</option><option value="drop_onset">Drop onset</option><option value="breakdown_onset">Breakdown onset</option><option value="groove_return">Groove return</option><option value="outro_start">Outro start</option><option value="track_end">Track end</option></optgroup></select></label>
               <button id="remote-context-button">Save this context</button>
             </div>

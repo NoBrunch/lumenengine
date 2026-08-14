@@ -2,6 +2,8 @@
 
 const workspacePages = ["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system"];
 const requestedWorkspacePage = new URLSearchParams(window.location.search).get("page");
+const TOUCH_RANGE_GAIN = 0.65;
+const TOUCH_RANGE_DIRECTION_THRESHOLD_PX = 10;
 
 const app = {
   remote: window.location.pathname === "/remote",
@@ -800,6 +802,7 @@ function renderRehearsal(rehearsal = {}) {
   const values = {
     "rehearsal-output": rehearsal.output,
     "rehearsal-scope": rehearsal.scope,
+    "rehearsal-palette": rehearsal.palette,
     "rehearsal-bpm": rehearsal.bpm,
     "rehearsal-size": Number(rehearsal.size) * 100,
     "rehearsal-intensity": Number(rehearsal.intensity) * 100,
@@ -1325,6 +1328,7 @@ function rehearsalFormValues() {
     bpm: Number($("rehearsal-bpm")?.value || 120),
     size: Number($("rehearsal-size")?.value || 100) / 100,
     intensity: Number($("rehearsal-intensity")?.value || 68) / 100,
+    palette: $("rehearsal-palette")?.value || "pure_blue",
     movers_strobe_dmx: Math.round(clamp($("rehearsal-movers-strobe")?.value, 0, 255)),
     center_strobe_dmx: Math.round(clamp($("rehearsal-center-strobe")?.value, 0, 255)),
     isolate: Boolean($("rehearsal-isolate")?.checked),
@@ -5021,7 +5025,78 @@ function toggleBlackout() {
   patchControl("blackout", !current);
 }
 
+function installTouchRangeGuards() {
+  $$("input[type=range]").forEach((input) => {
+    let gesture = null;
+    let suppressClickUntil = 0;
+
+    input.addEventListener("pointerdown", (event) => {
+      if (event.pointerType !== "touch") return;
+      gesture = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startValue: Number(input.value),
+        manualValue: Number(input.value),
+        adjusting: false,
+      };
+    }, true);
+
+    // Native range controls jump on touch-down before the browser knows that
+    // the owner intended to scroll. Suppress that first input until a clearly
+    // horizontal drag crosses the direction threshold.
+    input.addEventListener("input", (event) => {
+      if (gesture && event.isTrusted) {
+        input.value = String(
+          gesture.adjusting ? gesture.manualValue : gesture.startValue,
+        );
+        event.stopImmediatePropagation();
+      }
+    }, true);
+
+    input.addEventListener("pointermove", (event) => {
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      const deltaX = event.clientX - gesture.startX;
+      const deltaY = event.clientY - gesture.startY;
+      if (!gesture.adjusting) {
+        const horizontal = Math.abs(deltaX) >= TOUCH_RANGE_DIRECTION_THRESHOLD_PX
+          && Math.abs(deltaX) > Math.abs(deltaY) * 1.25;
+        if (!horizontal) return;
+        gesture.adjusting = true;
+        input.setPointerCapture?.(event.pointerId);
+      }
+      event.preventDefault();
+      const minimum = Number(input.min || 0);
+      const maximum = Number(input.max || 100);
+      const step = Math.max(Number(input.step || 1), Number.EPSILON);
+      const trackWidth = Math.max(input.clientWidth, 1);
+      const raw = gesture.startValue
+        + deltaX / trackWidth * (maximum - minimum) * TOUCH_RANGE_GAIN;
+      const stepped = minimum + Math.round((raw - minimum) / step) * step;
+      gesture.manualValue = clamp(stepped, minimum, maximum);
+      input.value = String(gesture.manualValue);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, { capture: true, passive: false });
+
+    const finish = (event) => {
+      if (!gesture || event.pointerId !== gesture.pointerId) return;
+      const changed = gesture.adjusting;
+      suppressClickUntil = performance.now() + 500;
+      gesture = null;
+      if (changed) input.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    input.addEventListener("pointerup", finish, true);
+    input.addEventListener("pointercancel", finish, true);
+    input.addEventListener("click", (event) => {
+      if (performance.now() >= suppressClickUntil) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  });
+}
+
 function installHandlers() {
+  installTouchRangeGuards();
   document.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (button && button.dataset.manualConfirmation !== "true") {
@@ -5058,7 +5133,7 @@ function installHandlers() {
       window.setTimeout(startRehearsal, 250);
     } else startRehearsal();
   });
-  ["rehearsal-output", "rehearsal-scope", "rehearsal-isolate"].forEach((id) => {
+  ["rehearsal-output", "rehearsal-scope", "rehearsal-palette", "rehearsal-isolate"].forEach((id) => {
     $(id)?.addEventListener("change", () => patchRehearsal(rehearsalFormValues()));
   });
   ["rehearsal-bpm", "rehearsal-size", "rehearsal-intensity"].forEach((id) => {
@@ -5406,6 +5481,9 @@ function installHandlers() {
   });
   installWakeProtectedAction($("remote-context-button"), (_event, interactionUnixMs) => {
     sendTrainingAnnotation("musical_context", $("remote-context-label")?.value, "remote", interactionUnixMs);
+  });
+  installWakeProtectedAction($("remote-action-button"), (_event, interactionUnixMs) => {
+    sendTrainingAnnotation("preferred_action", $("remote-action-label")?.value, "remote", interactionUnixMs);
   });
   $("feedback-history")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-delete-feedback]");

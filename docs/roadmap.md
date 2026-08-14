@@ -49,6 +49,28 @@
 - Fixture-specific motion timing
 - Long-duration soak testing
 
+### Pinned deferred investigation — silent fixture stability
+
+Revisit after higher-priority interface and learning work. During confirmed
+silence on 2026-08-13, a 30-second live capture observed 276 identical logical
+DMX samples, zero content changes, and zero Open-DMX transport errors while the
+physical fixtures still showed subtle color flicker and center-mechanism
+tremble. Lumen was holding mover dimmers at DMX 19, the center master at DMX
+24, center component colors at DMX 4–28, both strobe channels at zero, and the
+center motors at the assumed midpoint 128 with speed 255.
+
+Do not treat the cause as settled. The later controlled comparison should:
+
+- match one static QLC frame channel-for-channel in Lumen;
+- measure each fixture's stable low-dimmer/PWM floor;
+- characterize the center motors' real stop/deadband values;
+- compare QLC's FTDI refresh/slot behavior with Lumen's 40 Hz full-universe
+  Open-DMX transport, using a DMX analyzer if fixture-level tests do not decide
+  the cause.
+
+No parked-state or transport change was made when this investigation was
+pinned.
+
 ## Milestone 5 — personal learning
 
 - Preference aggregation from corrections

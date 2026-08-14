@@ -8,6 +8,18 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Restored the compact preferred-gesture selector beside contextual feedback
+  on `/remote`; the intentionally removed bulky song-specific action editor
+  remains removed.
+- Restored Rehearsal's direct color selector without restoring the deferred
+  Color Studio editor.
+- Made touch faders ignore scroll-intent movement until a deliberate horizontal
+  drag is established, reduced touch drag gain, and enlarged slider thumbs by
+  15 percent.
+- Pinned the unresolved silent-fixture flicker/tremble investigation with its
+  measured DMX baseline and future controlled comparison; physical output is
+  unchanged for now.
+
 - Made the Threadripper login watchdog check Git, configure, verify and start
   Lumen Link automatically with bounded retry and offline fallback; replaced
   the legacy dashboard `.url` with an icon-bearing `.lnk` that opens only the
@@ -152,6 +164,8 @@ result. Git commit history remains the detailed engineering log.
 ### Verification
 
 - `PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -v`
+- 438 tests passed on 2026-08-13 after the remote feedback, Rehearsal color,
+  and touch-fader corrections.
 - 388 tests passed on 2026-08-07; 42 focused Link, deployment, real student
   child-runner, and interface checks passed again after the final cross-review.
 - `node --check web/app.js` and `git diff --check` passed.

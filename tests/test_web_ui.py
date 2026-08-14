@@ -39,8 +39,9 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         ):
             self.assertNotIn(f'id="{removed_id}"', html)
         self.assertNotIn("Teach a specific song action", html)
-        self.assertNotIn('id="remote-action-button"', html)
-        self.assertNotIn('id="remote-action-label"', html)
+        self.assertIn('id="remote-action-button"', html)
+        self.assertIn('id="remote-action-label"', html)
+        self.assertIn('sendTrainingAnnotation("preferred_action"', script)
         self.assertNotIn("Shape the response", html[html.index('id="remote-app"'):])
         self.assertIn('class="embedded-shape-controls"', html)
         for group in ("movers", "center"):
@@ -53,11 +54,14 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("700,", script)
         self.assertIn("interaction_unix_ms", script)
 
-    def test_rehearsal_palette_and_color_studio_are_removed(self) -> None:
+    def test_rehearsal_color_selection_remains_without_color_studio(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
 
+        self.assertIn('id="rehearsal-palette"', html)
+        self.assertIn('"rehearsal-palette": rehearsal.palette', script)
+        self.assertIn('palette: $("rehearsal-palette")?.value', script)
         for element_id in (
-            "rehearsal-palette",
             "center-color-pattern",
             "color-wheel-canvas",
             "color-brightness-input",
@@ -68,6 +72,24 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         ):
             self.assertNotIn(f'id="{element_id}"', html)
         self.assertNotIn("Color Studio", html)
+
+    def test_touch_faders_require_horizontal_intent_and_have_larger_thumbs(
+        self,
+    ) -> None:
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "web" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("const TOUCH_RANGE_GAIN = 0.65", script)
+        self.assertIn("function installTouchRangeGuards()", script)
+        self.assertIn("Math.abs(deltaX) > Math.abs(deltaY) * 1.25", script)
+        self.assertIn("event.stopImmediatePropagation()", script)
+        self.assertIn("gesture.adjusting ? gesture.manualValue", script)
+        self.assertIn("suppressClickUntil = performance.now() + 500", script)
+        self.assertIn("touch-action: pan-y", styles)
+        self.assertIn("width: 13.8px", styles)
+        self.assertIn("height: 17.25px", styles)
+        self.assertIn("width: 24.15px", styles)
+        self.assertIn("height: 28.75px", styles)
 
     def test_live_work_status_uses_durable_totals_and_active_preparation_polling(
         self,
