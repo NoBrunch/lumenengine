@@ -1872,7 +1872,9 @@ class SongMemoryStore:
                       AND structure_timelines.timeline_version=?
                       AND teacher_runs.preprocessing_version=?
                       AND COALESCE(structure_timeline_reviews.status,
-                                   'unreviewed')!='rejected'
+                                   'unreviewed') NOT IN (
+                        'rejected', 'superseded'
+                      )
                     ORDER BY
                       CASE COALESCE(structure_timeline_reviews.status,
                                     'unreviewed')
@@ -2670,7 +2672,7 @@ class SongMemoryStore:
             timeline["review_eligible"] = technically_eligible
             timeline["recall_eligible"] = (
                 technically_eligible
-                and review_status != "rejected"
+                and review_status not in {"rejected", "superseded"}
                 and scored_or_approved
             )
             if not technically_eligible:
@@ -2682,6 +2684,8 @@ class SongMemoryStore:
                 )
             elif review_status == "rejected":
                 timeline["recall_authority"] = "operator_rejected"
+            elif review_status == "superseded":
+                timeline["recall_authority"] = "operator_superseded"
             elif review_status == "approved":
                 timeline["recall_authority"] = "operator_approved"
             elif float(timeline.get("confidence") or 0.0) > 0.0:
@@ -2904,6 +2908,69 @@ class SongMemoryStore:
         assert review is not None and int(review["id"]) == review_id
         return review
 
+    def supersede_structure_timelines(
+        self,
+        *,
+        timeline_ids: list[str],
+        correction_timeline_id: str,
+        participant_id: str | None = None,
+        participant_name: str | None = None,
+    ) -> None:
+        """Mark raw teacher outputs as reviewed through one correction.
+
+        The teacher timelines remain immutable. ``superseded`` prevents them
+        from competing with the reviewed operator timeline during recall while
+        retaining them as auditable source evidence and student-row provenance.
+        """
+
+        unique_ids = list(dict.fromkeys(str(value) for value in timeline_ids))
+        if not unique_ids:
+            return
+        correction = self.structure_timeline(correction_timeline_id)
+        if correction is None or str(correction.get("provenance")) != "operator_correction":
+            raise ValueError("composite correction timeline was not found")
+        recording_id = str(correction.get("recording_id") or "")
+        placeholders = ",".join("?" for _ in unique_ids)
+        with closing(self._connect()) as connection, connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, recording_id, teacher_run_id
+                FROM structure_timelines
+                WHERE id IN ({placeholders})
+                """,
+                unique_ids,
+            ).fetchall()
+            found = {str(row["id"]): row for row in rows}
+            if set(found) != set(unique_ids):
+                raise ValueError("a composite source timeline was not found")
+            if any(
+                str(row["recording_id"] or "") != recording_id
+                or row["teacher_run_id"] is None
+                for row in rows
+            ):
+                raise ValueError(
+                    "composite source timelines must be raw teachers for the same recording"
+                )
+            created_unix_ms = int(time.time() * 1000)
+            connection.executemany(
+                """
+                INSERT INTO structure_timeline_reviews(
+                    timeline_id, status, participant_id, participant_name,
+                    note, created_unix_ms
+                ) VALUES (?, 'superseded', ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        timeline_id,
+                        participant_id,
+                        participant_name,
+                        f"Reviewed through operator correction {correction_timeline_id}",
+                        created_unix_ms,
+                    )
+                    for timeline_id in unique_ids
+                ],
+            )
+
     def structure_timeline_review(
         self, timeline_id: str
     ) -> dict[str, Any] | None:
@@ -2927,6 +2994,8 @@ class SongMemoryStore:
         participant_id: str | None = None,
         participant_name: str | None = None,
         note: str | None = None,
+        source_timeline_ids: list[str] | None = None,
+        composite_review: bool = False,
     ) -> str:
         """Save an immutable operator revision without altering its source.
 
@@ -3015,6 +3084,17 @@ class SongMemoryStore:
                     "participant_name": participant_name,
                 },
             }
+            axis_sources = supplied.get("axis_sources")
+            if isinstance(axis_sources, dict):
+                normalized_sources = {
+                    str(axis): str(source).strip()
+                    for axis, source in axis_sources.items()
+                    if axis in {"functional", "energy", "content"}
+                    and str(source).strip()
+                }
+                if any(len(source) > 128 for source in normalized_sources.values()):
+                    raise ValueError("structure axis source is too long")
+                item["provenance"]["axis_sources"] = normalized_sources
             for field in allowed_labels:
                 value = supplied.get(field, source.get(field))
                 item[field] = str(value).strip() if value is not None else None
@@ -3049,7 +3129,11 @@ class SongMemoryStore:
 
         return self.save_structure_timeline(
             provenance="operator_correction",
-            timeline_version="lumen_operator_correction_v1",
+            timeline_version=(
+                "lumen_operator_composite_v1"
+                if composite_review
+                else "lumen_operator_correction_v1"
+            ),
             confidence=1.0,
             recording_id=str(base["recording_id"]),
             song_id=base.get("song_id"),
@@ -3072,6 +3156,8 @@ class SongMemoryStore:
                 "participant_id": participant_id,
                 "participant_name": participant_name,
                 "note": note,
+                "source_timeline_ids": list(dict.fromkeys(source_timeline_ids or [])),
+                "composite_review": bool(composite_review),
             },
         )
 
@@ -3253,7 +3339,7 @@ class SongMemoryStore:
             review_status = str(
                 (review or {}).get("status") or "unreviewed"
             ).casefold()
-            if review_status == "rejected":
+            if review_status in {"rejected", "superseded"}:
                 continue
             teacher_name = str(row["teacher_name"] or "").casefold()
             provenance_name = str(
@@ -3322,11 +3408,11 @@ class SongMemoryStore:
         def source_priority(
             axis: str, source: str, *, operator_approved: bool = False
         ) -> int:
-            if operator_approved:
-                return 110
             lowered = source.lower()
             if "operator" in lowered or "correction" in lowered:
-                return 100
+                return 120
+            if operator_approved:
+                return 110
             preferences = axis_preferences[axis]
             for offset, preferred in enumerate(preferences):
                 if preferred in lowered:

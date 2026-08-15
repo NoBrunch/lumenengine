@@ -1005,20 +1005,37 @@ a recording without playing it. The table defaults to all retained songs with
 actionable work sorted first; **Show** can narrow it to needs-review, reviewed,
 or diagnostic-only timelines.
 **Select playing song** jumps back to the currently identified Spotify item.
-The library distinguishes actionable current EDMFormer/SongFormer work from
-obsolete diagnostic timelines. Approve, reject, reopen, and immutable
-correction operations apply to the selected library recording and therefore do
-not require active Spotify playback. Active review cards clear after a decision
-and the workspace advances through the remaining queue.
+The selected recording has direct Spotify Play/Pause, seek, and ten-second
+transport controls. Its review surface correlates current SongFormer
+function/content with EDMFormer energy in one table. Every displayed time uses
+minute/second timecode. Bright timeline partitions can be dragged directly;
+the operator can also add a partition at the Spotify playhead, merge either
+neighbor, and undo or reset unsaved edits. Selecting a table time moves the
+song playhead to that partition.
+
+**Save & complete review** writes one immutable operator-composite timeline and
+marks its eligible raw EDMFormer/SongFormer sources as reviewed through that
+correction. It does not rewrite or falsely approve the model originals. Those
+remain under **Original model evidence** with their raw labels, confidence, and
+individual rejection history. Missing context cells are visible in the merged
+table, and saving with missing function/energy context requires explicit
+confirmation. One successful completion advances to the next song awaiting
+review instead of requiring one correction pass per teacher.
 
 When Spotify identifies a recording, Lumen resolves the provider/track identity
 and duration to the matching stable recording version. Current normalized
 EDMFormer timelines supply energy; current normalized SongFormer timelines
-supply functional and content context. Boundary evidence can come from either.
+supply functional and content context. The combined draft clusters near-equal
+model boundaries and retains the union of meaningful partitions. A newer raw
+teacher can contribute candidate boundaries without overwriting an earlier
+operator correction.
 The selected context retains the exact recording and
 timeline IDs, teacher version, raw/model confidence, separate operator trust,
-boundary information, and segment provenance. Incomplete, rejected, obsolete,
-or noncanonical teacher runs are not recalled.
+boundary information, and segment provenance. Incomplete, rejected,
+superseded, obsolete, or noncanonical teacher runs are not recalled directly.
+Superseded raw teachers remain available as training-row provenance; the
+operator composite overlays their corrected axes and boundaries when a new
+student snapshot is prepared.
 
 Teacher outputs without an upstream confidence score are stored honestly as
 unscored rather than receiving an invented default. Unreviewed unscored output

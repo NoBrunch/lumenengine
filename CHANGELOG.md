@@ -8,6 +8,15 @@ result. Git commit history remains the detailed engineering log.
 
 ### Fixed
 
+- Replaced separate EDMFormer/SongFormer correction passes with one correlated
+  song review table: function/content and energy share a continuous timeline,
+  all times use minute/second timecodes, partitions drag directly or can be
+  added at the Spotify playhead and merged, and unsaved edits have Undo/reset
+  protection.
+- Made one combined completion save an immutable operator timeline, mark every
+  covered raw teacher as reviewed through that correction, preserve the raw
+  evidence, warn before accepting missing function/energy context, and prevent
+  superseded model output from competing with the operator result in recall.
 - Removed the `/remote` Specific correction disclosure and made its complete
   command suite, including Undo last, permanently visible.
 - Restored the compact preferred-gesture selector beside contextual feedback

@@ -7833,6 +7833,7 @@ class LumenApplication:
             str(selected["recording_id"]) if selected is not None else None
         )
         return {
+            "composite_review_supported": True,
             "catalog": catalog,
             "recordings": len(catalog),
             "needs_review": sum(
@@ -7869,6 +7870,23 @@ class LumenApplication:
             str(payload.get("participant_name", "")).strip() or None
         )
         note = str(payload.get("note", "")).strip() or None
+        source_timeline_ids_payload = payload.get(
+            "complete_review_timeline_ids", []
+        )
+        if not isinstance(source_timeline_ids_payload, list):
+            raise ValueError("complete_review_timeline_ids must be a list")
+        source_timeline_ids = list(dict.fromkeys(
+            str(value).strip()
+            for value in source_timeline_ids_payload
+            if str(value).strip()
+        ))
+        if len(source_timeline_ids) > 100:
+            raise ValueError("too many composite source timelines")
+        composite_review = bool(payload.get("composite_review", False))
+        if source_timeline_ids and not composite_review:
+            raise ValueError(
+                "composite_review is required to complete source timelines"
+            )
         if participant_id is not None and len(participant_id) > 96:
             raise ValueError("participant_id is too long")
         if participant_name is not None and len(participant_name) > 32:
@@ -7902,6 +7920,30 @@ class LumenApplication:
             raise ValueError(
                 "the selected timeline does not belong to the selected recording"
             )
+        if source_timeline_ids:
+            candidates = {
+                str(item.get("id")): item
+                for item in self.memory.structure_timelines_for_recording(
+                    recording_id
+                )
+            }
+            for source_id in source_timeline_ids:
+                candidate = candidates.get(source_id)
+                teacher_name = str(
+                    (candidate or {}).get("teacher", {}).get("name") or ""
+                ).casefold()
+                if (
+                    candidate is None
+                    or teacher_name not in {"edmformer", "songformer"}
+                    or not candidate.get("review_eligible", False)
+                    or str(
+                        (candidate.get("review") or {}).get("status")
+                        or "unreviewed"
+                    ) in {"rejected", "superseded"}
+                ):
+                    raise ValueError(
+                        "composite review sources must be eligible EDMFormer or SongFormer timelines"
+                    )
 
         timeline_id = self.memory.save_structure_correction(
             base_timeline_id=base_timeline_id,
@@ -7909,7 +7951,16 @@ class LumenApplication:
             participant_id=participant_id,
             participant_name=participant_name,
             note=note,
+            source_timeline_ids=source_timeline_ids,
+            composite_review=composite_review,
         )
+        if source_timeline_ids:
+            self.memory.supersede_structure_timelines(
+                timeline_ids=source_timeline_ids,
+                correction_timeline_id=timeline_id,
+                participant_id=participant_id,
+                participant_name=participant_name,
+            )
         position_ms = self._media_position_ms()
         is_playing_recording = str(
             (playing_recording or {}).get("id") or ""
@@ -7953,6 +8004,10 @@ class LumenApplication:
         status = str(payload.get("status", "")).strip().casefold()
         if not timeline_id:
             raise ValueError("timeline_id is required")
+        if status not in {"approved", "rejected", "unreviewed"}:
+            raise ValueError(
+                "timeline review must be approved, rejected, or unreviewed"
+            )
         participant_id = str(
             payload.get("participant_id", "")
         ).strip() or None
@@ -8002,6 +8057,14 @@ class LumenApplication:
             ),
             None,
         )
+        if str(
+            ((review_candidate or {}).get("review") or {}).get("status")
+            or "unreviewed"
+        ).casefold() == "superseded":
+            raise ValueError(
+                "this source was completed through a combined correction; "
+                "revise the combined timeline instead"
+            )
         if (
             status == "approved"
             and (

@@ -465,8 +465,32 @@
                     <span id="structure-playback-state" class="panel-note">Choose an analyzed Spotify song</span>
                   </div>
                   <div id="structure-overview" class="structure-overview"><span class="empty-state">Select an analyzed song to display its section map.</span></div>
-                  <p class="control-help">Needs review means EDMFormer or SongFormer produced a current exact-song timeline that has not received an optional quality decision. Training may use a technically valid completed teacher result without waiting for approval. EDMFormer supplies techno energy; SongFormer supplies function and content. Corrections override the affected training labels without overwriting the teacher original.</p>
-                  <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
+                  <section id="structure-composite-review" class="structure-composite-review hidden">
+                    <header>
+                      <div><b>Combined song review</b><span id="structure-composite-summary">SongFormer function/content + EDMFormer energy</span></div>
+                      <span id="structure-composite-state" class="panel-note">No changes</span>
+                    </header>
+                    <div class="structure-composite-table-wrap">
+                      <table class="structure-composite-table">
+                        <thead><tr><th>Time</th><th>Function</th><th>Energy</th><th>Content</th><th>Transition</th><th>Source / warning</th></tr></thead>
+                        <tbody id="structure-composite-body"></tbody>
+                      </table>
+                    </div>
+                    <div class="structure-composite-actions">
+                      <button id="structure-split" type="button">+ Partition at playhead</button>
+                      <button id="structure-merge-left" type="button">Merge with previous</button>
+                      <button id="structure-merge-right" type="button">Merge with next</button>
+                      <button id="structure-composite-undo" type="button" disabled>Undo</button>
+                      <button id="structure-composite-reset" type="button">Reset changes</button>
+                      <label><span>Review note</span><input id="structure-composite-note" maxlength="1000" placeholder="Optional: what did the models misunderstand?"></label>
+                      <button id="structure-save-composite" type="button" class="primary">Save &amp; complete review</button>
+                    </div>
+                  </section>
+                  <p class="control-help">Review one correlated timeline: SongFormer supplies function/content and EDMFormer supplies energy. Drag the partition handles above, add a partition at the Spotify playhead, and edit the table labels. Saving creates one immutable operator result, completes the covered model reviews, and preserves both originals below.</p>
+                  <details class="structure-source-evidence">
+                    <summary><span><b>Original model evidence</b><small>Inspect or reject an individual raw teacher result. Combined review is the normal workflow.</small></span></summary>
+                    <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>
+                  </details>
                 </details>
                 <div class="sequence-heading-controls">
                   <label><span>Sequence name</span><input id="sequence-name" type="text" maxlength="80" placeholder="Example: build into drop"></label>

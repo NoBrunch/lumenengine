@@ -256,12 +256,41 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("QUALITY CHECKS", script)
         self.assertIn("This quality queue does not block training", markup)
         self.assertIn(
-            "Training may use a technically valid completed teacher result",
+            "Review one correlated timeline",
             markup,
         )
         self.assertIn(".sequence-editor-panel {", stylesheet)
         self.assertIn("grid-column: 1 / 3;", stylesheet)
         self.assertIn(".structure-time-readout { min-width: 13rem; }", stylesheet)
+
+    def test_composite_song_review_is_direct_manipulation_and_one_completion(
+        self,
+    ) -> None:
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        markup = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        stylesheet = (ROOT / "web" / "styles.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('id="structure-composite-body"', markup)
+        self.assertIn('id="structure-split"', markup)
+        self.assertIn('id="structure-merge-left"', markup)
+        self.assertIn('id="structure-merge-right"', markup)
+        self.assertIn('id="structure-composite-undo"', markup)
+        self.assertIn('id="structure-save-composite"', markup)
+        self.assertIn("Save &amp; complete review", markup)
+        self.assertIn("function buildCompositeStructureDraft", script)
+        self.assertIn("function beginCompositeBoundaryDrag", script)
+        self.assertIn("function splitCompositeStructureAtPlayhead", script)
+        self.assertIn("function saveCompositeStructureReview", script)
+        self.assertIn("complete_review_timeline_ids", script)
+        self.assertIn("composite_review_supported", script)
+        self.assertIn("Restart Lumen to enable saving", script)
+        self.assertIn("composite_review: true", script)
+        self.assertNotIn('data-structure-start="${index}"', script)
+        self.assertNotIn('type="number" min="0" step="0.1"', script)
+        self.assertIn(".structure-boundary-handle {", stylesheet)
+        self.assertIn("touch-action: none", stylesheet)
 
     def test_timeline_review_can_call_and_track_its_spotify_song(self) -> None:
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")

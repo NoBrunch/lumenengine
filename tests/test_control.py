@@ -1135,6 +1135,7 @@ class ControlApplicationTests(unittest.TestCase):
         self.assertIsNone(self.application.media)
 
         library = self.application.structure_training_library()
+        self.assertTrue(library["composite_review_supported"])
         self.assertEqual(library["recordings"], 1)
         self.assertEqual(library["needs_review"], 1)
         self.assertEqual(library["selected_recording_id"], recording_id)
@@ -3355,6 +3356,159 @@ class ControlApplicationTests(unittest.TestCase):
             item for item in after["structure_timelines"] if item["id"] == base_id
         )
         self.assertEqual(original["segments"][1]["energy_label"], "drop")
+
+    def test_composite_review_supersedes_both_teachers_and_wins_every_axis(
+        self,
+    ) -> None:
+        media = MediaIdentity(
+            provider="spotify",
+            provider_item_id="spotify:track:composite-review",
+            title="Composite Review",
+            duration_ms=60_000,
+            observed_position_ms=45_000,
+            observed_at_unix_ms=round(time.time() * 1000),
+            is_playing=False,
+        )
+        self.application._remember_media_identity(media)
+        recording_id = self.application.memory.remember_recording_version(
+            provider=media.provider,
+            provider_item_id=media.provider_item_id,
+            song_id=self.application.song_id,
+            duration_ms=media.duration_ms,
+        )
+        edm_run = self.application.memory.begin_teacher_run(
+            teacher_name="EDMFormer",
+            teacher_version="test",
+            device="cpu",
+            preprocessing_version=EDMFORMER_PREPROCESSING_VERSION,
+            recording_id=recording_id,
+        )
+        edm_timeline = self.application.memory.save_structure_timeline(
+            provenance="edmformer_teacher",
+            timeline_version=TEACHER_NORMALIZATION_VERSION,
+            confidence=0.8,
+            recording_id=recording_id,
+            song_id=self.application.song_id,
+            teacher_run_id=edm_run,
+            segments=[{
+                "start_ms": 0,
+                "end_ms": 60_000,
+                "energy_label": "groove",
+            }],
+        )
+        self.application.memory.finish_teacher_run(edm_run, status="complete")
+        song_run = self.application.memory.begin_teacher_run(
+            teacher_name="SongFormer",
+            teacher_version="test",
+            device="cpu",
+            preprocessing_version=(
+                "songformer_official_features_cpu_windowed_v1:60s:"
+                f"{TEACHER_NORMALIZATION_VERSION}"
+            ),
+            recording_id=recording_id,
+        )
+        song_timeline = self.application.memory.save_structure_timeline(
+            provenance="songformer_teacher",
+            timeline_version=TEACHER_NORMALIZATION_VERSION,
+            confidence=0.7,
+            recording_id=recording_id,
+            song_id=self.application.song_id,
+            teacher_run_id=song_run,
+            segments=[{
+                "start_ms": 0,
+                "end_ms": 60_000,
+                "functional_label": "chorus",
+                "content_label": "vocal",
+            }],
+        )
+        self.application.memory.finish_teacher_run(song_run, status="complete")
+
+        saved = self.application.correct_structure_timeline({
+            "base_timeline_id": edm_timeline,
+            "recording_id": recording_id,
+            "composite_review": True,
+            "complete_review_timeline_ids": [edm_timeline, song_timeline],
+            "participant_id": "console",
+            "segments": [
+                {
+                    "segment_index": 0,
+                    "start_ms": 0,
+                    "end_ms": 30_000,
+                    "functional_label": "verse",
+                    "energy_label": "groove",
+                    "content_label": "vocal",
+                    "axis_sources": {
+                        "functional": "SongFormer",
+                        "energy": "EDMFormer",
+                        "content": "SongFormer",
+                    },
+                },
+                {
+                    "segment_index": 1,
+                    "start_ms": 30_000,
+                    "end_ms": 60_000,
+                    "functional_label": "chorus",
+                    "energy_label": "drop",
+                    "content_label": "vocal",
+                },
+            ],
+        })
+
+        correction = self.application.memory.structure_timeline(
+            saved["timeline_id"]
+        )
+        assert correction is not None
+        self.assertEqual(
+            correction["timeline_version"],
+            "lumen_operator_composite_v1",
+        )
+        self.assertEqual(
+            correction["metadata"]["source_timeline_ids"],
+            [edm_timeline, song_timeline],
+        )
+        self.assertEqual(
+            correction["segments"][0]["provenance"]["axis_sources"],
+            {
+                "functional": "SongFormer",
+                "energy": "EDMFormer",
+                "content": "SongFormer",
+            },
+        )
+        for timeline_id in (edm_timeline, song_timeline):
+            review = self.application.memory.structure_timeline_review(
+                timeline_id
+            )
+            assert review is not None
+            self.assertEqual(review["status"], "superseded")
+        library = self.application.structure_training_library(recording_id)
+        self.assertEqual(library["needs_review"], 0)
+        self.assertEqual(library["selected_recording"]["review_status"], "corrected")
+        recalled = self.application.memory.cached_structure_at(
+            recording_id=recording_id,
+            playback_position_ms=45_000,
+        )
+        assert recalled is not None
+        self.assertEqual(recalled["axes"]["functional"]["label"], "chorus")
+        self.assertEqual(recalled["axes"]["energy"]["label"], "drop")
+        self.assertEqual(
+            recalled["axes"]["energy"]["timeline_id"],
+            saved["timeline_id"],
+        )
+        original = self.application.memory.structure_timeline(edm_timeline)
+        assert original is not None
+        self.assertEqual(original["segments"][0]["energy_label"], "groove")
+        with self.assertRaisesRegex(ValueError, "approved, rejected, or unreviewed"):
+            self.application.review_structure_timeline({
+                "timeline_id": edm_timeline,
+                "recording_id": recording_id,
+                "status": "superseded",
+            })
+        with self.assertRaisesRegex(ValueError, "revise the combined timeline"):
+            self.application.review_structure_timeline({
+                "timeline_id": edm_timeline,
+                "recording_id": recording_id,
+                "status": "unreviewed",
+            })
 
     def test_song_sequence_round_trips_canonical_cue_fields(self) -> None:
         media = MediaIdentity(

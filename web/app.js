@@ -65,10 +65,12 @@ const app = {
   structureLibrary: null,
   selectedStructureRecordingId: null,
   structurePlayback: null,
+  structureReviewDraft: null,
+  structureReviewUndo: [],
+  structureSelectedSegment: 0,
   sequenceDraft: [{ routine: "breathe", duration_beats: 8, intensity: 0.72, brightness: 0.72, motion_speed: 0.5, travel_size: 1, activity_density: 1, beat_sync: 1, palette: "", strobe: 0 }],
   editingSequenceId: null,
   editingPlacementId: null,
-  editingStructureTimelineId: null,
   choreographyUndo: null,
   touchBlockedUntil: Date.now() + 1200,
   floatingPanelZ: 200,
@@ -94,6 +96,11 @@ window.addEventListener("pageshow", () => {
 window.addEventListener("focus", () => {
   blockWakeTouches();
   if (app.bootstrap) void refreshResearch();
+});
+window.addEventListener("beforeunload", (event) => {
+  if (!app.structureReviewDraft?.dirty) return;
+  event.preventDefault();
+  event.returnValue = "";
 });
 
 function initializeParticipantIdentity() {
@@ -1509,34 +1516,173 @@ function renderStructureLibrary() {
   renderStructureTimelines(library);
 }
 
-function structureOverviewTimeline(library = {}) {
+function structureTeacherKind(timeline = {}) {
+  const source = `${timeline.teacher?.name || ""} ${timeline.provenance || ""}`.toLowerCase();
+  if (timeline.provenance === "operator_correction") return "operator";
+  if (source.includes("edmformer")) return "edmformer";
+  if (source.includes("songformer")) return "songformer";
+  return "teacher";
+}
+
+function structureSegmentAt(timeline, positionMs) {
+  return (timeline?.segments || []).find((segment) => (
+    Number(segment.start_ms || 0) <= positionMs
+    && (segment.end_ms === null
+      || segment.end_ms === undefined
+      || Number(segment.end_ms) > positionMs)
+  )) || timeline?.segments?.at(-1) || null;
+}
+
+function compositeAxisValue(operatorSegment, teacherSegment, fallbackSegment, field) {
+  for (const [segment, source] of [
+    [operatorSegment, "Operator"],
+    [teacherSegment, teacherSegment?._sourceName],
+    [fallbackSegment, fallbackSegment?._sourceName],
+  ]) {
+    const value = segment?.[field];
+    if (value && value !== "unknown") return { value, source: source || "Model" };
+  }
+  return { value: null, source: "Missing" };
+}
+
+function buildCompositeStructureDraft(library = {}) {
+  const selected = library.selected_recording;
   const timelines = library.structure_timelines || [];
-  return timelines.find((item) => item.provenance === "operator_correction")
-    || timelines.find((item) => item.review?.status === "approved")
-    || timelines.find((item) => item.review_eligible !== false)
-    || timelines[0]
-    || null;
+  if (!selected || !timelines.length) return null;
+  const operator = timelines.find((item) => item.provenance === "operator_correction");
+  const rawSources = timelines.filter((item) => (
+    ["edmformer", "songformer"].includes(structureTeacherKind(item))
+    && item.review_eligible !== false
+    && item.review?.status !== "rejected"
+  ));
+  rawSources.forEach((timeline) => {
+    timeline._sourceName = timeline.teacher?.name || label(timeline.provenance || "Model");
+    (timeline.segments || []).forEach((segment) => { segment._sourceName = timeline._sourceName; });
+  });
+  const edm = rawSources.find((item) => structureTeacherKind(item) === "edmformer");
+  const song = rawSources.find((item) => structureTeacherKind(item) === "songformer");
+  const uncoveredSources = rawSources.filter(
+    (timeline) => timeline.review?.status !== "superseded",
+  );
+  const fallback = operator || song || edm || timelines[0];
+  const base = operator || edm || song || fallback;
+  const duration = Math.max(
+    1,
+    Number(base?.segments?.at(-1)?.end_ms || selected.duration_ms || 1),
+  );
+  const boundarySources = operator
+    ? [operator, ...uncoveredSources]
+    : [edm, song].filter(Boolean);
+  if (!boundarySources.length) boundarySources.push(fallback);
+  const boundaries = new Set([0, duration]);
+  boundarySources.forEach((timeline) => (timeline?.segments || []).forEach((segment) => {
+    boundaries.add(Math.max(0, Math.min(duration, Number(segment.start_ms || 0))));
+    if (segment.end_ms !== null && segment.end_ms !== undefined) {
+      boundaries.add(Math.max(0, Math.min(duration, Number(segment.end_ms))));
+    }
+  }));
+  const rawBoundaries = [...boundaries].filter(Number.isFinite).sort((a, b) => a - b);
+  const clusters = rawBoundaries.reduce((result, boundary) => {
+    const current = result.at(-1);
+    if (current && boundary - current.at(-1) <= 750 && boundary !== duration) {
+      current.push(boundary);
+    } else {
+      result.push([boundary]);
+    }
+    return result;
+  }, []);
+  const ordered = clusters.map((cluster, index) => (
+    index === 0
+      ? 0
+      : index === clusters.length - 1
+        ? duration
+        : Math.round(cluster.reduce((sum, value) => sum + value, 0) / cluster.length)
+  ));
+  const segments = ordered.slice(0, -1).map((start, index) => {
+    const end = ordered[index + 1];
+    const midpoint = start + (end - start) / 2;
+    const operatorSegment = structureSegmentAt(operator, midpoint);
+    const edmSegment = structureSegmentAt(edm, midpoint);
+    const songSegment = structureSegmentAt(song, midpoint);
+    const fallbackSegment = structureSegmentAt(fallback, midpoint);
+    const functional = compositeAxisValue(
+      operatorSegment, songSegment, fallbackSegment, "functional_label",
+    );
+    const energy = compositeAxisValue(
+      operatorSegment, edmSegment, fallbackSegment, "energy_label",
+    );
+    const content = compositeAxisValue(
+      operatorSegment, songSegment, fallbackSegment, "content_label",
+    );
+    const eventSegment = [operatorSegment, edmSegment, songSegment, fallbackSegment]
+      .find((segment) => (
+        segment
+        && Math.abs(Number(segment.start_ms || 0) - start) <= 1000
+        && structureTransitionEvent(segment)
+      ));
+    return {
+      segment_index: index,
+      start_ms: Math.round(start),
+      end_ms: Math.round(end),
+      functional_label: functional.value,
+      energy_label: energy.value,
+      content_label: content.value,
+      event: eventSegment ? structureTransitionEvent(eventSegment) : null,
+      axis_sources: {
+        functional: functional.source,
+        energy: energy.source,
+        content: content.source,
+      },
+    };
+  }).filter((segment) => segment.end_ms > segment.start_ms);
+  return {
+    recordingId: selected.recording_id,
+    baseTimelineId: base.id,
+    sourceTimelineIds: uncoveredSources.map((timeline) => timeline.id),
+    sourceNames: [...new Set(rawSources.map((timeline) => timeline._sourceName))],
+    durationMs: duration,
+    dirty: false,
+    segments,
+  };
+}
+
+function ensureCompositeStructureDraft(library = {}) {
+  const recordingId = library.selected_recording?.recording_id;
+  if (!app.structureReviewDraft || app.structureReviewDraft.recordingId !== recordingId) {
+    app.structureReviewDraft = buildCompositeStructureDraft(library);
+    app.structureReviewUndo = [];
+    app.structureSelectedSegment = 0;
+    if ($("structure-composite-note")) $("structure-composite-note").value = "";
+  }
+  return app.structureReviewDraft;
+}
+
+function confirmDiscardCompositeChanges() {
+  return !app.structureReviewDraft?.dirty || window.confirm(
+    "Discard the unsaved combined timeline changes for this song?",
+  );
 }
 
 function renderStructureOverview(library = {}) {
   const container = $("structure-overview");
   if (!container) return;
-  const selected = library.selected_recording;
-  const timeline = structureOverviewTimeline(library);
-  if (!selected || !timeline?.segments?.length) {
+  const draft = ensureCompositeStructureDraft(library);
+  if (!draft?.segments?.length) {
     container.innerHTML = '<span class="empty-state">Select an analyzed song to display its section map.</span>';
+    $("structure-composite-review")?.classList.add("hidden");
     return;
   }
-  const duration = Math.max(1, Number(selected.duration_ms || timeline.segments.at(-1)?.end_ms || 1));
-  const segments = timeline.segments.map((segment, index) => {
-    const start = Math.max(0, Number(segment.start_ms || 0));
-    const end = Math.max(start, Number(segment.end_ms ?? duration));
-    const width = Math.max(0.4, (end - start) / duration * 100);
+  const segments = draft.segments.map((segment, index) => {
+    const width = Math.max(0.4, (segment.end_ms - segment.start_ms) / draft.durationMs * 100);
     const energy = segment.energy_label || "unknown";
-    const primary = segment.functional_label || energy || segment.raw_label || "unknown";
-    return `<button class="structure-overview-segment energy-${escapeHtml(energy)}" data-overview-segment="${index}" style="width:${width}%" title="${escapeHtml(`${songTime(start)}–${songTime(end)} · ${label(primary)} · ${label(energy)}`)}"><b>${escapeHtml(label(primary))}</b><small>${songTime(start)}</small></button>`;
+    const primary = segment.functional_label || energy || "unlabeled";
+    return `<button class="structure-overview-segment energy-${escapeHtml(energy)}${index === app.structureSelectedSegment ? " selected" : ""}" data-overview-segment="${index}" style="width:${width}%" title="${escapeHtml(`${songTime(segment.start_ms)}–${songTime(segment.end_ms)} · ${label(primary)} · ${label(energy)}`)}"><b>${escapeHtml(label(primary))}</b><span>${escapeHtml(label(energy))}</span><small>${songTime(segment.start_ms)}</small></button>`;
   }).join("");
-  container.innerHTML = `<div class="structure-overview-track">${segments}<i id="structure-overview-playhead"></i></div><div class="structure-overview-legend"><span>Breakdown</span><span>Build</span><span>Drop</span><span>Groove</span><em>${escapeHtml(timeline.teacher?.name || timeline.provenance || "Timeline")}</em></div>`;
+  const handles = draft.segments.slice(0, -1).map((segment, index) => (
+    `<i class="structure-boundary-handle" data-structure-boundary="${index}" style="left:${segment.end_ms / draft.durationMs * 100}%" title="Drag this partition left or right"></i>`
+  )).join("");
+  container.innerHTML = `<div class="structure-overview-track">${segments}${handles}<i id="structure-overview-playhead"></i></div><div class="structure-overview-legend"><span>Drag a bright partition handle to adjust its time.</span><em>${draft.dirty ? "Unsaved changes" : escapeHtml(draft.sourceNames.join(" + ") || "Operator review")}</em></div>`;
+  renderCompositeStructureTable();
   updateStructureOverviewPlayhead(app.status || {});
 }
 
@@ -1563,8 +1709,11 @@ function updateStructureOverviewPlayhead(status = {}) {
   if (selectedId && mediaMatches) {
     const observed = Number(status.media?.live_position_ms ?? app.teaching?.position_ms ?? 0);
     const local = currentStructurePlaybackPosition();
-    const commandSettled = !app.structurePlayback?.commandedAt
-      || Date.now() - app.structurePlayback.commandedAt > 2500;
+    const localChangeAt = Math.max(
+      Number(app.structurePlayback?.commandedAt || 0),
+      Number(app.structurePlayback?.locallyAdjustedAt || 0),
+    );
+    const commandSettled = !localChangeAt || Date.now() - localChangeAt > 2500;
     const observedIsPlaying = status.media?.is_playing !== false;
     const playbackChanged = app.structurePlayback?.isPlaying !== observedIsPlaying;
     if (!app.structurePlayback
@@ -1577,10 +1726,12 @@ function updateStructureOverviewPlayhead(status = {}) {
         isPlaying: observedIsPlaying,
         syncedAt: Date.now(),
         commandedAt: 0,
+        locallyAdjustedAt: 0,
       };
     }
   } else if (
-    app.structurePlayback?.recordingId === selectedId
+    app.structurePlayback
+    && app.structurePlayback.recordingId === selectedId
     && app.structurePlayback.isPlaying
     && (!app.structurePlayback.commandedAt
       || Date.now() - app.structurePlayback.commandedAt > 2500)
@@ -1592,10 +1743,12 @@ function updateStructureOverviewPlayhead(status = {}) {
       isPlaying: false,
       syncedAt: Date.now(),
       commandedAt: 0,
+      locallyAdjustedAt: 0,
     };
   }
   const isPlaying = Boolean(
-    app.structurePlayback?.recordingId === selectedId
+    app.structurePlayback
+    && app.structurePlayback.recordingId === selectedId
     && app.structurePlayback.isPlaying,
   );
   const position = currentStructurePlaybackPosition();
@@ -1623,23 +1776,11 @@ function updateStructureOverviewPlayhead(status = {}) {
 }
 
 const STRUCTURE_LABELS = {
-  functional: ["", "intro", "verse", "pre_chorus", "chorus", "post_chorus", "bridge", "outro"],
+  functional: ["", "silence", "intro", "verse", "pre_chorus", "chorus", "post_chorus", "bridge", "interlude", "transition", "instrumental", "solo", "theme", "development", "outro"],
   energy: ["", "silence", "intro", "breakdown", "build", "drop", "groove", "outro"],
-  content: ["", "vocal", "instrumental", "solo", "transition"],
+  content: ["", "silence", "vocal", "instrumental", "solo", "transition", "applause"],
 };
 const STRUCTURE_EVENTS = ["", "section_start", "energy_rise", "energy_fall", "build_start", "drop_onset", "breakdown_onset", "groove_return", "outro_start", "track_end"];
-
-function structureSelect(axis, value, index) {
-  const values = [...(STRUCTURE_LABELS[axis] || [""])];
-  const current = value || "";
-  if (current && !values.includes(current)) values.push(current);
-  return `<select data-structure-axis="${axis}" data-segment-index="${index}">${values.map((item) => `<option value="${escapeHtml(item)}"${item === current ? " selected" : ""}>${escapeHtml(item ? label(item) : "Not supplied")}</option>`).join("")}</select>`;
-}
-
-function structureEventSelect(value, index) {
-  const current = value || "";
-  return `<select data-structure-event="${index}">${STRUCTURE_EVENTS.map((item) => `<option value="${item}"${item === current ? " selected" : ""}>${escapeHtml(item ? label(item) : "No event")}</option>`).join("")}</select>`;
-}
 
 function structureTransitionEvent(segment = {}) {
   // Current normalized timelines use transition_event. Keep the old event
@@ -1650,11 +1791,280 @@ function structureTransitionEvent(segment = {}) {
     || "";
 }
 
+function compositeStructureSelect(axis, value, index) {
+  const values = [...(STRUCTURE_LABELS[axis] || [""])];
+  const current = value && value !== "unknown" ? value : "";
+  if (current && !values.includes(current)) values.push(current);
+  return `<select data-composite-axis="${axis}" data-composite-index="${index}">${values.map((item) => `<option value="${escapeHtml(item)}"${item === current ? " selected" : ""}>${escapeHtml(item ? label(item) : "Not supplied")}</option>`).join("")}</select>`;
+}
+
+function compositeEventSelect(value, index) {
+  const current = value || "";
+  return `<select data-composite-event="${index}">${STRUCTURE_EVENTS.map((item) => `<option value="${item}"${item === current ? " selected" : ""}>${escapeHtml(item ? label(item) : "No event")}</option>`).join("")}</select>`;
+}
+
+function renderCompositeStructureTable() {
+  const review = $("structure-composite-review");
+  const body = $("structure-composite-body");
+  const draft = app.structureReviewDraft;
+  if (!review || !body || !draft?.segments?.length) {
+    review?.classList.add("hidden");
+    return;
+  }
+  review.classList.remove("hidden");
+  const missing = draft.segments.reduce((count, segment) => (
+    count + ["functional_label", "energy_label", "content_label"]
+      .filter((field) => !segment[field] || segment[field] === "unknown").length
+  ), 0);
+  setText(
+    "structure-composite-summary",
+    `${draft.segments.length} partitions · ${draft.sourceNames.join(" + ") || "operator correction"}${missing ? ` · ${missing} missing context ${missing === 1 ? "cell" : "cells"}` : " · complete context coverage"}`,
+  );
+  setText("structure-composite-state", draft.dirty ? "UNSAVED CHANGES" : "READY TO REVIEW");
+  body.innerHTML = draft.segments.map((segment, index) => {
+    const missingAxes = [
+      ["functional", segment.functional_label],
+      ["energy", segment.energy_label],
+      ["content", segment.content_label],
+    ].filter(([, value]) => !value || value === "unknown").map(([axis]) => label(axis));
+    const sources = Object.entries(segment.axis_sources || {})
+      .filter(([, source]) => source && source !== "Missing")
+      .map(([axis, source]) => `${axis.slice(0, 1).toUpperCase()} · ${source}`);
+    const evidence = [
+      ...sources,
+      ...(missingAxes.length ? [`Missing: ${missingAxes.join(", ")}`] : []),
+    ];
+    return `<tr data-composite-row="${index}" class="${index === app.structureSelectedSegment ? "selected" : ""}">
+      <td><button type="button" class="structure-composite-time" data-composite-seek="${index}" title="Move Spotify to this partition">${songTime(segment.start_ms)}–${songTime(segment.end_ms)}</button></td>
+      <td>${compositeStructureSelect("functional", segment.functional_label, index)}</td>
+      <td>${compositeStructureSelect("energy", segment.energy_label, index)}</td>
+      <td>${compositeStructureSelect("content", segment.content_label, index)}</td>
+      <td>${compositeEventSelect(segment.event, index)}</td>
+      <td class="structure-composite-evidence${missingAxes.length ? " warning" : ""}">${escapeHtml(evidence.join(" · ") || "Operator")}</td>
+    </tr>`;
+  }).join("");
+  if ($("structure-composite-undo")) {
+    $("structure-composite-undo").disabled = !app.structureReviewUndo.length;
+  }
+  if ($("structure-merge-left")) {
+    $("structure-merge-left").disabled = app.structureSelectedSegment <= 0;
+  }
+  if ($("structure-merge-right")) {
+    $("structure-merge-right").disabled = app.structureSelectedSegment >= draft.segments.length - 1;
+  }
+  if ($("structure-save-composite")) {
+    const compositeSupported = (
+      app.structureLibrary?.composite_review_supported === true
+    );
+    const pendingSources = draft.sourceTimelineIds.length;
+    $("structure-save-composite").disabled = (
+      !compositeSupported || (!pendingSources && !draft.dirty)
+    );
+    $("structure-save-composite").textContent = !compositeSupported
+      ? "Restart Lumen to enable saving"
+      : pendingSources
+        ? "Save & complete review"
+        : draft.dirty
+          ? "Save revised review"
+          : "Review complete";
+  }
+}
+
+function pushCompositeStructureUndo() {
+  const draft = app.structureReviewDraft;
+  if (!draft) return;
+  app.structureReviewUndo.push({
+    segments: structuredClone(draft.segments),
+    selected: app.structureSelectedSegment,
+  });
+  if (app.structureReviewUndo.length > 50) app.structureReviewUndo.shift();
+}
+
+function reindexCompositeStructure() {
+  (app.structureReviewDraft?.segments || []).forEach((segment, index) => {
+    segment.segment_index = index;
+  });
+}
+
+function selectCompositeStructureSegment(index) {
+  const draft = app.structureReviewDraft;
+  if (!draft?.segments?.[index]) return;
+  app.structureSelectedSegment = index;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function updateCompositeStructureField(index, field, value) {
+  const segment = app.structureReviewDraft?.segments?.[index];
+  if (!segment) return;
+  pushCompositeStructureUndo();
+  segment[field] = value || null;
+  if (["functional_label", "energy_label", "content_label"].includes(field)) {
+    const axis = field.replace("_label", "");
+    segment.axis_sources = { ...(segment.axis_sources || {}), [axis]: "Operator" };
+  }
+  app.structureReviewDraft.dirty = true;
+  app.structureSelectedSegment = index;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function splitCompositeStructureAtPlayhead() {
+  const draft = app.structureReviewDraft;
+  if (!draft?.segments?.length) return;
+  const splitAt = Math.round(currentStructurePlaybackPosition() / 1000) * 1000;
+  const index = draft.segments.findIndex((segment) => (
+    splitAt >= segment.start_ms + 1000 && splitAt <= segment.end_ms - 1000
+  ));
+  if (index < 0) {
+    toast(
+      "Move the playhead inside a partition",
+      "A new partition needs at least one second of material on each side.",
+      "error",
+    );
+    return;
+  }
+  pushCompositeStructureUndo();
+  const source = draft.segments[index];
+  const added = {
+    ...structuredClone(source),
+    start_ms: splitAt,
+    event: null,
+  };
+  source.end_ms = splitAt;
+  draft.segments.splice(index + 1, 0, added);
+  reindexCompositeStructure();
+  draft.dirty = true;
+  app.structureSelectedSegment = index + 1;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function mergeCompositeStructure(direction) {
+  const draft = app.structureReviewDraft;
+  const index = app.structureSelectedSegment;
+  const destination = index + direction;
+  if (!draft?.segments?.[index] || !draft.segments[destination]) return;
+  pushCompositeStructureUndo();
+  const selected = draft.segments[index];
+  if (direction < 0) {
+    selected.start_ms = draft.segments[destination].start_ms;
+    draft.segments.splice(destination, 1);
+    app.structureSelectedSegment = destination;
+  } else {
+    selected.end_ms = draft.segments[destination].end_ms;
+    draft.segments.splice(destination, 1);
+  }
+  reindexCompositeStructure();
+  draft.dirty = true;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function undoCompositeStructureEdit() {
+  const previous = app.structureReviewUndo.pop();
+  if (!previous || !app.structureReviewDraft) return;
+  app.structureReviewDraft.segments = previous.segments;
+  app.structureReviewDraft.dirty = true;
+  app.structureSelectedSegment = previous.selected;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function resetCompositeStructureDraft() {
+  const current = app.structureReviewDraft;
+  const previous = current ? {
+    segments: structuredClone(current.segments),
+    selected: app.structureSelectedSegment,
+  } : null;
+  app.structureReviewDraft = buildCompositeStructureDraft(app.structureLibrary || {});
+  app.structureReviewUndo = previous ? [previous] : [];
+  app.structureSelectedSegment = 0;
+  renderStructureOverview(app.structureLibrary || {});
+}
+
+function beginCompositeBoundaryDrag(event, boundaryIndex) {
+  const draft = app.structureReviewDraft;
+  const track = event.target.closest(".structure-overview-track");
+  if (!draft || !track || boundaryIndex < 0 || boundaryIndex >= draft.segments.length - 1) return;
+  event.preventDefault();
+  event.stopPropagation();
+  pushCompositeStructureUndo();
+  const bounds = track.getBoundingClientRect();
+  const move = (pointerEvent) => {
+    const raw = clamp((pointerEvent.clientX - bounds.left) / Math.max(1, bounds.width)) * draft.durationMs;
+    const minimum = draft.segments[boundaryIndex].start_ms + 1000;
+    const maximum = draft.segments[boundaryIndex + 1].end_ms - 1000;
+    const boundary = Math.max(minimum, Math.min(maximum, Math.round(raw / 1000) * 1000));
+    draft.segments[boundaryIndex].end_ms = boundary;
+    draft.segments[boundaryIndex + 1].start_ms = boundary;
+    draft.dirty = true;
+    app.structureSelectedSegment = boundaryIndex + 1;
+    renderStructureOverview(app.structureLibrary || {});
+  };
+  const finish = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", finish, { once: true });
+  window.addEventListener("pointercancel", finish, { once: true });
+}
+
+async function saveCompositeStructureReview() {
+  const draft = app.structureReviewDraft;
+  if (!draft?.baseTimelineId || !draft.segments.length) return;
+  const missingCore = draft.segments.reduce((count, segment) => (
+    count + ["functional_label", "energy_label"]
+      .filter((field) => !segment[field] || segment[field] === "unknown").length
+  ), 0);
+  if (missingCore && !window.confirm(
+    `${missingCore} function/energy ${missingCore === 1 ? "cell is" : "cells are"} still unlabeled. Save the combined review with those gaps?`,
+  )) return;
+  const reviewedRecordingId = draft.recordingId;
+  try {
+    await api("/api/structure/correct", { method: "POST", body: {
+      base_timeline_id: draft.baseTimelineId,
+      recording_id: reviewedRecordingId,
+      composite_review: true,
+      complete_review_timeline_ids: draft.sourceTimelineIds,
+      segments: draft.segments.map((segment, index) => ({
+        segment_index: index,
+        start_ms: Math.round(segment.start_ms),
+        end_ms: Math.round(segment.end_ms),
+        functional_label: segment.functional_label || null,
+        energy_label: segment.energy_label || null,
+        content_label: segment.content_label || null,
+        event: segment.event || null,
+        axis_sources: segment.axis_sources || {},
+      })),
+      note: $("structure-composite-note")?.value || null,
+      participant_id: app.participantId,
+      participant_name: app.participantName || null,
+    }});
+    app.structureReviewDraft = null;
+    app.structureReviewUndo = [];
+    await refreshStructureLibrary(reviewedRecordingId);
+    await refreshSongTeaching(true);
+    const nextReview = (app.structureLibrary?.catalog || []).find((item) => (
+      item.review_status === "needs_review" && item.recording_id !== reviewedRecordingId
+    ));
+    if (nextReview) await refreshStructureLibrary(nextReview.recording_id);
+    toast(
+      "Combined review completed",
+      nextReview
+        ? "The operator timeline is authoritative, both model originals remain preserved, and the next song awaiting review is open."
+        : "The operator timeline is authoritative and both model originals remain preserved.",
+      "success",
+    );
+  } catch (error) {
+    toast("Combined review could not be saved", error.message, "error");
+  }
+}
+
 function renderStructureTimelines(teaching = {}) {
   const container = $("structure-timeline-list");
   const count = $("structure-timeline-count");
   if (!container) return;
-  const timelines = teaching.structure_timelines || [];
+  const timelines = (teaching.structure_timelines || []).filter((timeline) => (
+    ["edmformer", "songformer"].includes(structureTeacherKind(timeline))
+  ));
   if (count && !Array.isArray(teaching.catalog)) {
     count.textContent = `${timelines.length} ${timelines.length === 1 ? "TIMELINE" : "TIMELINES"}`;
   }
@@ -1664,7 +2074,7 @@ function renderStructureTimelines(teaching = {}) {
   }
   const pendingTimelines = timelines.filter((timeline) => (
     timeline.review_eligible !== false
-    && !["approved", "rejected"].includes(
+    && !["approved", "rejected", "superseded"].includes(
       timeline.review?.status || "unreviewed",
     )
   ));
@@ -1675,27 +2085,20 @@ function renderStructureTimelines(teaching = {}) {
     const teacher = timeline.teacher?.name || timeline.provenance || "Local timeline";
     const scored = Number(timeline.confidence || 0) > 0;
     const review = timeline.review?.status || "unreviewed";
-    const isEditing = app.editingStructureTimelineId === timeline.id;
-    const correctedFrom = timeline.metadata?.corrects_timeline_id;
     const rows = (timeline.segments || []).map((segment, index) => {
-      const cells = isEditing
-        ? `<td>${structureSelect("functional", segment.functional_label, index)}</td><td>${structureSelect("energy", segment.energy_label, index)}</td><td>${structureSelect("content", segment.content_label, index)}</td><td>${structureEventSelect(structureTransitionEvent(segment), index)}</td>`
-        : `<td>${escapeHtml(label(segment.functional_label || "—"))}</td><td>${escapeHtml(label(segment.energy_label || "—"))}</td><td>${escapeHtml(label(segment.content_label || "—"))}</td><td>${escapeHtml(label(structureTransitionEvent(segment) || "—"))}</td>`;
-      const start = Number(segment.start_ms || 0) / 1000;
-      const end = segment.end_ms === null || segment.end_ms === undefined ? "" : Number(segment.end_ms) / 1000;
-      const timing = isEditing
-        ? `<td class="structure-time-edit"><input data-structure-start="${index}" type="number" min="0" step="0.1" value="${start}"><span>to</span><input data-structure-end="${index}" type="number" min="0" step="0.1" value="${end}"></td>`
-        : `<td class="structure-time-readout"><b>${songTime(segment.start_ms)}</b><span>to</span><b>${segment.end_ms === null ? "end" : songTime(segment.end_ms)}</b></td>`;
-      return `<tr data-structure-segment="${index}">${timing}${cells}<td title="Original teacher label">${escapeHtml(segment.raw_label || "—")}</td><td>${segment.label_confidence > 0 ? percent(segment.label_confidence) : "unscored"}</td></tr>`;
+      const timing = `<td class="structure-time-readout"><b>${songTime(segment.start_ms)}</b><span>to</span><b>${segment.end_ms === null ? "end" : songTime(segment.end_ms)}</b></td>`;
+      const cells = `<td>${escapeHtml(label(segment.functional_label || "—"))}</td><td>${escapeHtml(label(segment.energy_label || "—"))}</td><td>${escapeHtml(label(segment.content_label || "—"))}</td><td>${escapeHtml(label(structureTransitionEvent(segment) || "—"))}</td>`;
+      return `<tr>${timing}${cells}<td title="Original teacher label">${escapeHtml(segment.raw_label || "—")}</td><td>${segment.label_confidence > 0 ? percent(segment.label_confidence) : "unscored"}</td></tr>`;
     }).join("");
     const reviewDisabled = timeline.review_eligible === false ? " disabled title=\"Diagnostic evidence cannot be approved for Live recall\"" : "";
-    const reviewActions = review === "approved" || review === "rejected"
-      ? `<span class="structure-review-complete state-${escapeHtml(review)}">${escapeHtml(label(review))}</span><button data-timeline-review="unreviewed" data-timeline-id="${escapeHtml(timeline.id)}">Reopen review</button>`
+    const reviewActions = review === "superseded"
+      ? `<span class="structure-review-complete state-superseded">Reviewed through combined correction</span>`
+      : ["approved", "rejected"].includes(review)
+        ? `<span class="structure-review-complete state-${escapeHtml(review)}">${escapeHtml(label(review))}</span><button data-timeline-review="unreviewed" data-timeline-id="${escapeHtml(timeline.id)}">Reopen review</button>`
       : `<button data-timeline-review="approved" data-timeline-id="${escapeHtml(timeline.id)}"${reviewDisabled}>Approve</button><button data-timeline-review="rejected" data-timeline-id="${escapeHtml(timeline.id)}">Reject</button>`;
-    return `<article class="structure-timeline-card${review === "approved" ? " approved" : review === "rejected" ? " rejected" : ""}">
-      <header><div><b>${escapeHtml(teacher)}</b><span>${scored ? `${percent(timeline.confidence)} model confidence` : "unscored model output"} · ${escapeHtml(label(timeline.recall_authority || review))}</span><small>${escapeHtml(timeline.timeline_version || "unknown version")}${correctedFrom ? ` · correction of ${escapeHtml(correctedFrom)}` : ""}</small></div><div class="structure-review-actions">${reviewActions}<button data-timeline-correct="${escapeHtml(timeline.id)}">${isEditing ? "Cancel correction" : "Correct labels"}</button></div></header>
+    return `<article class="structure-timeline-card${review === "approved" ? " approved" : review === "rejected" ? " rejected" : review === "superseded" ? " superseded" : ""}">
+      <header><div><b>${escapeHtml(teacher)}</b><span>${scored ? `${percent(timeline.confidence)} model confidence` : "unscored model output"} · ${escapeHtml(label(timeline.recall_authority || review))}</span><small>${escapeHtml(timeline.timeline_version || "unknown version")}</small></div><div class="structure-review-actions">${reviewActions}</div></header>
       <div class="structure-table-wrap"><table><thead><tr><th>Time</th><th>Function</th><th>Energy</th><th>Content</th><th>Transition event</th><th>Raw teacher label</th><th>Model score</th></tr></thead><tbody>${rows}</tbody></table></div>
-      ${isEditing ? `<div class="structure-correction-actions"><label><span>Correction note</span><input id="structure-correction-note" maxlength="1000" placeholder="What did the teacher get wrong?"></label><button class="primary" data-timeline-save="${escapeHtml(timeline.id)}">Save immutable correction</button></div>` : ""}
     </article>`;
   }).join("") + (pendingTimelines.length && timelines.length > pendingTimelines.length
     ? `<p class="structure-reviewed-hidden">${timelines.length - pendingTimelines.length} reviewed or historical timeline${timelines.length - pendingTimelines.length === 1 ? " is" : "s are"} hidden while this song still has active review work. Select Reviewed after completing the queue to inspect the full history.</p>`
@@ -1703,6 +2106,7 @@ function renderStructureTimelines(teaching = {}) {
 }
 
 async function reviewStructureTimeline(timelineId, status) {
+  if (!confirmDiscardCompositeChanges()) return;
   const reviewedRecordingId = app.selectedStructureRecordingId;
   try {
     await api("/api/structure/review", { method: "POST", body: {
@@ -1712,6 +2116,8 @@ async function reviewStructureTimeline(timelineId, status) {
       participant_id: app.participantId,
       participant_name: app.participantName || null,
     }});
+    app.structureReviewDraft = null;
+    app.structureReviewUndo = [];
     await refreshStructureLibrary(reviewedRecordingId);
     await refreshSongTeaching(true);
     const currentStillPending = (app.structureLibrary?.catalog || []).some(
@@ -1741,42 +2147,6 @@ async function reviewStructureTimeline(timelineId, status) {
     );
   } catch (error) {
     toast("Timeline review failed", error.message, "error");
-  }
-}
-
-async function saveStructureCorrection(timelineId) {
-  const timeline = (app.structureLibrary?.structure_timelines || app.teaching?.structure_timelines || []).find((item) => item.id === timelineId);
-  if (!timeline) return;
-  const container = $("structure-timeline-list");
-  const segments = (timeline.segments || []).map((segment, index) => {
-    const readAxis = (axis) => container.querySelector(`[data-structure-axis="${axis}"][data-segment-index="${index}"]`)?.value || null;
-    const start = Number(container.querySelector(`[data-structure-start="${index}"]`)?.value || 0);
-    const endInput = container.querySelector(`[data-structure-end="${index}"]`)?.value;
-    return {
-      segment_index: index,
-      start_ms: Math.round(start * 1000),
-      end_ms: endInput === "" ? null : Math.round(Number(endInput) * 1000),
-      functional_label: readAxis("functional"),
-      energy_label: readAxis("energy"),
-      content_label: readAxis("content"),
-      event: container.querySelector(`[data-structure-event="${index}"]`)?.value || null,
-    };
-  });
-  try {
-    await api("/api/structure/correct", { method: "POST", body: {
-      base_timeline_id: timelineId,
-      recording_id: app.selectedStructureRecordingId,
-      segments,
-      note: $("structure-correction-note")?.value || null,
-      participant_id: app.participantId,
-      participant_name: app.participantName || null,
-    }});
-    app.editingStructureTimelineId = null;
-    await refreshStructureLibrary(app.selectedStructureRecordingId);
-    await refreshSongTeaching(true);
-    toast("Correction saved", "The teacher original remains intact; this recording now recalls your revision.", "success");
-  } catch (error) {
-    toast("Correction could not be saved", error.message, "error");
   }
 }
 
@@ -3798,6 +4168,7 @@ function setStructurePlayback(positionMs, isPlaying, commanded = false) {
     isPlaying,
     syncedAt: Date.now(),
     commandedAt: commanded ? Date.now() : Number(previous?.commandedAt || 0),
+    locallyAdjustedAt: Date.now(),
   };
   updateStructureOverviewPlayhead(app.status || {});
 }
@@ -3831,7 +4202,8 @@ async function playSelectedStructureSong() {
 async function pauseSelectedStructureSong() {
   const positionMs = currentStructurePlaybackPosition();
   const wasPlaying = Boolean(
-    app.structurePlayback?.recordingId === app.structureLibrary?.selected_recording_id
+    app.structurePlayback
+    && app.structurePlayback.recordingId === app.structureLibrary?.selected_recording_id
     && app.structurePlayback.isPlaying,
   );
   setStructurePlayback(positionMs, false, wasPlaying);
@@ -3843,7 +4215,8 @@ async function pauseSelectedStructureSong() {
 async function seekSelectedStructureSong(positionMs) {
   const wasPlaying = Boolean(app.structurePlayback?.isPlaying);
   const pendingSelectedCommand = Boolean(
-    app.structurePlayback?.recordingId === app.structureLibrary?.selected_recording_id
+    app.structurePlayback
+    && app.structurePlayback.recordingId === app.structureLibrary?.selected_recording_id
     && app.structurePlayback.commandedAt
     && Date.now() - app.structurePlayback.commandedAt <= 2500,
   );
@@ -5492,28 +5865,20 @@ function installHandlers() {
   });
   $("structure-timeline-list")?.addEventListener("click", (event) => {
     const review = event.target.closest("[data-timeline-review]");
-    const correct = event.target.closest("[data-timeline-correct]");
-    const save = event.target.closest("[data-timeline-save]");
     if (review) {
       reviewStructureTimeline(
         review.dataset.timelineId,
         review.dataset.timelineReview,
       );
-    } else if (correct) {
-      app.editingStructureTimelineId = (
-        app.editingStructureTimelineId === correct.dataset.timelineCorrect
-          ? null
-          : correct.dataset.timelineCorrect
-      );
-      renderStructureTimelines(app.structureLibrary || app.teaching || {});
-    } else if (save) {
-      saveStructureCorrection(save.dataset.timelineSave);
     }
   });
   $("structure-song-select")?.addEventListener("change", (event) => {
     const recordingId = event.target.value;
     if (!recordingId) return;
-    app.editingStructureTimelineId = null;
+    if (!confirmDiscardCompositeChanges()) {
+      event.target.value = app.selectedStructureRecordingId || "";
+      return;
+    }
     app.selectedStructureRecordingId = recordingId;
     void refreshStructureLibrary(recordingId);
   });
@@ -5535,6 +5900,40 @@ function installHandlers() {
   $("structure-seek")?.addEventListener("change", () => {
     seekSelectedStructureSong(currentStructurePlaybackPosition());
   });
+  $("structure-composite-body")?.addEventListener("change", (event) => {
+    const axis = event.target.closest("[data-composite-axis]");
+    const transition = event.target.closest("[data-composite-event]");
+    if (axis) {
+      updateCompositeStructureField(
+        Number(axis.dataset.compositeIndex),
+        `${axis.dataset.compositeAxis}_label`,
+        axis.value,
+      );
+    } else if (transition) {
+      updateCompositeStructureField(
+        Number(transition.dataset.compositeEvent),
+        "event",
+        transition.value,
+      );
+    }
+  });
+  $("structure-composite-body")?.addEventListener("click", (event) => {
+    const seek = event.target.closest("[data-composite-seek]");
+    const row = event.target.closest("[data-composite-row]");
+    if (seek) {
+      const index = Number(seek.dataset.compositeSeek);
+      selectCompositeStructureSegment(index);
+      seekSelectedStructureSong(app.structureReviewDraft?.segments?.[index]?.start_ms || 0);
+    } else if (row && !event.target.closest("select")) {
+      selectCompositeStructureSegment(Number(row.dataset.compositeRow));
+    }
+  });
+  $("structure-split")?.addEventListener("click", splitCompositeStructureAtPlayhead);
+  $("structure-merge-left")?.addEventListener("click", () => mergeCompositeStructure(-1));
+  $("structure-merge-right")?.addEventListener("click", () => mergeCompositeStructure(1));
+  $("structure-composite-undo")?.addEventListener("click", undoCompositeStructureEdit);
+  $("structure-composite-reset")?.addEventListener("click", resetCompositeStructureDraft);
+  $("structure-save-composite")?.addEventListener("click", saveCompositeStructureReview);
   $("structure-song-search")?.addEventListener("input", () => {
     renderStructureSongOptions();
     renderStructureCatalogTable();
@@ -5547,7 +5946,7 @@ function installHandlers() {
     const row = event.target.closest("[data-structure-recording]");
     const recordingId = row?.dataset.structureRecording;
     if (!recordingId) return;
-    app.editingStructureTimelineId = null;
+    if (!confirmDiscardCompositeChanges()) return;
     app.selectedStructureRecordingId = recordingId;
     void refreshStructureLibrary(recordingId);
   });
@@ -5561,19 +5960,18 @@ function installHandlers() {
       toast("Playing song has no timeline", "Analyze the complete recording before reviewing it.", "error");
       return;
     }
-    app.editingStructureTimelineId = null;
+    if (!confirmDiscardCompositeChanges()) return;
     app.selectedStructureRecordingId = recordingId;
     void refreshStructureLibrary(recordingId);
   });
   $("structure-overview")?.addEventListener("click", (event) => {
     const segment = event.target.closest("[data-overview-segment]");
     if (!segment) return;
-    const row = $("structure-timeline-list")?.querySelector(
-      `[data-structure-segment="${segment.dataset.overviewSegment}"]`,
-    );
-    row?.scrollIntoView({ behavior: "smooth", block: "center" });
-    row?.classList.add("selected");
-    window.setTimeout(() => row?.classList.remove("selected"), 1800);
+    selectCompositeStructureSegment(Number(segment.dataset.overviewSegment));
+  });
+  $("structure-overview")?.addEventListener("pointerdown", (event) => {
+    const handle = event.target.closest("[data-structure-boundary]");
+    if (handle) beginCompositeBoundaryDrag(event, Number(handle.dataset.structureBoundary));
   });
 
   $$("[data-control]").forEach((input) => {
