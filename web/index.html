@@ -456,6 +456,14 @@
                     <div><h2 id="structure-selected-title">No song selected</h2><p id="structure-selected-artist">Choose a song above</p></div>
                     <div class="structure-selected-duration"><b id="structure-selected-position">0:00</b><span>of</span><b id="structure-selected-total">0:00</b></div>
                   </div>
+                  <div class="structure-review-transport" aria-label="Selected song Spotify playback">
+                    <button id="structure-play" type="button" class="primary">▶ Play this song</button>
+                    <button id="structure-pause" type="button">❚❚ Pause</button>
+                    <button id="structure-back" type="button">−10 sec</button>
+                    <button id="structure-forward" type="button">+10 sec</button>
+                    <label><span>Song position</span><input id="structure-seek" type="range" min="0" max="1000" step="1" value="0"></label>
+                    <span id="structure-playback-state" class="panel-note">Choose an analyzed Spotify song</span>
+                  </div>
                   <div id="structure-overview" class="structure-overview"><span class="empty-state">Select an analyzed song to display its section map.</span></div>
                   <p class="control-help">Needs review means EDMFormer or SongFormer produced a current exact-song timeline that has not received an optional quality decision. Training may use a technically valid completed teacher result without waiting for approval. EDMFormer supplies techno energy; SongFormer supplies function and content. Corrections override the affected training labels without overwriting the teacher original.</p>
                   <div id="structure-timeline-list" class="structure-timeline-list"><p class="empty-state">No offline teacher timeline has been generated for this exact recording yet.</p></div>

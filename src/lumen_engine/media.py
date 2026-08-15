@@ -410,6 +410,8 @@ class SpotifyWebAPI:
             uri = str(payload.get("uri", "")).strip()
             context_uri = str(payload.get("context_uri", "")).strip()
             offset_uri = str(payload.get("offset_uri", "")).strip()
+            has_position = "position_ms" in payload
+            position_ms = max(0, int(payload.get("position_ms", 0)))
             if context_uri:
                 body: dict[str, object] | None = {
                     "context_uri": context_uri
@@ -418,6 +420,9 @@ class SpotifyWebAPI:
                     body["offset"] = {"uri": offset_uri}
             else:
                 body = {"uris": [uri]} if uri else None
+            if has_position:
+                body = body or {}
+                body["position_ms"] = position_ms
             self._request(
                 "/me/player/play",
                 method="PUT",

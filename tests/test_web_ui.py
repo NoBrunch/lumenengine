@@ -263,6 +263,27 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("grid-column: 1 / 3;", stylesheet)
         self.assertIn(".structure-time-readout { min-width: 13rem; }", stylesheet)
 
+    def test_timeline_review_can_call_and_track_its_spotify_song(self) -> None:
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+        markup = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+
+        for element_id in (
+            "structure-play",
+            "structure-pause",
+            "structure-back",
+            "structure-forward",
+            "structure-seek",
+        ):
+            self.assertIn(f'id="{element_id}"', markup)
+        self.assertIn("function currentStructurePlaybackPosition()", script)
+        self.assertIn("function playSelectedStructureSong()", script)
+        self.assertIn('spotifyCommand("play", {', script)
+        self.assertIn("position_ms: Math.round(positionMs)", script)
+        self.assertIn("app.spotify?.observed_at_unix_ms", script)
+        self.assertIn(
+            "setInterval(() => updateStructureOverviewPlayhead", script
+        )
+
     def test_sequence_and_gesture_editors_expose_simple_workflows(self) -> None:
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         markup = (ROOT / "web" / "index.html").read_text(encoding="utf-8")

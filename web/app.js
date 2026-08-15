@@ -64,6 +64,7 @@ const app = {
   teaching: null,
   structureLibrary: null,
   selectedStructureRecordingId: null,
+  structurePlayback: null,
   sequenceDraft: [{ routine: "breathe", duration_beats: 8, intensity: 0.72, brightness: 0.72, motion_speed: 0.5, travel_size: 1, activity_density: 1, beat_sync: 1, palette: "", strobe: 0 }],
   editingSequenceId: null,
   editingPlacementId: null,
@@ -631,6 +632,7 @@ async function initialize() {
   updateClock();
   window.setInterval(updateClock, 1000);
   window.setInterval(updateSpotifyProgressDisplay, 250);
+  window.setInterval(() => updateStructureOverviewPlayhead(app.status || {}), 100);
   window.requestAnimationFrame(drawCenterMotion);
   try {
     app.bootstrap = await api("/api/bootstrap");
@@ -1538,12 +1540,65 @@ function renderStructureOverview(library = {}) {
   updateStructureOverviewPlayhead(app.status || {});
 }
 
+function currentStructurePlaybackPosition() {
+  const playback = app.structurePlayback;
+  if (!playback || playback.recordingId !== app.structureLibrary?.selected_recording_id) return 0;
+  const elapsed = playback.isPlaying ? Date.now() - playback.syncedAt : 0;
+  return Math.min(playback.durationMs || Infinity, Math.max(0, playback.positionMs + elapsed));
+}
+
+function selectedStructureMatchesMedia(status = {}) {
+  const selectedSpotifyId = String(
+    app.structureLibrary?.selected_recording?.provider_item_id || "",
+  ).replace("spotify:track:", "");
+  const playingSpotifyId = String(status.media?.provider_item_id || "")
+    .replace("spotify:track:", "");
+  return Boolean(selectedSpotifyId && selectedSpotifyId === playingSpotifyId);
+}
+
 function updateStructureOverviewPlayhead(status = {}) {
   const selectedId = app.structureLibrary?.selected_recording_id;
-  const playingId = app.teaching?.recording_id || status.song_teaching?.recording_id;
   const selected = app.structureLibrary?.selected_recording;
-  const isPlaying = Boolean(selectedId && selectedId === playingId);
-  const position = isPlaying ? Number(status.media?.live_position_ms || app.teaching?.position_ms || 0) : 0;
+  const mediaMatches = selectedStructureMatchesMedia(status);
+  if (selectedId && mediaMatches) {
+    const observed = Number(status.media?.live_position_ms ?? app.teaching?.position_ms ?? 0);
+    const local = currentStructurePlaybackPosition();
+    const commandSettled = !app.structurePlayback?.commandedAt
+      || Date.now() - app.structurePlayback.commandedAt > 2500;
+    const observedIsPlaying = status.media?.is_playing !== false;
+    const playbackChanged = app.structurePlayback?.isPlaying !== observedIsPlaying;
+    if (!app.structurePlayback
+      || app.structurePlayback.recordingId !== selectedId
+      || (commandSettled && (Math.abs(observed - local) > 3000 || playbackChanged))) {
+      app.structurePlayback = {
+        recordingId: selectedId,
+        positionMs: observed,
+        durationMs: Number(selected?.duration_ms || 0),
+        isPlaying: observedIsPlaying,
+        syncedAt: Date.now(),
+        commandedAt: 0,
+      };
+    }
+  } else if (
+    app.structurePlayback?.recordingId === selectedId
+    && app.structurePlayback.isPlaying
+    && (!app.structurePlayback.commandedAt
+      || Date.now() - app.structurePlayback.commandedAt > 2500)
+    && status.media?.provider_item_id
+  ) {
+    app.structurePlayback = {
+      ...app.structurePlayback,
+      positionMs: currentStructurePlaybackPosition(),
+      isPlaying: false,
+      syncedAt: Date.now(),
+      commandedAt: 0,
+    };
+  }
+  const isPlaying = Boolean(
+    app.structurePlayback?.recordingId === selectedId
+    && app.structurePlayback.isPlaying,
+  );
+  const position = currentStructurePlaybackPosition();
   const duration = Number(selected?.duration_ms || 0);
   const progress = duration > 0 ? clamp(position / duration) : 0;
   const playhead = $("structure-overview-playhead");
@@ -1551,7 +1606,20 @@ function updateStructureOverviewPlayhead(status = {}) {
     playhead.style.left = `${progress * 100}%`;
     playhead.classList.toggle("inactive", !isPlaying);
   }
-  setText("structure-selected-position", isPlaying ? songTime(position) : "Not playing");
+  setText("structure-selected-position", songTime(position));
+  setText(
+    "structure-playback-state",
+    isPlaying
+      ? "Playing through Spotify"
+      : position > 0
+        ? "Paused"
+        : selected?.provider === "spotify" && selected?.provider_item_id
+          ? "Ready to play through Spotify"
+          : "Direct playback requires a Spotify recording",
+  );
+  if ($("structure-seek") && document.activeElement !== $("structure-seek")) {
+    $("structure-seek").value = duration ? Math.round(progress * 1000) : 0;
+  }
 }
 
 const STRUCTURE_LABELS = {
@@ -3417,7 +3485,7 @@ async function refreshSpotifyConsole(showErrors = false, query = null) {
     if (requestedQuery) parameters.set("q", requestedQuery);
     if (app.spotifyPlaylistId) parameters.set("playlist_id", app.spotifyPlaylistId);
     app.spotify = await api(`/api/spotify${parameters.size ? `?${parameters}` : ""}`);
-    app.spotifyFetchedAt = Date.now();
+    app.spotifyFetchedAt = Number(app.spotify?.observed_at_unix_ms) || Date.now();
     rememberSpotifyView();
     renderSpotifyConsole();
   } catch (error) {
@@ -3712,6 +3780,78 @@ async function spotifyCommand(action, values = {}) {
     window.setTimeout(() => refreshSpotifyConsole(false), 100);
     return false;
   }
+}
+
+function setStructurePlayback(positionMs, isPlaying, commanded = false) {
+  const selected = app.structureLibrary?.selected_recording;
+  if (!selected) return;
+  const previous = app.structurePlayback?.recordingId === selected.recording_id
+    ? app.structurePlayback
+    : null;
+  app.structurePlayback = {
+    recordingId: selected.recording_id,
+    positionMs: Math.max(
+      0,
+      Math.min(Number(selected.duration_ms || Infinity), Number(positionMs || 0)),
+    ),
+    durationMs: Number(selected.duration_ms || 0),
+    isPlaying,
+    syncedAt: Date.now(),
+    commandedAt: commanded ? Date.now() : Number(previous?.commandedAt || 0),
+  };
+  updateStructureOverviewPlayhead(app.status || {});
+}
+
+async function playSelectedStructureSong() {
+  const selected = app.structureLibrary?.selected_recording;
+  if (!selected) {
+    toast("Choose a song first", "Select an analyzed song from the database.", "error");
+    return;
+  }
+  if (selected.provider !== "spotify" || !selected.provider_item_id) {
+    toast(
+      "This recording cannot be started here",
+      "Direct playback requires a Spotify recording identity.",
+      "error",
+    );
+    return;
+  }
+  const positionMs = currentStructurePlaybackPosition();
+  const uri = selected.provider_item_id.startsWith("spotify:track:")
+    ? selected.provider_item_id
+    : `spotify:track:${selected.provider_item_id}`;
+  setStructurePlayback(positionMs, true, true);
+  const started = await spotifyCommand("play", {
+    uri,
+    position_ms: Math.round(positionMs),
+  });
+  if (!started) setStructurePlayback(positionMs, false);
+}
+
+async function pauseSelectedStructureSong() {
+  const positionMs = currentStructurePlaybackPosition();
+  const wasPlaying = Boolean(
+    app.structurePlayback?.recordingId === app.structureLibrary?.selected_recording_id
+    && app.structurePlayback.isPlaying,
+  );
+  setStructurePlayback(positionMs, false, wasPlaying);
+  if (!wasPlaying) return;
+  const paused = await spotifyCommand("pause");
+  if (!paused) setStructurePlayback(positionMs, true);
+}
+
+async function seekSelectedStructureSong(positionMs) {
+  const wasPlaying = Boolean(app.structurePlayback?.isPlaying);
+  const pendingSelectedCommand = Boolean(
+    app.structurePlayback?.recordingId === app.structureLibrary?.selected_recording_id
+    && app.structurePlayback.commandedAt
+    && Date.now() - app.structurePlayback.commandedAt <= 2500,
+  );
+  const controlsCurrentSong = selectedStructureMatchesMedia(app.status || {})
+    || pendingSelectedCommand;
+  setStructurePlayback(positionMs, wasPlaying, controlsCurrentSong);
+  if (!controlsCurrentSong) return;
+  await spotifyCommand("seek", { position_ms: Math.round(currentStructurePlaybackPosition()) });
 }
 
 function renderExpression(decision, expression, observation, tempoClock = {}) {
@@ -5376,6 +5516,24 @@ function installHandlers() {
     app.editingStructureTimelineId = null;
     app.selectedStructureRecordingId = recordingId;
     void refreshStructureLibrary(recordingId);
+  });
+  $("structure-play")?.addEventListener("click", playSelectedStructureSong);
+  $("structure-pause")?.addEventListener("click", pauseSelectedStructureSong);
+  $("structure-back")?.addEventListener("click", () => {
+    seekSelectedStructureSong(currentStructurePlaybackPosition() - 10_000);
+  });
+  $("structure-forward")?.addEventListener("click", () => {
+    seekSelectedStructureSong(currentStructurePlaybackPosition() + 10_000);
+  });
+  $("structure-seek")?.addEventListener("input", (event) => {
+    const duration = Number(app.structureLibrary?.selected_recording?.duration_ms || 0);
+    setStructurePlayback(
+      duration * Number(event.target.value || 0) / 1000,
+      Boolean(app.structurePlayback?.isPlaying),
+    );
+  });
+  $("structure-seek")?.addEventListener("change", () => {
+    seekSelectedStructureSong(currentStructurePlaybackPosition());
   });
   $("structure-song-search")?.addEventListener("input", () => {
     renderStructureSongOptions();

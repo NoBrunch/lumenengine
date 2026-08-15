@@ -138,6 +138,7 @@ class SpotifyMappingTests(unittest.TestCase):
                 {
                     "context_uri": "spotify:playlist:list",
                     "offset_uri": "spotify:track:song",
+                    "position_ms": 12345,
                 },
             )
         request.assert_called_once_with(
@@ -147,6 +148,7 @@ class SpotifyMappingTests(unittest.TestCase):
             body={
                 "context_uri": "spotify:playlist:list",
                 "offset": {"uri": "spotify:track:song"},
+                "position_ms": 12345,
             },
         )
 
