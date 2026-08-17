@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+CONFIG_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/lumen-web-access"
+USER_UNIT_ROOT="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
+LOCAL_BIN_ROOT="${HOME}/.local/bin"
+CLOUDFLARED_BIN="${LOCAL_BIN_ROOT}/cloudflared"
+TOKEN_FILE="${CONFIG_ROOT}/tunnel-token"
+HOSTNAME_FILE="${CONFIG_ROOT}/hostname"
+ENGINE_UNIT="${USER_UNIT_ROOT}/lumen-engine-web.service"
+TUNNEL_UNIT="${USER_UNIT_ROOT}/lumen-web-tunnel.service"
+readonly SCRIPT_DIR PROJECT_DIR CONFIG_ROOT USER_UNIT_ROOT LOCAL_BIN_ROOT
+readonly CLOUDFLARED_BIN TOKEN_FILE HOSTNAME_FILE ENGINE_UNIT TUNNEL_UNIT
+readonly CLOUDFLARED_VERSION="2026.8.2"
+readonly CLOUDFLARED_SHA256="fcfb02b575a52ca1af2e3267af4e1517bcdeb30ac48c834c69abaed3c0576ad2"
+readonly CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+
+usage() {
+  printf '%s\n' \
+    "Usage:" \
+    "  $0 install-client --apply" \
+    "  $0 stage HOSTNAME" \
+    "  $0 activate --apply" \
+    "  $0 status" \
+    "  $0 verify" \
+    "  $0 disable --apply"
+}
+
+require_apply() {
+  if [[ "${1:-}" != "--apply" ]]; then
+    printf 'This action changes the local web-access deployment. Re-run with --apply.\n' >&2
+    exit 2
+  fi
+}
+
+validate_hostname() {
+  local hostname="$1"
+  if [[ ! "${hostname}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] ||
+     [[ "${hostname}" != *.* ]] || [[ "${hostname}" == *..* ]]; then
+    printf 'Invalid public hostname: %s\n' "${hostname}" >&2
+    exit 2
+  fi
+}
+
+install_client() {
+  require_apply "${1:-}"
+  local download_root download_path
+  download_root="$(mktemp -d)"
+  download_path="${download_root}/cloudflared"
+  trap 'rm -rf -- "${download_root}"' EXIT
+  curl --fail --location --proto '=https' --tlsv1.2 \
+    --output "${download_path}" "${CLOUDFLARED_URL}"
+  printf '%s  %s\n' "${CLOUDFLARED_SHA256}" "${download_path}" |
+    sha256sum --check --status
+  install -d -m 0755 "${LOCAL_BIN_ROOT}"
+  install -m 0755 "${download_path}" "${CLOUDFLARED_BIN}"
+  rm -rf -- "${download_root}"
+  trap - EXIT
+  "${CLOUDFLARED_BIN}" --version
+}
+
+write_units() {
+  install -d -m 0700 "${CONFIG_ROOT}"
+  install -d -m 0755 "${USER_UNIT_ROOT}"
+  install -m 0644 /dev/stdin "${ENGINE_UNIT}" <<EOF
+[Unit]
+Description=Lumen Engine loopback-only web origin
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${PROJECT_DIR}
+Environment=PYTHONPATH=${PROJECT_DIR}/src
+ExecStart=${PROJECT_DIR}/.venv/bin/python -m lumen_engine ui --host 127.0.0.1 --port 4042
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
+EOF
+  install -m 0644 /dev/stdin "${TUNNEL_UNIT}" <<EOF
+[Unit]
+Description=Authenticated Cloudflare tunnel for the complete Lumen console
+Requires=lumen-engine-web.service
+After=network-online.target lumen-engine-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${CLOUDFLARED_BIN} tunnel --no-autoupdate --loglevel info run --token-file ${TOKEN_FILE}
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+}
+
+stage() {
+  local hostname="${1:-}"
+  if [[ -z "${hostname}" ]]; then
+    usage >&2
+    exit 2
+  fi
+  validate_hostname "${hostname}"
+  install -d -m 0700 "${CONFIG_ROOT}"
+  printf '%s\n' "${hostname}" | install -m 0600 /dev/stdin "${HOSTNAME_FILE}"
+  write_units
+  printf 'Staged for https://%s/; no listener or tunnel was changed.\n' "${hostname}"
+}
+
+activate() {
+  require_apply "${1:-}"
+  if [[ ! -x "${CLOUDFLARED_BIN}" ]]; then
+    printf 'cloudflared is not installed. Run install-client --apply first.\n' >&2
+    exit 1
+  fi
+  if [[ ! -s "${HOSTNAME_FILE}" || ! -f "${TUNNEL_UNIT}" ]]; then
+    printf 'Web access is not staged. Run stage HOSTNAME first.\n' >&2
+    exit 1
+  fi
+  local tunnel_token
+  IFS= read -r -s -p 'Paste only the Cloudflare tunnel token: ' tunnel_token
+  printf '\n'
+  if [[ "${tunnel_token}" != eyJ* || ${#tunnel_token} -lt 100 ]]; then
+    printf 'That does not look like a Cloudflare tunnel token. Nothing changed.\n' >&2
+    exit 2
+  fi
+  printf '%s\n' "${tunnel_token}" |
+    install -m 0600 /dev/stdin "${TOKEN_FILE}"
+  unset tunnel_token
+
+  curl --silent --fail --max-time 2 \
+    --request POST --header 'Content-Type: application/json' --data '{}' \
+    http://127.0.0.1:4042/api/service/shutdown >/dev/null 2>&1 || true
+  for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if ! ss -ltn | grep -qE '(^|[[:space:]])[^[:space:]]*:4042[[:space:]]'; then
+      break
+    fi
+    sleep 1
+  done
+  systemctl --user stop lumen-engine-runtime.service >/dev/null 2>&1 || true
+  systemctl --user enable --now lumen-engine-web.service
+  for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if curl --silent --fail --max-time 1 \
+      http://127.0.0.1:4042/api/bootstrap >/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  curl --silent --fail --max-time 2 \
+    http://127.0.0.1:4042/api/bootstrap >/dev/null
+  systemctl --user enable --now lumen-web-tunnel.service
+  status
+}
+
+status() {
+  local hostname="not staged"
+  if [[ -s "${HOSTNAME_FILE}" ]]; then
+    hostname="$(<"${HOSTNAME_FILE}")"
+  fi
+  printf 'Lumen web access\n'
+  printf '  hostname:     %s\n' "${hostname}"
+  printf '  cloudflared:  '
+  if [[ -x "${CLOUDFLARED_BIN}" ]]; then
+    "${CLOUDFLARED_BIN}" --version
+  else
+    printf 'not installed\n'
+  fi
+  printf '  token:        %s\n' "$([[ -s "${TOKEN_FILE}" ]] && printf stored || printf absent)"
+  printf '  origin unit:  %s\n' "$(systemctl --user is-active lumen-engine-web.service 2>/dev/null || true)"
+  printf '  tunnel unit:  %s\n' "$(systemctl --user is-active lumen-web-tunnel.service 2>/dev/null || true)"
+  printf '  port 4042:\n'
+  ss -ltnp | grep ':4042' || printf '    not listening\n'
+}
+
+verify() {
+  if [[ ! -s "${HOSTNAME_FILE}" ]]; then
+    printf 'Web access is not staged.\n' >&2
+    exit 1
+  fi
+  systemctl --user is-active --quiet lumen-engine-web.service
+  systemctl --user is-active --quiet lumen-web-tunnel.service
+  curl --silent --fail --max-time 2 \
+    http://127.0.0.1:4042/api/bootstrap >/dev/null
+  if ss -ltn | grep -qE '(^|[[:space:]])(0\.0\.0\.0|\[::\]):4042[[:space:]]'; then
+    printf 'FAILED: Lumen is still reachable on a wildcard interface.\n' >&2
+    exit 1
+  fi
+
+  local hostname headers response_code
+  hostname="$(<"${HOSTNAME_FILE}")"
+  headers="$(mktemp)"
+  trap 'rm -f -- "${headers}"' RETURN
+  response_code="$(curl --silent --show-error --head --max-time 15 \
+    --output /dev/null --dump-header "${headers}" --write-out '%{http_code}' \
+    "https://${hostname}/")"
+  if [[ ! "${response_code}" =~ ^30[12378]$ ]] ||
+     ! grep -Eiq '^location: .*cloudflareaccess\.com|^location: .*/cdn-cgi/access/login' "${headers}"; then
+    printf 'FAILED: unauthenticated HTTPS did not redirect to Cloudflare Access.\n' >&2
+    printf 'HTTP status was %s. The full console must remain private.\n' "${response_code}" >&2
+    exit 1
+  fi
+  printf 'VERIFIED: loopback origin, active tunnel, and Access login redirect for https://%s/\n' "${hostname}"
+}
+
+disable() {
+  require_apply "${1:-}"
+  systemctl --user disable --now lumen-web-tunnel.service
+  printf 'The public tunnel is disabled. Lumen remains available locally at http://127.0.0.1:4042/.\n'
+}
+
+case "${1:-}" in
+  install-client) install_client "${2:-}" ;;
+  stage) stage "${2:-}" ;;
+  activate) activate "${2:-}" ;;
+  status) status ;;
+  verify) verify ;;
+  disable) disable "${2:-}" ;;
+  *) usage >&2; exit 2 ;;
+esac

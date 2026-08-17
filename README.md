@@ -14,6 +14,11 @@ Normal operation does not use the command line. Double-click **Lumen Engine**
 on the Ubuntu desktop. It starts the local operator service and opens the
 desktop console in the default browser.
 
+Authenticated access to the complete console from outside the home network is
+documented in [docs/lumen-web-access.md](docs/lumen-web-access.md). That path
+uses a loopback-only origin and Cloudflare Access; never expose or port-forward
+the unauthenticated port 4042 service directly.
+
 The application has two purpose-built surfaces:
 
 - **Desktop console** at `http://127.0.0.1:4042/`: live performance state,

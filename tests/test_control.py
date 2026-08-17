@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
@@ -2347,6 +2348,61 @@ class ControlApplicationTests(unittest.TestCase):
                 )
         finally:
             ThreadingHTTPServer.server_close(server)
+
+    def test_http_console_rejects_cross_site_and_non_json_commands(
+        self,
+    ) -> None:
+        server = LumenHTTPServer(("127.0.0.1", 0), self.application)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        address = f"http://127.0.0.1:{server.server_address[1]}"
+        try:
+            with urlopen(address + "/", timeout=3) as response:
+                self.assertEqual(response.headers["X-Frame-Options"], "DENY")
+                self.assertEqual(
+                    response.headers["Referrer-Policy"], "no-referrer"
+                )
+                self.assertIn(
+                    "frame-ancestors 'none'",
+                    response.headers["Content-Security-Policy"],
+                )
+
+            cross_site = Request(
+                address + "/api/engine/stop",
+                data=b"{}",
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": "https://attacker.example",
+                    "Sec-Fetch-Site": "cross-site",
+                },
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as rejected:
+                urlopen(cross_site, timeout=3)
+            self.assertEqual(rejected.exception.code, 403)
+            rejected.exception.close()
+
+            non_json = Request(
+                address + "/api/engine/stop",
+                data=b"{}",
+                headers={
+                    "Content-Type": "text/plain",
+                    "Origin": address,
+                },
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as rejected:
+                urlopen(non_json, timeout=3)
+            self.assertEqual(rejected.exception.code, 400)
+            self.assertIn(
+                "require application/json",
+                rejected.exception.read().decode("utf-8"),
+            )
+            rejected.exception.close()
+        finally:
+            server.shutdown()
+            ThreadingHTTPServer.server_close(server)
+            thread.join(timeout=3)
 
     def test_analyze_http_api_starts_and_reports_virtual_batch(self) -> None:
         job_id = self.application.memory.enqueue_analysis_job(

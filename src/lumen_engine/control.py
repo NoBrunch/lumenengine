@@ -8466,6 +8466,12 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if not self._same_origin_browser_request():
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "cross-site console commands are not allowed"},
+            )
+            return
         try:
             payload = self._read_json()
             app = self.server.application
@@ -8579,10 +8585,39 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("request is too large")
         if length == 0:
             return {}
+        content_type = self.headers.get("Content-Type", "").partition(";")[0]
+        if content_type.strip().casefold() != "application/json":
+            raise ValueError("console commands require application/json")
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("request body must be a JSON object")
         return payload
+
+    def _same_origin_browser_request(self) -> bool:
+        if self.headers.get("Sec-Fetch-Site", "").casefold() == "cross-site":
+            return False
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        parsed = urlparse(origin)
+        host = self.headers.get("Host", "").casefold()
+        return (
+            parsed.scheme.casefold() in {"http", "https"}
+            and parsed.netloc.casefold() == host
+        )
+
+    def _security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        )
+        self.send_header(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=()",
+        )
 
     def _serve_static(self, path: str) -> None:
         route = "/index.html" if path in {"/", "/remote"} else path
@@ -8608,7 +8643,7 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", asset[1])
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        self._security_headers()
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -8624,6 +8659,7 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         try:
             self.wfile.write(body)
