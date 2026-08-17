@@ -283,6 +283,8 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn("function beginCompositeBoundaryDrag", script)
         self.assertIn("function splitCompositeStructureAtPlayhead", script)
         self.assertIn("function saveCompositeStructureReview", script)
+        self.assertIn("function currentCompositeReviewSourceIds", script)
+        self.assertIn("currentSourceTimelineIds", script)
         self.assertIn("complete_review_timeline_ids", script)
         self.assertIn("composite_review_supported", script)
         self.assertIn("Restart Lumen to enable saving", script)

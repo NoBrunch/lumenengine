@@ -7920,6 +7920,7 @@ class LumenApplication:
             raise ValueError(
                 "the selected timeline does not belong to the selected recording"
             )
+        source_timeline_ids_to_supersede: list[str] = []
         if source_timeline_ids:
             candidates = {
                 str(item.get("id")): item
@@ -7927,23 +7928,43 @@ class LumenApplication:
                     recording_id
                 )
             }
+            base_source_timeline_ids = {
+                str(value)
+                for value in (base.get("metadata") or {}).get(
+                    "source_timeline_ids", []
+                )
+            }
             for source_id in source_timeline_ids:
                 candidate = candidates.get(source_id)
                 teacher_name = str(
                     (candidate or {}).get("teacher", {}).get("name") or ""
                 ).casefold()
+                review_status = str(
+                    ((candidate or {}).get("review") or {}).get("status")
+                    or "unreviewed"
+                )
+                is_completed_source_of_base = (
+                    review_status == "superseded"
+                    and str(base.get("provenance")) == "operator_correction"
+                    and source_id in base_source_timeline_ids
+                )
                 if (
                     candidate is None
                     or teacher_name not in {"edmformer", "songformer"}
                     or not candidate.get("review_eligible", False)
-                    or str(
-                        (candidate.get("review") or {}).get("status")
-                        or "unreviewed"
-                    ) in {"rejected", "superseded"}
+                    or review_status == "rejected"
+                    or (
+                        review_status == "superseded"
+                        and not is_completed_source_of_base
+                    )
                 ):
                     raise ValueError(
-                        "composite review sources must be eligible EDMFormer or SongFormer timelines"
+                        "composite review sources must be current eligible "
+                        "EDMFormer or SongFormer timelines, or completed sources "
+                        "of the selected composite"
                     )
+                if review_status != "superseded":
+                    source_timeline_ids_to_supersede.append(source_id)
 
         timeline_id = self.memory.save_structure_correction(
             base_timeline_id=base_timeline_id,
@@ -7954,9 +7975,9 @@ class LumenApplication:
             source_timeline_ids=source_timeline_ids,
             composite_review=composite_review,
         )
-        if source_timeline_ids:
+        if source_timeline_ids_to_supersede:
             self.memory.supersede_structure_timelines(
-                timeline_ids=source_timeline_ids,
+                timeline_ids=source_timeline_ids_to_supersede,
                 correction_timeline_id=timeline_id,
                 participant_id=participant_id,
                 participant_name=participant_name,

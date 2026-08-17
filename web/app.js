@@ -1657,6 +1657,18 @@ function ensureCompositeStructureDraft(library = {}) {
   return app.structureReviewDraft;
 }
 
+function currentCompositeReviewSourceIds(draft = {}, library = {}) {
+  const requested = new Set(draft.sourceTimelineIds || []);
+  return (library.structure_timelines || []).filter((timeline) => (
+    requested.has(timeline.id)
+    && ["edmformer", "songformer"].includes(structureTeacherKind(timeline))
+    && timeline.review_eligible !== false
+    && !["rejected", "superseded"].includes(
+      timeline.review?.status || "unreviewed",
+    )
+  )).map((timeline) => timeline.id);
+}
+
 function confirmDiscardCompositeChanges() {
   return !app.structureReviewDraft?.dirty || window.confirm(
     "Discard the unsaved combined timeline changes for this song?",
@@ -2018,12 +2030,16 @@ async function saveCompositeStructureReview() {
     `${missingCore} function/energy ${missingCore === 1 ? "cell is" : "cells are"} still unlabeled. Save the combined review with those gaps?`,
   )) return;
   const reviewedRecordingId = draft.recordingId;
+  const currentSourceTimelineIds = currentCompositeReviewSourceIds(
+    draft,
+    app.structureLibrary || {},
+  );
   try {
     await api("/api/structure/correct", { method: "POST", body: {
       base_timeline_id: draft.baseTimelineId,
       recording_id: reviewedRecordingId,
       composite_review: true,
-      complete_review_timeline_ids: draft.sourceTimelineIds,
+      complete_review_timeline_ids: currentSourceTimelineIds,
       segments: draft.segments.map((segment, index) => ({
         segment_index: index,
         start_ms: Math.round(segment.start_ms),

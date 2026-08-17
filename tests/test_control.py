@@ -3510,6 +3510,51 @@ class ControlApplicationTests(unittest.TestCase):
                 "status": "unreviewed",
             })
 
+        # A browser can retain its composite draft while the first save marks
+        # the raw teachers superseded. Retrying an edit against that saved
+        # composite is valid lineage and must not fail or append duplicate
+        # superseded reviews for the already-completed source timelines.
+        revised = self.application.correct_structure_timeline({
+            "base_timeline_id": saved["timeline_id"],
+            "recording_id": recording_id,
+            "composite_review": True,
+            "complete_review_timeline_ids": [edm_timeline, song_timeline],
+            "participant_id": "console",
+            "segments": [
+                {
+                    "segment_index": 0,
+                    "start_ms": 0,
+                    "end_ms": 30_000,
+                    "functional_label": "verse",
+                    "energy_label": "groove",
+                    "content_label": "vocal",
+                },
+                {
+                    "segment_index": 1,
+                    "start_ms": 30_000,
+                    "end_ms": 60_000,
+                    "functional_label": "chorus",
+                    "energy_label": "drop",
+                    "content_label": "vocal",
+                },
+            ],
+        })
+        revised_timeline = self.application.memory.structure_timeline(
+            revised["timeline_id"]
+        )
+        assert revised_timeline is not None
+        self.assertEqual(
+            revised_timeline["metadata"]["source_timeline_ids"],
+            [edm_timeline, song_timeline],
+        )
+        for timeline_id in (edm_timeline, song_timeline):
+            review = self.application.memory.structure_timeline_review(
+                timeline_id
+            )
+            assert review is not None
+            self.assertIn(saved["timeline_id"], str(review["note"]))
+            self.assertNotIn(revised["timeline_id"], str(review["note"]))
+
     def test_song_sequence_round_trips_canonical_cue_fields(self) -> None:
         media = MediaIdentity(
             provider="spotify",
