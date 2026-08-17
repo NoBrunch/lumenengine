@@ -3510,12 +3510,12 @@ class ControlApplicationTests(unittest.TestCase):
                 "status": "unreviewed",
             })
 
-        # A browser can retain its composite draft while the first save marks
-        # the raw teachers superseded. Retrying an edit against that saved
-        # composite is valid lineage and must not fail or append duplicate
-        # superseded reviews for the already-completed source timelines.
+        # A browser can retain both its raw base and source IDs while the first
+        # save marks those teachers superseded. The stale request is rebased
+        # onto the exact composite which completed those sources; it must not
+        # append duplicate superseded reviews.
         revised = self.application.correct_structure_timeline({
-            "base_timeline_id": saved["timeline_id"],
+            "base_timeline_id": edm_timeline,
             "recording_id": recording_id,
             "composite_review": True,
             "complete_review_timeline_ids": [edm_timeline, song_timeline],
@@ -3543,6 +3543,11 @@ class ControlApplicationTests(unittest.TestCase):
             revised["timeline_id"]
         )
         assert revised_timeline is not None
+        self.assertEqual(revised["base_timeline_id"], saved["timeline_id"])
+        self.assertEqual(
+            revised_timeline["metadata"]["corrects_timeline_id"],
+            saved["timeline_id"],
+        )
         self.assertEqual(
             revised_timeline["metadata"]["source_timeline_ids"],
             [edm_timeline, song_timeline],

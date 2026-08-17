@@ -7922,12 +7922,48 @@ class LumenApplication:
             )
         source_timeline_ids_to_supersede: list[str] = []
         if source_timeline_ids:
+            recording_timelines = (
+                self.memory.structure_timelines_for_recording(recording_id)
+            )
             candidates = {
-                str(item.get("id")): item
-                for item in self.memory.structure_timelines_for_recording(
-                    recording_id
-                )
+                str(item.get("id")): item for item in recording_timelines
             }
+            requested_candidates = [
+                candidates.get(source_id) for source_id in source_timeline_ids
+            ]
+            completed_source_ids = {
+                source_id
+                for source_id, candidate in zip(
+                    source_timeline_ids, requested_candidates, strict=True
+                )
+                if str(
+                    ((candidate or {}).get("review") or {}).get("status")
+                    or "unreviewed"
+                ) == "superseded"
+            }
+            if (
+                completed_source_ids
+                and str(base.get("provenance")) != "operator_correction"
+            ):
+                completed_composite = next((
+                    timeline
+                    for timeline in recording_timelines
+                    if str(timeline.get("provenance")) == "operator_correction"
+                    and str(
+                        (timeline.get("metadata") or {}).get(
+                            "corrects_timeline_id"
+                        ) or ""
+                    ) == base_timeline_id
+                    and completed_source_ids.issubset({
+                        str(value)
+                        for value in (timeline.get("metadata") or {}).get(
+                            "source_timeline_ids", []
+                        )
+                    })
+                ), None)
+                if completed_composite is not None:
+                    base = completed_composite
+                    base_timeline_id = str(completed_composite["id"])
             base_source_timeline_ids = {
                 str(value)
                 for value in (base.get("metadata") or {}).get(
