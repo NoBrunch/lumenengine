@@ -16,7 +16,7 @@ MFA.
 1. Register the chosen domain and add it as an active Cloudflare zone.
 2. In **Zero Trust → Access controls → Applications**, create a
    **Self-hosted and private** application with a public hostname such as
-   `console.lumen-engine.com`.
+   `console.lumenengine.us`.
 3. Add one **Allow** policy containing the owner's exact email address. Never
    use `Everyone`, an unrestricted email domain, or One-time PIN alone.
 4. Require the chosen identity provider and MFA. Use a finite session duration
@@ -44,7 +44,7 @@ console.
 ```bash
 cd /home/the-system/Desktop/lumenengine
 ./scripts/lumen-web-access install-client --apply
-./scripts/lumen-web-access stage console.lumen-engine.com
+./scripts/lumen-web-access stage console.lumenengine.us
 ./scripts/lumen-web-access activate --apply
 ```
 
