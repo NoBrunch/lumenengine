@@ -48,14 +48,17 @@ cd /home/the-system/Desktop/lumenengine
 ./scripts/lumen-web-access activate --apply
 ```
 
-`activate` privately prompts for only the tunnel token. It then moves Lumen
-from the LAN-wide listener to `127.0.0.1:4042`, enables restartable user
+`activate` privately prompts for only the tunnel token. It keeps Lumen
+available on the Lumen PC and trusted local network, enables restartable user
 services for Lumen and `cloudflared`, and leaves the normal desktop shortcut
-working.
+working. The tunnel still reaches Lumen through `127.0.0.1:4042`; direct LAN
+clients use the Lumen PC's LAN address and port 4042.
 
-The current appliance uses a logged-in GNOME user service and does not enable
-systemd lingering. Therefore the Lumen account must remain logged in after a
-reboot, as it does for normal garage operation.
+Direct LAN access does not pass through Cloudflare Access. Keep the home
+network trusted, and never forward TCP port 4042 on the router.
+
+The current appliance has systemd user lingering enabled, so the Lumen web
+service and tunnel start during boot without requiring a GNOME login.
 
 ## 4. Prove the boundary
 
@@ -64,11 +67,11 @@ reboot, as it does for normal garage operation.
 ./scripts/lumen-web-access verify
 ```
 
-Verification fails unless Lumen listens only on loopback, both services are
-running, the local API responds, and an unauthenticated HTTPS request is sent
-to the Cloudflare Access login flow. Then open the hostname in a private browser
-window, confirm that login is required, authenticate as the owner, and exercise
-the console in Monitor mode before using physical output.
+Verification fails unless Lumen listens for direct local-network access, both
+services are running, the local API responds, and an unauthenticated HTTPS
+request is sent to the Cloudflare Access login flow. Then open the hostname in
+a private browser window, confirm that login is required, authenticate as the
+owner, and exercise the console in Monitor mode before using physical output.
 
 If the gate is ever questionable, stop public access immediately:
 

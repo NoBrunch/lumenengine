@@ -23,10 +23,13 @@ class LumenWebAccessDeploymentTests(unittest.TestCase):
         self.assertIn("CLOUDFLARED_SHA256=", script)
         self.assertIn("--token-file", script)
         self.assertIn("read -r -s", script)
-        self.assertIn("--host 127.0.0.1", script)
+        self.assertIn("--host 0.0.0.0", script)
         self.assertIn("ProtectSystem=strict", script)
         self.assertIn("Restart=always", script)
         self.assertIn("cloudflareaccess\\.com", script)
+        self.assertIn("direct local-network access", script)
+        self.assertIn("write_stdin_file 0600", script)
+        self.assertNotIn("install -m 0600 /dev/stdin", script)
         self.assertNotIn("--token ey", script)
 
     def test_status_is_read_only_before_configuration(self) -> None:

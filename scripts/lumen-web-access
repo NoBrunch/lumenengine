@@ -35,6 +35,19 @@ require_apply() {
   fi
 }
 
+write_stdin_file() {
+  local mode="$1"
+  local target="$2"
+  local pending
+  pending="$(mktemp "${target}.pending.XXXXXX")"
+  chmod "${mode}" "${pending}"
+  if ! tee "${pending}" >/dev/null; then
+    rm -f -- "${pending}"
+    return 1
+  fi
+  mv -f -- "${pending}" "${target}"
+}
+
 validate_hostname() {
   local hostname="$1"
   if [[ ! "${hostname}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] ||
@@ -64,16 +77,16 @@ install_client() {
 write_units() {
   install -d -m 0700 "${CONFIG_ROOT}"
   install -d -m 0755 "${USER_UNIT_ROOT}"
-  install -m 0644 /dev/stdin "${ENGINE_UNIT}" <<EOF
+  write_stdin_file 0644 "${ENGINE_UNIT}" <<EOF
 [Unit]
-Description=Lumen Engine loopback-only web origin
+Description=Lumen Engine local-network web origin
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=${PROJECT_DIR}
 Environment=PYTHONPATH=${PROJECT_DIR}/src
-ExecStart=${PROJECT_DIR}/.venv/bin/python -m lumen_engine ui --host 127.0.0.1 --port 4042
+ExecStart=${PROJECT_DIR}/.venv/bin/python -m lumen_engine ui --host 0.0.0.0 --port 4042
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=45
@@ -84,7 +97,7 @@ PrivateTmp=true
 [Install]
 WantedBy=default.target
 EOF
-  install -m 0644 /dev/stdin "${TUNNEL_UNIT}" <<EOF
+  write_stdin_file 0644 "${TUNNEL_UNIT}" <<EOF
 [Unit]
 Description=Authenticated Cloudflare tunnel for the complete Lumen console
 Requires=lumen-engine-web.service
@@ -117,7 +130,7 @@ stage() {
   fi
   validate_hostname "${hostname}"
   install -d -m 0700 "${CONFIG_ROOT}"
-  printf '%s\n' "${hostname}" | install -m 0600 /dev/stdin "${HOSTNAME_FILE}"
+  printf '%s\n' "${hostname}" | write_stdin_file 0600 "${HOSTNAME_FILE}"
   write_units
   printf 'Staged for https://%s/; no listener or tunnel was changed.\n' "${hostname}"
 }
@@ -140,7 +153,7 @@ activate() {
     exit 2
   fi
   printf '%s\n' "${tunnel_token}" |
-    install -m 0600 /dev/stdin "${TOKEN_FILE}"
+    write_stdin_file 0600 "${TOKEN_FILE}"
   unset tunnel_token
 
   curl --silent --fail --max-time 2 \
@@ -196,8 +209,8 @@ verify() {
   systemctl --user is-active --quiet lumen-web-tunnel.service
   curl --silent --fail --max-time 2 \
     http://127.0.0.1:4042/api/bootstrap >/dev/null
-  if ss -ltn | grep -qE '(^|[[:space:]])(0\.0\.0\.0|\[::\]):4042[[:space:]]'; then
-    printf 'FAILED: Lumen is still reachable on a wildcard interface.\n' >&2
+  if ! ss -ltn | grep -qE '(^|[[:space:]])(0\.0\.0\.0|\[::\]):4042[[:space:]]'; then
+    printf 'FAILED: Lumen is not listening for direct local-network access.\n' >&2
     exit 1
   fi
 
@@ -214,13 +227,13 @@ verify() {
     printf 'HTTP status was %s. The full console must remain private.\n' "${response_code}" >&2
     exit 1
   fi
-  printf 'VERIFIED: loopback origin, active tunnel, and Access login redirect for https://%s/\n' "${hostname}"
+  printf 'VERIFIED: local-network origin, active tunnel, and Access login redirect for https://%s/\n' "${hostname}"
 }
 
 disable() {
   require_apply "${1:-}"
   systemctl --user disable --now lumen-web-tunnel.service
-  printf 'The public tunnel is disabled. Lumen remains available locally at http://127.0.0.1:4042/.\n'
+  printf 'The public tunnel is disabled. Lumen remains available on the Lumen PC and local network.\n'
 }
 
 case "${1:-}" in
