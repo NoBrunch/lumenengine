@@ -9,6 +9,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class OperatorInterfaceContractTests(unittest.TestCase):
+    def test_timing_lab_is_a_separate_safe_workspace(self) -> None:
+        html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+        script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-page="timing"', html)
+        self.assertIn('data-nav="timing"', html)
+        self.assertIn('id="timing-lab-start"', html)
+        self.assertIn('id="timing-output"', html)
+        self.assertIn("FORCED TO DMX 0", html)
+        self.assertIn('api("/api/timing-lab"', script)
+        self.assertIn('body: { mode: "timing_lab" }', script)
+        self.assertIn('if (name === "timing") renderTimingLab', script)
+
     def test_phone_remote_has_no_spotify_playback_controls(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
@@ -469,7 +482,7 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn(".remote-link-path {", stylesheet)
         self.assertIn('setText("remote-link-state", statusLabel)', script)
         self.assertNotIn("app.remote && app.pollCount % 100 === 0", script)
-        self.assertIn('if (/^[1-8]$/.test(event.key))', script)
+        self.assertIn('if (/^[1-9]$/.test(event.key))', script)
         self.assertIn('"music", "link", "system"', script)
         self.assertIn("workspacePages.includes(requestedWorkspacePage)", script)
         self.assertIn(

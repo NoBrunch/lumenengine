@@ -42,6 +42,7 @@
       <div class="desktop-menubar">
         <button data-nav="performance">Session</button>
         <button data-nav="rehearsal">Rehearsal</button>
+        <button data-nav="timing">Timing Lab</button>
         <button data-nav="rig">Rig</button>
         <button data-nav="audio">Analysis</button>
         <button data-nav="memory">Memory</button>
@@ -144,6 +145,11 @@
             <span class="nav-glyph system-glyph"></span>
             <span><b>System</b><small>Hardware and service</small></span>
             <kbd>8</kbd>
+          </button>
+          <button class="nav-item" data-nav="timing">
+            <span class="nav-glyph timing-glyph"></span>
+            <span><b>Timing Lab</b><small>Isolated beat experiments</small></span>
+            <kbd>9</kbd>
           </button>
 
           <div class="nav-section-label lower">Active session</div>
@@ -514,6 +520,83 @@
               <section class="panel rehearsal-guide-panel">
                 <div class="panel-titlebar"><h3>Rehearsal workflow</h3></div>
                 <ol><li>Select Preview only and learn each motion.</li><li>Switch to Live rig and check its physical range.</li><li>Adjust tempo, size, scope, and intensity.</li><li>While a song plays later, return here and choose Use this routine here.</li></ol>
+              </section>
+            </div>
+          </section>
+
+          <section class="workspace-page" data-page="timing">
+            <div class="page-heading timing-page-heading">
+              <div>
+                <span class="eyebrow">Isolated experimental workspace</span>
+                <h2>Timing Lab</h2>
+              </div>
+              <div class="heading-actions">
+                <span id="timing-lab-state" class="panel-badge">STANDBY</span>
+                <button id="timing-lab-stop" class="compact-button">Stop Timing Lab</button>
+              </div>
+            </div>
+            <div class="timing-safety-banner">
+              <strong>Separate from the show engine</strong>
+              <span>This page does not run Live choreography, student models, song memory, Spotify timing, feedback learning, or training capture. Preview is the default and cannot touch the USB adapter.</span>
+            </div>
+            <div class="timing-lab-grid">
+              <section class="panel timing-control-panel">
+                <div class="panel-titlebar"><h3>Experiment controls</h3><span id="timing-output-badge" class="panel-badge">VIRTUAL PREVIEW</span></div>
+                <p class="control-help">Movement is intentionally free-running. Only the selected illumination pulse for each lane follows musical evidence. Stop Timing Lab before changing Preview/Live rig.</p>
+                <div class="timing-controls">
+                  <label><span>Output</span><select id="timing-output"><option value="virtual">Preview only</option><option value="live">Live rig</option></select></label>
+                  <label><span>Color change phrase</span><select id="timing-color-bars"><option value="2">Every 2 bars</option><option value="4" selected>Every 4 bars</option><option value="6">Every 6 bars</option><option value="8">Every 8 bars</option><option value="16">Every 16 bars</option></select></label>
+                  <label><span>Movers illumination</span><select id="timing-movers-source"><option value="bass_clock">Retained bass clock</option><option value="broadband_onset">Broad musical transient</option><option value="off">No pulse</option></select></label>
+                  <label><span>Center illumination</span><select id="timing-center-source"><option value="broadband_onset">Broad musical transient</option><option value="bass_clock">Retained bass clock</option><option value="off">No pulse</option></select></label>
+                  <label><span>Resting light <output id="timing-base-value">4%</output></span><input id="timing-base" type="range" min="0" max="35" step="1" value="4"></label>
+                  <label><span>Flash level <output id="timing-flash-value">92%</output></span><input id="timing-flash" type="range" min="5" max="100" step="1" value="92"></label>
+                  <label><span>Dimmer pulse width <output id="timing-pulse-value">105 ms</output></span><input id="timing-pulse" type="range" min="45" max="250" step="5" value="105"></label>
+                  <label><span>Movers motion cycle <output id="timing-movers-period-value">9.0 s</output></span><input id="timing-movers-period" type="range" min="4" max="30" step="0.5" value="9"></label>
+                  <label><span>Center motion cycle <output id="timing-center-period-value">11.0 s</output></span><input id="timing-center-period" type="range" min="4" max="30" step="0.5" value="11"></label>
+                </div>
+                <button id="timing-lab-start" class="timing-start">Start isolated Timing Lab</button>
+                <div class="timing-invariant"><b>Internal strobe channels</b><strong>FORCED TO DMX 0</strong><span>Individual beat flashes are master-dimmer pulses. Hardware strobe remains reserved for later sustained drop texture.</span></div>
+              </section>
+
+              <section class="panel timing-clock-panel">
+                <div class="panel-titlebar"><h3>Physical audio clock</h3><span id="timing-clock-state" class="panel-badge">ACQUIRING</span></div>
+                <div class="timing-clock-readout">
+                  <div class="timing-bpm"><b id="timing-bpm">—</b><span>BPM RETAINED CLOCK</span></div>
+                  <div><span>Confidence</span><b id="timing-confidence">0%</b></div>
+                  <div><span>Current candidate</span><b id="timing-candidate">—</b></div>
+                  <div><span>Rejected family</span><b id="timing-rejected">—</b></div>
+                </div>
+                <div class="timing-phase-track"><i id="timing-phase-fill"></i><span id="timing-beat-lamp"></span></div>
+                <p id="timing-clock-detail" class="control-help">Waiting for physical line-in PCM. Actual bass transients establish phase; prediction is silenced when bass activity disappears.</p>
+              </section>
+
+              <section class="panel timing-evidence-panel">
+                <div class="panel-titlebar"><h3>Detector evidence</h3><span class="panel-note">No metadata timing</span></div>
+                <div class="timing-evidence-grid">
+                  <div><span>Line signal</span><b id="timing-signal">— dBFS</b><small>Physical PCM</small></div>
+                  <div><span>Bass onset</span><b id="timing-bass-onset">0%</b><small id="timing-bass-threshold">Threshold 0%</small></div>
+                  <div><span>Broad onset</span><b id="timing-broad-onset">0%</b><small id="timing-broad-threshold">Threshold 0%</small></div>
+                  <div><span>Sample age</span><b id="timing-sample-age">— ms</b><small id="timing-processing">Processing — ms</small></div>
+                </div>
+              </section>
+
+              <section class="panel timing-lanes-panel">
+                <div class="panel-titlebar"><h3>Independent fixture lanes</h3><span class="panel-note">Movement is not beat-locked</span></div>
+                <div class="timing-lanes">
+                  <article id="timing-movers-lane"><header><b>Movers</b><span id="timing-movers-flash">RESTING</span></header><strong id="timing-movers-role">Retained bass clock</strong><p id="timing-movers-detail">Independent 9.0 s motion · 4% dimmer</p></article>
+                  <article id="timing-center-lane"><header><b>Center effect</b><span id="timing-center-flash">RESTING</span></header><strong id="timing-center-role">Broad musical transient</strong><p id="timing-center-detail">Independent 11.0 s motion · 4% master dimmer</p></article>
+                </div>
+              </section>
+
+              <section class="panel timing-acceptance-panel">
+                <div class="panel-titlebar"><h3>Acceptance check</h3><span class="panel-note">Before promotion to Live</span></div>
+                <ol>
+                  <li>Movers flash on audible bass kicks without using the fixture strobe channel.</li>
+                  <li>The established tempo survives a breakdown instead of jumping to half/double time.</li>
+                  <li>Predicted flashes stop when bass activity stops and re-anchor when the kick returns.</li>
+                  <li>Center and movers remain visibly independent; continuous motion does not snap to every beat.</li>
+                  <li>Stopping Timing Lab blackouts and releases the adapter before any other mode starts.</li>
+                </ol>
               </section>
             </div>
           </section>

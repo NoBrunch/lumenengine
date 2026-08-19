@@ -1,6 +1,6 @@
 "use strict";
 
-const workspacePages = ["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system"];
+const workspacePages = ["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system", "timing"];
 const requestedWorkspacePage = new URLSearchParams(window.location.search).get("page");
 const TOUCH_RANGE_GAIN = 0.65;
 const TOUCH_RANGE_DIRECTION_THRESHOLD_PX = 10;
@@ -49,6 +49,7 @@ const app = {
   calibrationActive: false,
   calibrationCaptures: {},
   rehearsalTimer: null,
+  timingLabTimer: null,
   strobeTimers: {},
   strobeSettleTimers: {},
   motionTimer: null,
@@ -389,6 +390,7 @@ function setPage(name) {
     renderRehearsal(app.status?.rehearsal || {});
     window.setTimeout(drawMotionPath, 30);
   }
+  if (name === "timing") renderTimingLab(app.status?.timing_lab || {});
   if (name === "audio") {
     renderTrainingDataset(app.status?.training || {}, app.status?.engine || {});
     void refreshResearch();
@@ -746,6 +748,7 @@ function renderBootstrap() {
   renderFixtureList();
   renderFeedbackTargets();
   renderRehearsal(app.status?.rehearsal || {});
+  renderTimingLab(app.status?.timing_lab || {});
   if (!app.selectedFixtureId && fixtures().length) selectFixture(fixtures()[0].id);
   renderSystem(app.system);
   renderOperatorSettings(app.bootstrap.settings || {});
@@ -835,6 +838,144 @@ function renderRehearsal(rehearsal = {}) {
   if ($("rehearsal-stop")) $("rehearsal-stop").disabled = !running;
   renderMotionEditor(rehearsal.motion_editor || {});
   renderGestureMovements(rehearsal);
+}
+
+function timingLabFormValues() {
+  return {
+    output: $("timing-output")?.value || "virtual",
+    movers_source: $("timing-movers-source")?.value || "bass_clock",
+    center_source: $("timing-center-source")?.value || "broadband_onset",
+    base_intensity: Number($("timing-base")?.value || 4) / 100,
+    flash_intensity: Number($("timing-flash")?.value || 92) / 100,
+    pulse_ms: Number($("timing-pulse")?.value || 105),
+    color_bars: Number($("timing-color-bars")?.value || 4),
+    movers_motion_period_s: Number($("timing-movers-period")?.value || 9),
+    center_motion_period_s: Number($("timing-center-period")?.value || 11),
+  };
+}
+
+async function patchTimingLab(values, quiet = false) {
+  try {
+    app.status = await api("/api/timing-lab", { method: "POST", body: values });
+    renderStatus();
+  } catch (error) {
+    if (!quiet) toast("Timing Lab change failed", error.message, "error");
+  }
+}
+
+function queueTimingLab(values) {
+  window.clearTimeout(app.timingLabTimer);
+  app.timingLabTimer = window.setTimeout(
+    () => patchTimingLab(values, true),
+    90,
+  );
+}
+
+async function startTimingLab() {
+  const button = $("timing-lab-start");
+  const task = beginOperatorTask(
+    "Starting isolated Timing Lab",
+    "Opening physical line-in with the experimental detector; Live and learning remain disconnected.",
+    button,
+  );
+  try {
+    app.status = await api("/api/timing-lab", {
+      method: "POST",
+      body: timingLabFormValues(),
+    });
+    app.status = await api("/api/engine/start", {
+      method: "POST",
+      body: { mode: "timing_lab" },
+    });
+    renderStatus();
+    toast(
+      "Timing Lab starting",
+      app.status.timing_lab.output === "live"
+        ? "The isolated exercise now owns the physical rig. Internal strobe remains DMX 0."
+        : "Virtual DMX is active; the physical rig is untouched.",
+      "success",
+    );
+  } catch (error) {
+    toast("Timing Lab could not start", error.message, "error");
+  } finally {
+    finishOperatorTask(task);
+  }
+}
+
+function renderTimingLab(timing = {}) {
+  const analysis = timing.analysis || {};
+  const lanes = timing.lanes || {};
+  const running = Boolean(
+    app.status?.engine?.running
+    && app.status?.engine?.mode === "timing_lab"
+  );
+  const values = {
+    "timing-output": timing.output || "virtual",
+    "timing-movers-source": timing.movers_source || "bass_clock",
+    "timing-center-source": timing.center_source || "broadband_onset",
+    "timing-base": Number(timing.base_intensity ?? 0.04) * 100,
+    "timing-flash": Number(timing.flash_intensity ?? 0.92) * 100,
+    "timing-pulse": Number(timing.pulse_ms ?? 105),
+    "timing-color-bars": Number(timing.color_bars ?? 4),
+    "timing-movers-period": Number(timing.movers_motion_period_s ?? 9),
+    "timing-center-period": Number(timing.center_motion_period_s ?? 11),
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const element = $(id);
+    if (element && document.activeElement !== element) element.value = value;
+  }
+  setText("timing-lab-state", running ? "RUNNING" : "STANDBY");
+  setText("timing-output-badge", timing.output === "live" ? "LIVE RIG" : "VIRTUAL PREVIEW");
+  setText("timing-base-value", percent(timing.base_intensity ?? 0.04));
+  setText("timing-flash-value", percent(timing.flash_intensity ?? 0.92));
+  setText("timing-pulse-value", `${Number(timing.pulse_ms ?? 105).toFixed(0)} ms`);
+  setText("timing-movers-period-value", `${Number(timing.movers_motion_period_s ?? 9).toFixed(1)} s`);
+  setText("timing-center-period-value", `${Number(timing.center_motion_period_s ?? 11).toFixed(1)} s`);
+
+  const clockState = analysis.clock_state || (running ? "acquiring" : "standby");
+  setText("timing-clock-state", clockState.toUpperCase());
+  setText("timing-bpm", analysis.bpm ? Number(analysis.bpm).toFixed(1) : "—");
+  setText("timing-confidence", percent(analysis.confidence || 0));
+  setText("timing-candidate", analysis.candidate_bpm ? Number(analysis.candidate_bpm).toFixed(1) : "—");
+  setText("timing-rejected", analysis.rejected_candidate_bpm ? Number(analysis.rejected_candidate_bpm).toFixed(1) : "—");
+  setWidth("timing-phase-fill", analysis.beat_phase || 0);
+  $("timing-beat-lamp")?.classList.toggle("active", Boolean(analysis.beat_event));
+  setText(
+    "timing-clock-detail",
+    clockState === "held"
+      ? `Clock retained at ${analysis.bpm ? Number(analysis.bpm).toFixed(1) : "—"} BPM; predicted flashes are gated because no recent bass transient is present.`
+      : clockState === "locked"
+        ? `${analysis.predicted_beat ? "Predicted grid beat" : "Physical bass transient"} · beat ${Number(analysis.beat_count || 0)} · last bass ${analysis.last_bass_age_s == null ? "—" : `${Number(analysis.last_bass_age_s).toFixed(2)} s`} ago.`
+        : "Collecting bass-only evidence. Physical transients can flash immediately while the retained tempo family is acquired.",
+  );
+  setText("timing-signal", `${Number(analysis.signal_dbfs ?? -120).toFixed(1)} dBFS`);
+  setText("timing-bass-onset", percent(analysis.bass_onset || 0));
+  setText("timing-bass-threshold", `Threshold ${percent(analysis.bass_threshold || 0)}`);
+  setText("timing-broad-onset", percent(analysis.broadband_onset || 0));
+  setText("timing-broad-threshold", `Threshold ${percent(analysis.broadband_threshold || 0)}`);
+  setText("timing-sample-age", `${Number(timing.sample_age_ms || 0).toFixed(1)} ms`);
+  setText("timing-processing", `Processing ${Number(timing.processing_ms || 0).toFixed(1)} ms`);
+
+  const sourceLabel = (source) => ({
+    bass_clock: "Retained bass clock",
+    broadband_onset: "Broad musical transient",
+    off: "No illumination pulse",
+  }[source] || label(source || "off"));
+  for (const lane of ["movers", "center"]) {
+    const state = lanes[lane] || {};
+    const configuredSource = timing[`${lane}_source`] || (lane === "movers" ? "bass_clock" : "broadband_onset");
+    const flash = Boolean(state.flash_active);
+    $(`timing-${lane}-lane`)?.classList.toggle("flash", flash);
+    setText(`timing-${lane}-flash`, flash ? "DIMMER PULSE" : "RESTING");
+    setText(`timing-${lane}-role`, sourceLabel(state.pulse_source || configuredSource));
+    setText(
+      `timing-${lane}-detail`,
+      `Independent ${Number(state.motion_period_s || timing[`${lane}_motion_period_s`] || (lane === "movers" ? 9 : 11)).toFixed(1)} s motion · ${percent(state.brightness ?? timing.base_intensity ?? 0.04)} ${lane === "center" ? "master " : ""}dimmer`,
+    );
+  }
+  if ($("timing-output")) $("timing-output").disabled = running;
+  if ($("timing-lab-start")) $("timing-lab-start").disabled = running;
+  if ($("timing-lab-stop")) $("timing-lab-stop").disabled = !running;
 }
 
 function renderGestureMovements(rehearsal = app.status?.rehearsal || {}) {
@@ -2560,6 +2701,7 @@ function renderStatus() {
   renderControls(controls);
   if (app.page === "rehearsal") renderRehearsal(status.rehearsal || {});
   if (app.page === "rehearsal") renderLiveTeachingReference(status);
+  if (app.page === "timing") renderTimingLab(status.timing_lab || {});
   renderMedia(status.media, observation);
   renderExpression(
     decision,
@@ -5662,6 +5804,33 @@ function installHandlers() {
       window.setTimeout(startRehearsal, 250);
     } else startRehearsal();
   });
+  $("timing-lab-start")?.addEventListener("click", startTimingLab);
+  $("timing-lab-stop")?.addEventListener("click", stopEngine);
+  [
+    "timing-output",
+    "timing-movers-source",
+    "timing-center-source",
+    "timing-color-bars",
+  ].forEach((id) => {
+    $(id)?.addEventListener("change", () => patchTimingLab(timingLabFormValues()));
+  });
+  [
+    "timing-base",
+    "timing-flash",
+    "timing-pulse",
+    "timing-movers-period",
+    "timing-center-period",
+  ].forEach((id) => {
+    $(id)?.addEventListener("input", () => {
+      const values = timingLabFormValues();
+      setText("timing-base-value", percent(values.base_intensity));
+      setText("timing-flash-value", percent(values.flash_intensity));
+      setText("timing-pulse-value", `${values.pulse_ms.toFixed(0)} ms`);
+      setText("timing-movers-period-value", `${values.movers_motion_period_s.toFixed(1)} s`);
+      setText("timing-center-period-value", `${values.center_motion_period_s.toFixed(1)} s`);
+      queueTimingLab(values);
+    });
+  });
   ["rehearsal-output", "rehearsal-scope", "rehearsal-palette", "rehearsal-isolate"].forEach((id) => {
     $(id)?.addEventListener("change", () => patchRehearsal(rehearsalFormValues()));
   });
@@ -6273,8 +6442,8 @@ async function requestFreshGesture() {
 
 function handleHotkey(event) {
   if (["INPUT", "TEXTAREA", "SELECT"].includes(event.target?.tagName) || event.target?.isContentEditable) return;
-  if (/^[1-8]$/.test(event.key)) {
-    setPage(["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system"][Number(event.key) - 1]);
+  if (/^[1-9]$/.test(event.key)) {
+    setPage(["performance", "rehearsal", "rig", "audio", "memory", "music", "link", "system", "timing"][Number(event.key) - 1]);
     event.preventDefault();
   } else if (event.key.toLowerCase() === "b") {
     toggleBlackout();

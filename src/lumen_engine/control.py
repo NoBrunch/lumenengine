@@ -120,6 +120,11 @@ from lumen_engine.training import (
     export_research_session_index,
     export_training_dataset,
 )
+from lumen_engine.timing_lab import (
+    TimingLabAnalyzer,
+    TimingLabControls,
+    TimingLabRuntime,
+)
 from lumen_engine.usb_dmx import OpenDmxUsbOutput, describe_open_dmx_environment
 
 
@@ -514,6 +519,13 @@ class LumenApplication:
         self._runtime: PerformanceRuntime | None = None
         self.controls = OperatorControls()
         self.rehearsal = RehearsalControls()
+        self.timing_lab = TimingLabControls()
+        self._timing_lab_runtime: TimingLabRuntime | None = None
+        self._timing_lab_diagnostics: dict[str, Any] = {
+            "state": "standby",
+            "invariants": TimingLabRuntime.invariants(),
+            "lanes": {},
+        }
         # A raw channel override belongs only to this running process. The
         # durable part is the contextual feedback example recorded after the
         # operator settles on a value, not an output command replayed at boot.
@@ -2585,8 +2597,12 @@ class LumenApplication:
 
     def start(self, mode: str) -> dict[str, Any]:
         normalized = mode.strip().lower()
-        if normalized not in {"monitor", "live", "demo", "rehearsal"}:
-            raise ValueError("mode must be monitor, live, demo, or rehearsal")
+        if normalized not in {
+            "monitor", "live", "demo", "rehearsal", "timing_lab",
+        }:
+            raise ValueError(
+                "mode must be monitor, live, demo, rehearsal, or timing_lab"
+            )
         # A CLI research worker is not represented by this application's
         # thread object. Recover dead leases, then honor any live database
         # lease so a second heavy model cannot compete with Live/DMX timing.
@@ -2634,6 +2650,12 @@ class LumenApplication:
             self._session_id = f"{int(time.time() * 1000)}:{normalized}"
             self._last_trace_timestamp = None
             self._reset_audio_diagnostics()
+            if normalized == "timing_lab":
+                self._timing_lab_diagnostics = {
+                    "state": "starting",
+                    "invariants": TimingLabRuntime.invariants(),
+                    "lanes": {},
+                }
             self._thread = threading.Thread(
                 target=self._run,
                 args=(normalized,),
@@ -2849,27 +2871,41 @@ class LumenApplication:
     def _run(self, mode: str) -> None:
         raw_output: VirtualDMXOutput | OpenDmxUsbOutput
         runtime: PerformanceRuntime | None = None
+        timing_runtime: TimingLabRuntime | None = None
         gated: GatedOutput | None = None
         try:
-            raw_output = (
-                OpenDmxUsbOutput.open()
-                if mode == "live"
+            physical_output = bool(
+                mode == "live"
                 or (
                     mode == "rehearsal"
                     and self.rehearsal.output == "live"
                 )
+                or (
+                    mode == "timing_lab"
+                    and self.timing_lab.output == "live"
+                )
+            )
+            raw_output = (
+                OpenDmxUsbOutput.open()
+                if physical_output
                 else VirtualDMXOutput()
             )
             gated = GatedOutput(raw_output, self.controls)
-            runtime = self._runtime_for_rig(gated)
+            if mode == "timing_lab":
+                timing_runtime = TimingLabRuntime(self.rig, gated)
+            else:
+                runtime = self._runtime_for_rig(gated)
             with self._lock:
                 self._output = gated
                 self._runtime = runtime
+                self._timing_lab_runtime = timing_runtime
                 self.engine_phase = (
                     "listening"
                     if mode == "monitor"
                     else "rehearsing"
                     if mode == "rehearsal"
+                    else "timing_lab"
+                    if mode == "timing_lab"
                     else "performing"
                 )
                 self._add_event(
@@ -2880,11 +2916,17 @@ class LumenApplication:
                         else "Virtual output active"
                     ),
                 )
-            if mode == "demo":
+            if mode == "timing_lab":
+                assert timing_runtime is not None
+                self._run_timing_lab(timing_runtime)
+            elif mode == "demo":
+                assert runtime is not None
                 self._run_demo(runtime)
             elif mode == "rehearsal":
+                assert runtime is not None
                 self._run_rehearsal(runtime)
             else:
+                assert runtime is not None
                 self._run_audio(runtime)
         except Exception as error:
             with self._lock:
@@ -2906,6 +2948,12 @@ class LumenApplication:
             with self._lock:
                 self._output = None
                 self._runtime = None
+                self._timing_lab_runtime = None
+                if mode == "timing_lab":
+                    self._timing_lab_diagnostics = {
+                        **self._timing_lab_diagnostics,
+                        "state": "standby",
+                    }
                 if self.engine_phase != "fault":
                     self.engine_phase = "ready"
                     self.engine_mode = "standby"
@@ -2966,6 +3014,161 @@ class LumenApplication:
                         "memory",
                         state["error"] or "Training capture did not start",
                     )
+        self._run_audio_loop(
+            runtime,
+            capture_config,
+            analyzer,
+            analysis_generation,
+            expected_source_frame,
+            recorder,
+        )
+
+    def _run_timing_lab(self, runtime: TimingLabRuntime) -> None:
+        """Run the isolated bass-clock experiment from physical line PCM.
+
+        This path intentionally does not create a training recorder, query
+        Spotify, resolve song memory, run a student, or enter PerformanceRuntime.
+        """
+
+        self._prepare_dedicated_line_input()
+        capture_config = AudioCaptureConfig(
+            device=self.audio_device,
+            sample_rate=48_000,
+            channels=2,
+            chunk_frames=1_024,
+        )
+        analyzer = TimingLabAnalyzer(
+            capture_config.sample_rate, capture_config.channels
+        )
+        expected_source_frame: int | None = None
+        capture = AlsaLineIn(capture_config)
+        with ContinuouslyDrainedAudio(
+            capture, buffer_seconds=8.0
+        ) as buffered_capture:
+            with self._live_state_lock:
+                self._active_audio_capture = buffered_capture
+            try:
+                for captured in buffered_capture.chunks(
+                    stop_event=self._stop
+                ):
+                    if self._stop.is_set():
+                        break
+                    if (
+                        expected_source_frame is not None
+                        and captured.source_start_frame
+                        != expected_source_frame
+                    ):
+                        # A discontinuous sample clock cannot safely retain
+                        # phase. Recreate only the experimental analyzer.
+                        analyzer = TimingLabAnalyzer(
+                            capture_config.sample_rate,
+                            capture_config.channels,
+                        )
+                    expected_source_frame = (
+                        captured.source_start_frame + captured.frame_count
+                    )
+                    analysis_started = time.perf_counter()
+                    analysis = analyzer.analyze_pcm16(
+                        captured.pcm,
+                        timestamp_s=captured.timestamp_s,
+                    )
+                    with self._lock:
+                        controls = replace(self.timing_lab)
+                    observation, frame = runtime.step(analysis, controls)
+                    processing_ms = (
+                        time.perf_counter() - analysis_started
+                    ) * 1000.0
+                    diagnostics = {
+                        **runtime.snapshot(),
+                        "processing_ms": processing_ms,
+                        # A complete ALSA packet becomes readable after its
+                        # center sample. Measure from read completion plus
+                        # half the packet instead of allowing a briefly
+                        # ahead-running source-clock estimate to display 0 ms.
+                        "sample_age_ms": (
+                            (
+                                max(
+                                    0.0,
+                                    time.monotonic()
+                                    - captured.captured_monotonic_s,
+                                )
+                                + captured.frame_count
+                                / (2.0 * capture_config.sample_rate)
+                            )
+                            * 1000.0
+                        ),
+                        "capture_queue_depth": buffered_capture.queue_depth,
+                    }
+                    self._accept_timing_lab_frame(
+                        observation,
+                        frame,
+                        metrics=analysis.metrics,
+                        audio_bytes=len(captured.pcm),
+                        capture_diagnostics=buffered_capture.diagnostics,
+                        diagnostics=diagnostics,
+                    )
+            finally:
+                with self._live_state_lock:
+                    self._active_audio_capture = None
+
+    def _accept_timing_lab_frame(
+        self,
+        observation: MusicalObservation,
+        frame: RuntimeFrame,
+        *,
+        metrics: AudioInputMetrics,
+        audio_bytes: int,
+        capture_diagnostics: dict[str, Any],
+        diagnostics: dict[str, Any],
+    ) -> None:
+        """Publish diagnostics without entering tracing or learning paths."""
+
+        packet_time = time.monotonic()
+        with self._live_state_lock:
+            if self._audio_capture_started_at is None:
+                self._audio_capture_started_at = packet_time
+            self._audio_last_packet_at = packet_time
+            self._audio_packet_times.append(packet_time)
+            self._audio_packets += 1
+            self._audio_frames += metrics.frame_count
+            self._audio_bytes += audio_bytes
+            self._audio_metrics = metrics
+            self._audio_capture_diagnostics = capture_diagnostics
+            self._audio_queue_depth = int(
+                diagnostics.get("capture_queue_depth", 0)
+            )
+            self._audio_queue_max_depth = max(
+                self._audio_queue_max_depth, self._audio_queue_depth
+            )
+            self._audio_queue_delay_ms = float(
+                diagnostics.get("sample_age_ms", 0.0)
+            )
+            self.observation = observation
+            self.frame = frame
+            self._timing_lab_diagnostics = diagnostics
+            analysis = diagnostics.get("analysis", {})
+            self._tempo_diagnostics = {
+                "source": "timing_lab_retained_bass_clock",
+                "bpm": analysis.get("bpm"),
+                "confidence": analysis.get("confidence", 0.0),
+                "candidate_bpm": analysis.get("candidate_bpm"),
+                "rejected_candidate_bpm": analysis.get(
+                    "rejected_candidate_bpm"
+                ),
+                "state": analysis.get("clock_state", "acquiring"),
+            }
+        with self._lock:
+            self._status_sequence += 1
+
+    def _run_audio_loop(
+        self,
+        runtime: PerformanceRuntime,
+        capture_config: AudioCaptureConfig,
+        analyzer: RealtimeAudioAnalyzer,
+        analysis_generation: int,
+        expected_source_frame: int | None,
+        recorder: TrainingDataRecorder | None,
+    ) -> None:
         control_queue: queue.Queue[_AnalyzedControlFrame] = queue.Queue(
             maxsize=16
         )
@@ -4154,7 +4357,14 @@ class LumenApplication:
                     len(self._audio_packet_times) - 1
                 ) / elapsed
 
-        if running and self.engine_mode == "rehearsal":
+        if running and self.engine_mode == "timing_lab":
+            state = "experimental"
+            label = "TIMING LAB — PHYSICAL PCM"
+            detail = (
+                "The isolated bass clock is reading line-in; its results do "
+                "not enter Live, Rehearsal, learning, or song memory."
+            )
+        elif running and self.engine_mode == "rehearsal":
             state = "simulated"
             label = "REHEARSAL — GENERATED CLOCK"
             detail = (
@@ -4236,7 +4446,9 @@ class LumenApplication:
             "frames_received": self._audio_frames,
             "bytes_received": self._audio_bytes,
             "packet_rate_hz": packet_rate_hz,
-            "expected_packet_rate_hz": 48_000 / 2_048,
+            "expected_packet_rate_hz": (
+                source_config.sample_rate / source_config.chunk_frames
+            ),
             "capture_queue_depth": self._audio_queue_depth,
             "capture_queue_max_depth": self._audio_queue_max_depth,
             "capture_queue_delay_ms": self._audio_queue_delay_ms,
@@ -4378,6 +4590,32 @@ class LumenApplication:
                 (
                     f"{self.rehearsal.routine.replace('_', ' ').title()} · "
                     f"{self.rehearsal.scope} · {round(self.rehearsal.bpm)} BPM"
+                ),
+            )
+            self._status_sequence += 1
+        return self.snapshot()
+
+    def patch_timing_lab(self, values: dict[str, Any]) -> dict[str, Any]:
+        """Patch only the ephemeral controls owned by Timing Lab."""
+
+        with self._lock:
+            candidate = replace(self.timing_lab)
+            candidate.patch(values)
+            running = bool(
+                self._thread is not None
+                and self._thread.is_alive()
+                and self.engine_mode == "timing_lab"
+            )
+            if running and candidate.output != self.timing_lab.output:
+                raise RuntimeError(
+                    "stop Timing Lab before changing preview/live output"
+                )
+            self.timing_lab = candidate
+            self._add_event(
+                "timing_lab",
+                (
+                    f"Movers: {candidate.movers_source.replace('_', ' ')} · "
+                    f"center: {candidate.center_source.replace('_', ' ')}"
                 ),
             )
             self._status_sequence += 1
@@ -8301,6 +8539,13 @@ class LumenApplication:
                 },
                 "motion_editor": self._motion_editor_snapshot(),
             },
+            "timing_lab": {
+                **asdict(self.timing_lab),
+                **deepcopy(self._timing_lab_diagnostics),
+                "running": bool(
+                    running and self.engine_mode == "timing_lab"
+                ),
+            },
             "audio": self._audio_snapshot_unlocked(running),
             "observation": observation,
             "analysis_history": list(self._analysis_history),
@@ -8498,6 +8743,8 @@ class LumenRequestHandler(BaseHTTPRequestHandler):
                 result = app.patch_controls(payload)
             elif path == "/api/rehearsal":
                 result = app.patch_rehearsal(payload)
+            elif path == "/api/timing-lab":
+                result = app.patch_timing_lab(payload)
             elif path == "/api/strobe-control":
                 result = app.patch_strobe_control(payload)
             elif path == "/api/motion-routine":
