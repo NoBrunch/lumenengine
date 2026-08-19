@@ -23,9 +23,12 @@ def main() -> int:
     parser.add_argument("wav", type=Path)
     parser.add_argument("--expected-bpm", type=float)
     parser.add_argument("--tolerance", type=float, default=0.04)
+    parser.add_argument("--maximum-tempo-switches", type=int, default=0)
     arguments = parser.parse_args()
     if arguments.tolerance <= 0.0:
         parser.error("--tolerance must be positive")
+    if arguments.maximum_tempo_switches < 0:
+        parser.error("--maximum-tempo-switches cannot be negative")
 
     with wave.open(str(arguments.wav), "rb") as source:
         if source.getsampwidth() != 2:
@@ -43,6 +46,8 @@ def main() -> int:
         predicted_events = 0
         bass_transients = 0
         broad_transients = 0
+        switch_events: list[dict[str, float | None]] = []
+        previous_switch_count = 0
         while True:
             pcm = source.readframes(chunk_frames)
             if not pcm:
@@ -68,6 +73,16 @@ def main() -> int:
             predicted_events += int(result.beat_event and result.predicted_beat)
             bass_transients += int(result.bass_transient)
             broad_transients += int(result.broadband_transient)
+            if result.tempo_switch_count > previous_switch_count:
+                switch_events.append({
+                    "timestamp_s": result.timestamp_s,
+                    "retained_bpm": result.bpm,
+                    "family_anchor_bpm": result.family_anchor_bpm,
+                    "raw_candidate_bpm": result.raw_candidate_bpm,
+                    "normalized_candidate_bpm": result.candidate_bpm,
+                    "bass_interval_bpm": result.bass_interval_bpm,
+                })
+                previous_switch_count = result.tempo_switch_count
 
     retained_bpm = statistics.median(bpms) if bpms else None
     report = {
@@ -88,10 +103,17 @@ def main() -> int:
         "rejected_candidate_median": (
             statistics.median(rejected) if rejected else None
         ),
+        "family_anchor_bpm": result.family_anchor_bpm,
+        "tempo_switch_count": result.tempo_switch_count,
+        "tempo_switch_events": switch_events,
+        "last_pulse_interval_s": result.last_pulse_interval_s,
+        "raw_candidate_bpm": result.raw_candidate_bpm,
+        "candidate_harmonic_factor": result.candidate_harmonic_factor,
+        "bass_interval_bpm": result.bass_interval_bpm,
         "internal_strobe_dmx": 0,
         "physical_output_opened": False,
     }
-    passed = True
+    passed = result.tempo_switch_count <= arguments.maximum_tempo_switches
     if arguments.expected_bpm is not None:
         error_ratio = (
             None
@@ -99,7 +121,7 @@ def main() -> int:
             else abs(retained_bpm - arguments.expected_bpm)
             / arguments.expected_bpm
         )
-        passed = bool(
+        passed = passed and bool(
             error_ratio is not None
             and error_ratio <= arguments.tolerance
         )
@@ -107,6 +129,8 @@ def main() -> int:
             "expected_bpm": arguments.expected_bpm,
             "tolerance": arguments.tolerance,
             "relative_error": error_ratio,
+            "maximum_tempo_switches": arguments.maximum_tempo_switches,
+            "tempo_switch_count": result.tempo_switch_count,
             "passed": passed,
         }
     print(json.dumps(report, indent=2, sort_keys=True))

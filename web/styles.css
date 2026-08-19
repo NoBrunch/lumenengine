@@ -2379,6 +2379,11 @@ input[type="range"]::-moz-range-thumb {
 
 .timing-start:disabled { opacity: .4; }
 
+.timing-reset-clock {
+  width: calc(100% - 24px);
+  margin: -4px 12px 12px;
+}
+
 .timing-invariant {
   display: grid;
   grid-template-columns: 1fr auto;

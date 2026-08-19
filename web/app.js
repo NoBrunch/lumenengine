@@ -936,8 +936,22 @@ function renderTimingLab(timing = {}) {
   setText("timing-clock-state", clockState.toUpperCase());
   setText("timing-bpm", analysis.bpm ? Number(analysis.bpm).toFixed(1) : "—");
   setText("timing-confidence", percent(analysis.confidence || 0));
-  setText("timing-candidate", analysis.candidate_bpm ? Number(analysis.candidate_bpm).toFixed(1) : "—");
-  setText("timing-rejected", analysis.rejected_candidate_bpm ? Number(analysis.rejected_candidate_bpm).toFixed(1) : "—");
+  const rawCandidate = Number(analysis.raw_candidate_bpm || 0);
+  const harmonicFactor = Number(analysis.candidate_harmonic_factor || 1);
+  setText(
+    "timing-candidate",
+    analysis.candidate_bpm
+      ? harmonicFactor !== 1 && rawCandidate
+        ? `${rawCandidate.toFixed(1)} ×${harmonicFactor.toFixed(1)} → ${Number(analysis.candidate_bpm).toFixed(1)}`
+        : Number(analysis.candidate_bpm).toFixed(1)
+      : "—",
+  );
+  setText(
+    "timing-rejected",
+    analysis.rejected_candidate_bpm
+      ? `${Number(analysis.rejected_candidate_bpm).toFixed(1)} · ${Number(analysis.alternate_evidence_s || 0).toFixed(1)} s`
+      : "—",
+  );
   setWidth("timing-phase-fill", analysis.beat_phase || 0);
   $("timing-beat-lamp")?.classList.toggle("active", Boolean(analysis.beat_event));
   setText(
@@ -945,8 +959,8 @@ function renderTimingLab(timing = {}) {
     clockState === "held"
       ? `Clock retained at ${analysis.bpm ? Number(analysis.bpm).toFixed(1) : "—"} BPM; predicted flashes are gated because no recent bass transient is present.`
       : clockState === "locked"
-        ? `${analysis.predicted_beat ? "Predicted grid beat" : "Physical bass transient"} · beat ${Number(analysis.beat_count || 0)} · last bass ${analysis.last_bass_age_s == null ? "—" : `${Number(analysis.last_bass_age_s).toFixed(2)} s`} ago.`
-        : "Collecting bass-only evidence. Physical transients can flash immediately while the retained tempo family is acquired.",
+        ? `Single retained grid · beat ${Number(analysis.beat_count || 0)} · pulse interval ${analysis.last_pulse_interval_s == null ? "—" : `${Number(analysis.last_pulse_interval_s).toFixed(3)} s`} · audio-grid disagreement ${analysis.phase_error_rms_ms == null ? "—" : `${Number(analysis.phase_error_rms_ms).toFixed(1)} ms RMS`} · ${Number(analysis.phase_correction_count || 0)} phase samples · ${Number(analysis.phase_rejection_count || 0)} metrical flips rejected.`
+        : "Collecting bass-only evidence. Lighting pulses remain gated until one stable tempo and phase grid has been proved.",
   );
   setText("timing-signal", `${Number(analysis.signal_dbfs ?? -120).toFixed(1)} dBFS`);
   setText("timing-bass-onset", percent(analysis.bass_onset || 0));
@@ -976,6 +990,7 @@ function renderTimingLab(timing = {}) {
   if ($("timing-output")) $("timing-output").disabled = running;
   if ($("timing-lab-start")) $("timing-lab-start").disabled = running;
   if ($("timing-lab-stop")) $("timing-lab-stop").disabled = !running;
+  if ($("timing-reset-clock")) $("timing-reset-clock").disabled = !running;
 }
 
 function renderGestureMovements(rehearsal = app.status?.rehearsal || {}) {
@@ -5806,6 +5821,14 @@ function installHandlers() {
   });
   $("timing-lab-start")?.addEventListener("click", startTimingLab);
   $("timing-lab-stop")?.addEventListener("click", stopEngine);
+  $("timing-reset-clock")?.addEventListener("click", async () => {
+    await patchTimingLab({ reset_clock: true });
+    toast(
+      "Timing clock reset",
+      "Timing Lab is acquiring the new track from physical audio.",
+      "success",
+    );
+  });
   [
     "timing-output",
     "timing-movers-source",

@@ -10,14 +10,17 @@ import unittest
 from unittest.mock import patch
 
 from lumen_engine.audio import AudioInputMetrics
+from lumen_engine.beat import BeatState
 from lumen_engine.config import load_rig
 from lumen_engine.control import LumenApplication
 from lumen_engine.dmx import VirtualDMXOutput
+from lumen_engine.models import MediaIdentity
 from lumen_engine.profiles import party_parrot_profile
 from lumen_engine.timing_lab import (
     TimingLabAnalysis,
     TimingLabAnalyzer,
     TimingLabControls,
+    RetainedBassClock,
     TimingLabRuntime,
 )
 
@@ -83,10 +86,50 @@ def _analysis(
         candidate_bpm=126.0,
         rejected_candidate_bpm=None,
         last_bass_age_s=0.0,
+        family_anchor_bpm=126.0,
+        alternate_candidate_bpm=None,
+        alternate_evidence_s=0.0,
+        tempo_switch_count=0,
+        last_pulse_interval_s=None,
+        raw_candidate_bpm=126.0,
+        candidate_harmonic_factor=1.0,
+        bass_interval_bpm=126.0,
+        phase_error_ms=0.0,
+        phase_error_rms_ms=0.0,
+        phase_correction_count=1,
+        rejected_phase_error_ms=None,
+        phase_rejection_count=0,
     )
 
 
 class TimingLabAnalyzerTests(unittest.TestCase):
+    def test_half_time_candidate_is_promoted_only_when_bass_intervals_support_it(
+        self,
+    ) -> None:
+        fast = TimingLabAnalyzer()
+        fast._bass_transient_times.extend(  # noqa: SLF001 - focused clock test
+            index * (60.0 / 155.0) for index in range(18)
+        )
+        candidate = BeatState(77.5, False, 0, 0.0, 0.8)
+        normalized, factor, interval_bpm = fast._normalize_candidate(  # noqa: SLF001
+            candidate, fast._bass_transient_times[-1]
+        )
+        self.assertAlmostEqual(normalized.bpm, 155.0)
+        self.assertEqual(factor, 2.0)
+        self.assertAlmostEqual(interval_bpm or 0.0, 155.0)
+
+        slow = TimingLabAnalyzer()
+        slow._bass_transient_times.extend(  # noqa: SLF001 - focused clock test
+            index * (60.0 / 72.0) for index in range(10)
+        )
+        normalized, factor, interval_bpm = slow._normalize_candidate(  # noqa: SLF001
+            BeatState(72.0, False, 0, 0.0, 0.8),
+            slow._bass_transient_times[-1],
+        )
+        self.assertAlmostEqual(normalized.bpm, 72.0)
+        self.assertEqual(factor, 1.0)
+        self.assertAlmostEqual(interval_bpm or 0.0, 72.0)
+
     def test_bass_clock_acquires_and_holds_tempo_without_silent_prediction(
         self,
     ) -> None:
@@ -138,6 +181,188 @@ class TimingLabAnalyzerTests(unittest.TestCase):
             broad_events += int(result.broadband_transient)
         self.assertGreater(broad_events, 5)
         self.assertLess(bass_events, broad_events)
+
+
+class RetainedBassClockTests(unittest.TestCase):
+    @staticmethod
+    def _seed_clock(bpm: float) -> RetainedBassClock:
+        clock = RetainedBassClock()
+        clock.bpm = bpm
+        clock.confidence = 0.8
+        clock.origin_s = 0.0
+        clock._family_anchor_bpm = bpm  # noqa: SLF001 - seeded clock state
+        clock._last_emitted_grid = 0  # noqa: SLF001 - seeded clock state
+        clock._last_bass_s = 0.0  # noqa: SLF001 - seeded clock state
+        clock._last_retune_s = 0.0  # noqa: SLF001 - seeded clock state
+        return clock
+
+    def test_same_family_retune_preserves_phase_and_regular_pulses(self) -> None:
+        clock = self._seed_clock(132.0)
+        events: list[float] = []
+        for step in range(1, 2_001):
+            now = step / 100.0
+            target = 132.0 + 4.0 * now / 20.0
+            bass_transient = step % 43 == 0
+            state = clock.update(
+                BeatState(
+                    target,
+                    bass_transient,
+                    0,
+                    ((now * target / 60.0) % 4.0) / 4.0,
+                    0.85,
+                ),
+                bass_transient=bass_transient,
+                bass_level=0.1,
+                timestamp_s=now,
+            )
+            if state["beat_event"]:
+                events.append(now)
+        intervals = [right - left for left, right in zip(events, events[1:])]
+        self.assertGreater(len(events), 40)
+        self.assertLess(max(intervals), 0.65)
+        self.assertGreater(min(intervals), 0.31)
+        self.assertAlmostEqual(clock.bpm or 0.0, 136.0, delta=0.35)
+        self.assertEqual(state["tempo_switch_count"], 0)
+
+    def test_acquisition_transients_do_not_flash_without_a_proven_grid(self) -> None:
+        clock = RetainedBassClock()
+        events = 0
+        for step in range(1, 101):
+            now = step * 0.02
+            state = clock.update(
+                BeatState(124.0, step % 9 == 0, 0, 0.0, 0.8),
+                bass_transient=step % 9 == 0,
+                bass_level=0.1,
+                timestamp_s=now,
+            )
+            events += int(state["beat_event"])
+        self.assertEqual(events, 0)
+        self.assertIsNone(clock.bpm)
+
+    def test_syncopated_transients_cannot_fire_outside_the_audio_grid(
+        self,
+    ) -> None:
+        clock = self._seed_clock(120.0)
+        events: list[float] = []
+        for step in range(1, 3_001):
+            now = step / 100.0
+            # Deliberately jitter low-band transients around the half-second
+            # grid. They must never become another lighting trigger; the
+            # spectral PCM grid remains the single phase authority.
+            phase = now % 0.5
+            bass_transient = phase < 0.011 and int(now * 2) % 3 != 1
+            state = clock.update(
+                BeatState(
+                    120.0,
+                    bass_transient,
+                    0,
+                    (now * 2.0 % 4.0) / 4.0,
+                    0.85,
+                ),
+                bass_transient=bass_transient,
+                bass_level=0.08,
+                timestamp_s=now,
+            )
+            if state["beat_event"]:
+                events.append(now)
+        intervals = [right - left for left, right in zip(events, events[1:])]
+        self.assertGreaterEqual(len(events), 59)
+        self.assertLessEqual(max(intervals), 0.52)
+        self.assertGreaterEqual(min(intervals), 0.48)
+        self.assertGreater(state["phase_correction_count"], 0)
+        self.assertIsNotNone(state["phase_error_rms_ms"])
+
+    def test_half_beat_candidate_phase_flip_cannot_drag_the_output_grid(
+        self,
+    ) -> None:
+        clock = self._seed_clock(120.0)
+        events: list[float] = []
+        for step in range(1, 1_001):
+            now = step / 100.0
+            phase = (now * 2.0) % 4.0
+            if 3.0 <= now <= 5.0:
+                phase = (phase + 0.5) % 4.0
+            state = clock.update(
+                BeatState(120.0, False, 0, phase / 4.0, 0.85),
+                bass_transient=False,
+                bass_level=0.08,
+                timestamp_s=now,
+            )
+            if state["beat_event"]:
+                events.append(now)
+        intervals = [right - left for left, right in zip(events, events[1:])]
+        self.assertGreaterEqual(len(events), 19)
+        self.assertGreater(state["phase_rejection_count"], 0)
+        self.assertAlmostEqual(min(intervals), 0.5, delta=0.02)
+        self.assertAlmostEqual(max(intervals), 0.5, delta=0.02)
+
+    def test_stable_alternate_family_replaces_stale_track_clock(self) -> None:
+        clock = self._seed_clock(127.0)
+        state = {}
+        for step in range(1, 241):
+            now = step * 0.025
+            bass_transient = step % 22 == 0
+            state = clock.update(
+                BeatState(107.0, bass_transient, 0, 0.0, 0.82),
+                bass_transient=bass_transient,
+                bass_level=0.1,
+                timestamp_s=now,
+                allow_family_switch=True,
+            )
+        self.assertAlmostEqual(clock.bpm or 0.0, 107.0, delta=0.1)
+        self.assertAlmostEqual(state["family_anchor_bpm"], 107.0)
+        self.assertEqual(state["tempo_switch_count"], 1)
+        self.assertIsNone(state["rejected_candidate_bpm"])
+
+    def test_family_anchor_prevents_incremental_candidate_ratcheting(self) -> None:
+        clock = self._seed_clock(127.0)
+        for second, candidate_bpm in enumerate(
+            (128.0, 131.0, 134.0, 137.0, 140.0, 143.0),
+            start=1,
+        ):
+            for offset in range(5):
+                now = second + offset * 0.21
+                clock.update(
+                    BeatState(candidate_bpm, False, 0, 0.0, 0.8),
+                    bass_transient=False,
+                    bass_level=0.1,
+                    timestamp_s=now,
+                )
+        self.assertLess(clock.bpm or 0.0, 133.0)
+        self.assertAlmostEqual(clock._family_anchor_bpm or 0.0, 127.0)  # noqa: SLF001
+        self.assertEqual(clock._tempo_switch_count, 0)  # noqa: SLF001
+
+    def test_proven_grid_continues_on_bass_signal_but_stops_on_silence(self) -> None:
+        clock = self._seed_clock(120.0)
+        active_events = 0
+        for step in range(1, 301):
+            now = step / 100.0
+            state = clock.update(
+                BeatState(
+                    120.0, False, 0, (now * 2.0 % 4.0) / 4.0, 0.8
+                ),
+                bass_transient=False,
+                bass_level=0.08,
+                timestamp_s=now,
+            )
+            active_events += int(state["beat_event"])
+        self.assertGreaterEqual(active_events, 5)
+        self.assertEqual(state["clock_state"], "locked")
+
+        silent_events = 0
+        for step in range(301, 501):
+            now = step / 100.0
+            state = clock.update(
+                BeatState(
+                    120.0, False, 0, (now * 2.0 % 4.0) / 4.0, 0.8
+                ),
+                bass_transient=False,
+                bass_level=0.0,
+                timestamp_s=now,
+            )
+            silent_events += int(state["beat_event"])
+        self.assertEqual(silent_events, 0)
+        self.assertEqual(state["clock_state"], "held")
 
 
 class TimingLabRuntimeTests(unittest.TestCase):
@@ -216,6 +441,44 @@ class TimingLabRuntimeTests(unittest.TestCase):
 
 
 class TimingLabApplicationTests(unittest.TestCase):
+    def test_spotify_identity_resets_clock_without_persisting_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            application = LumenApplication(
+                rig_path=ROOT / "config" / "party-parrot-active.json",
+                memory_path=root / "memory.sqlite3",
+                settings_path=root / "settings.json",
+            )
+            try:
+                application.engine_mode = "timing_lab"
+                identities = [
+                    MediaIdentity("spotify", "first", "First"),
+                    MediaIdentity("spotify", "second", "Second"),
+                ]
+                with (
+                    patch.object(
+                        application,
+                        "_spotify_valid_token",
+                        return_value=object(),
+                    ),
+                    patch("lumen_engine.control.SpotifyWebAPI") as api,
+                    patch(
+                        "lumen_engine.control.media_identity_from_spotify",
+                        side_effect=identities,
+                    ),
+                    patch.object(application.memory, "remember_media") as persist,
+                ):
+                    api.return_value.playback.return_value = {}
+                    application._poll_timing_lab_identity()  # noqa: SLF001
+                    self.assertEqual(application._timing_lab_track_generation, 0)  # noqa: SLF001
+                    application._poll_timing_lab_identity()  # noqa: SLF001
+                    self.assertEqual(application._timing_lab_track_generation, 1)  # noqa: SLF001
+                    self.assertEqual(application._timing_lab_track_resets, 1)  # noqa: SLF001
+                    persist.assert_not_called()
+            finally:
+                application.engine_mode = "standby"
+                application.close()
+
     def test_default_mode_is_virtual_and_output_switch_is_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -250,6 +513,11 @@ class TimingLabApplicationTests(unittest.TestCase):
                         status["timing_lab"]["invariants"]["learning_writes"]
                     )
                     physical_open.assert_not_called()
+                    status = application.patch_timing_lab({"reset_clock": True})
+                    self.assertEqual(
+                        status["timing_lab"]["track_boundary"]["reset_count"],
+                        1,
+                    )
                     with self.assertRaises(RuntimeError):
                         application.patch_timing_lab({"output": "live"})
                     self.assertEqual(

@@ -119,6 +119,19 @@ class TimingLabAnalysis:
     candidate_bpm: float | None
     rejected_candidate_bpm: float | None
     last_bass_age_s: float | None
+    family_anchor_bpm: float | None
+    alternate_candidate_bpm: float | None
+    alternate_evidence_s: float
+    tempo_switch_count: int
+    last_pulse_interval_s: float | None
+    raw_candidate_bpm: float | None
+    candidate_harmonic_factor: float
+    bass_interval_bpm: float | None
+    phase_error_ms: float | None
+    phase_error_rms_ms: float | None
+    phase_correction_count: int
+    rejected_phase_error_ms: float | None
+    phase_rejection_count: int
 
     def snapshot(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -133,8 +146,10 @@ class RetainedBassClock:
     The underlying spectral estimator is intentionally fed only a bass-band
     onset envelope.  Once several seconds agree on one tempo, a contradictory
     half/double-time candidate is displayed but cannot silently replace the
-    clock.  Real on-grid bass transients correct phase; prediction fills an
-    occasional missed kick but is gated off when bass activity disappears.
+    clock. The spectral bass-onset tracker establishes phase; the retained
+    layer follows that one audio-derived grid instead of treating every
+    low-band transient as another clock. Prediction fills an occasional
+    missed kick but is gated off when bass activity disappears.
     """
 
     def __init__(self) -> None:
@@ -142,11 +157,23 @@ class RetainedBassClock:
         self.confidence = 0.0
         self.origin_s: float | None = None
         self.beat_count = 0
+        self._family_anchor_bpm: float | None = None
         self._candidate_history: deque[tuple[float, float, float]] = deque()
+        self._alternate_history: deque[tuple[float, float, float]] = deque()
         self._last_candidate_sample_s = float("-inf")
+        self._last_retune_s: float | None = None
         self._last_emitted_grid: int | None = None
+        self._last_pulse_s: float | None = None
+        self._last_pulse_interval_s: float | None = None
         self._last_bass_s: float | None = None
+        self._bass_signal_active = False
         self._rejected_candidate_bpm: float | None = None
+        self._tempo_switch_count = 0
+        self._last_phase_error_s: float | None = None
+        self._phase_errors_s: deque[float] = deque(maxlen=64)
+        self._phase_correction_count = 0
+        self._last_rejected_phase_error_s: float | None = None
+        self._phase_rejection_count = 0
 
     def update(
         self,
@@ -155,15 +182,19 @@ class RetainedBassClock:
         bass_transient: bool,
         bass_level: float,
         timestamp_s: float,
+        allow_family_switch: bool = False,
     ) -> dict[str, Any]:
         if bass_transient:
             self._last_bass_s = timestamp_s
+        self._bass_signal_active = bass_level >= 0.003
         candidate_bpm = candidate.bpm if candidate.bpm > 0.0 else None
-        if (
+        sampled_candidate = bool(
             candidate_bpm is not None
             and candidate.confidence >= 0.35
             and timestamp_s - self._last_candidate_sample_s >= 0.20
-        ):
+        )
+        if sampled_candidate:
+            assert candidate_bpm is not None
             self._candidate_history.append(
                 (timestamp_s, candidate_bpm, candidate.confidence)
             )
@@ -171,18 +202,22 @@ class RetainedBassClock:
         cutoff = timestamp_s - 7.0
         while self._candidate_history and self._candidate_history[0][0] < cutoff:
             self._candidate_history.popleft()
+        while self._alternate_history and self._alternate_history[0][0] < cutoff:
+            self._alternate_history.popleft()
 
         if self.bpm is None:
             self._try_acquire(timestamp_s, candidate)
-        elif candidate_bpm is not None:
-            difference = abs(candidate_bpm - self.bpm) / self.bpm
+        elif candidate_bpm is not None and candidate.confidence >= 0.35:
+            family_anchor = self._family_anchor_bpm or self.bpm
+            difference = abs(candidate_bpm - family_anchor) / family_anchor
             if difference <= 0.055:
-                # Retain the family but allow a very slow sub-percent trim.
-                self.bpm += clamp(
-                    candidate_bpm - self.bpm,
-                    -self.bpm * 0.002,
-                    self.bpm * 0.002,
-                )
+                # Stay inside the acquired family. Retuning preserves the
+                # continuous grid coordinate, so last-emitted indices never
+                # become stranded ahead of a newly scaled clock.
+                self._alternate_history.clear()
+                self._retune_preserving_phase(candidate_bpm, timestamp_s)
+                if sampled_candidate:
+                    self._follow_candidate_phase(candidate, timestamp_s)
                 self.confidence = clamp(
                     0.97 * self.confidence + 0.03 * candidate.confidence,
                     0.0,
@@ -191,17 +226,24 @@ class RetainedBassClock:
                 self._rejected_candidate_bpm = None
             else:
                 self._rejected_candidate_bpm = candidate_bpm
+                if sampled_candidate:
+                    self._alternate_history.append(
+                        (timestamp_s, candidate_bpm, candidate.confidence)
+                    )
+                if allow_family_switch:
+                    self._try_switch_family(timestamp_s, candidate)
 
         beat_event = False
         predicted = False
         phase = 0.0
         bar_phase = 0.0
         if self.bpm is None or self.origin_s is None:
-            if bass_transient:
-                beat_event = True
-                self.beat_count += 1
+            # Raw onset detections are evidence used to acquire a clock, not
+            # lighting commands.  Flashing them made the first few seconds of
+            # every recording look random and could emit several pulses per
+            # musical beat before a tempo had been proved.
             return self._state(
-                beat_event=beat_event,
+                beat_event=False,
                 predicted=False,
                 beat_phase=phase,
                 bar_phase=bar_phase,
@@ -211,36 +253,23 @@ class RetainedBassClock:
 
         period = 60.0 / self.bpm
         position = (timestamp_s - self.origin_s) / period
-        if bass_transient:
-            nearest = round(position)
-            error_s = timestamp_s - (self.origin_s + nearest * period)
-            if abs(error_s) <= period * 0.22:
-                self.origin_s += error_s * 0.28
-                if (
-                    self._last_emitted_grid is None
-                    or nearest > self._last_emitted_grid
-                ):
-                    beat_event = True
-                    self._last_emitted_grid = nearest
-                    self.beat_count += 1
-
-        position = (timestamp_s - self.origin_s) / period
         grid_index = math.floor(position + 0.04)
         bass_recent = (
             self._last_bass_s is not None
-            and timestamp_s - self._last_bass_s <= 0.80
-            and bass_level >= 0.001
+            and (
+                timestamp_s - self._last_bass_s <= 0.80
+                or self._bass_signal_active
+            )
         )
         if (
-            not beat_event
-            and bass_recent
+            bass_recent
             and self._last_emitted_grid is not None
             and grid_index > self._last_emitted_grid
         ):
-            beat_event = True
-            predicted = True
-            self._last_emitted_grid = grid_index
-            self.beat_count += 1
+            beat_event = self._record_pulse(timestamp_s, period)
+            if beat_event:
+                predicted = not bass_transient
+                self._last_emitted_grid = grid_index
         elif self._last_emitted_grid is None:
             self._last_emitted_grid = grid_index
 
@@ -271,6 +300,7 @@ class RetainedBassClock:
         if relative_spread > 0.025 or mean_confidence < 0.42:
             return
         self.bpm = median_bpm
+        self._family_anchor_bpm = median_bpm
         self.confidence = clamp(mean_confidence, 0.0, 1.0)
         # Bar-counted color changes begin only after a stable grid exists;
         # raw acquisition transients are not bars.
@@ -281,7 +311,99 @@ class RetainedBassClock:
         self._last_emitted_grid = math.floor(
             (now - self.origin_s) / period
         )
+        self._last_retune_s = now
         self._rejected_candidate_bpm = None
+
+    def _retune_preserving_phase(self, target_bpm: float, now: float) -> None:
+        if self.bpm is None or self.origin_s is None:
+            return
+        elapsed = (
+            0.20
+            if self._last_retune_s is None
+            else clamp(now - self._last_retune_s, 0.0, 1.0)
+        )
+        # At most 0.35% per second. The former 0.2%-per-audio-packet rule
+        # could compound by several percent in one second.
+        maximum_change = self.bpm * 0.0035 * elapsed
+        new_bpm = self.bpm + clamp(
+            target_bpm - self.bpm,
+            -maximum_change,
+            maximum_change,
+        )
+        old_period = 60.0 / self.bpm
+        grid_position = (now - self.origin_s) / old_period
+        new_period = 60.0 / new_bpm
+        self.origin_s = now - grid_position * new_period
+        self.bpm = new_bpm
+        self._last_retune_s = now
+
+    def _follow_candidate_phase(self, candidate: BeatState, now: float) -> None:
+        """Gently follow the one spectral PCM grid without a second PLL."""
+
+        if self.bpm is None or self.origin_s is None:
+            return
+        period = 60.0 / self.bpm
+        retained_phase = ((now - self.origin_s) / period) % 1.0
+        candidate_phase = (candidate.bar_progress * 4.0) % 1.0
+        phase_error_beats = (
+            (candidate_phase - retained_phase + 0.5) % 1.0 - 0.5
+        )
+        phase_error_s = phase_error_beats * period
+        if abs(phase_error_beats) > 0.16:
+            # Spectral grids can briefly choose the other half-beat in
+            # syncopated material.  The established PCM clock must not chase
+            # that metrical flip; a real recording boundary resets the clock.
+            self._last_rejected_phase_error_s = phase_error_s
+            self._phase_rejection_count += 1
+            return
+        self._last_phase_error_s = phase_error_s
+        self._phase_errors_s.append(phase_error_s)
+        self._phase_correction_count += 1
+        # At the 5 Hz candidate-sampling rate this settles quickly while one
+        # estimator update can move the output grid by at most about 12 ms.
+        correction_beats = clamp(phase_error_beats * 0.35, -0.025, 0.025)
+        self.origin_s -= correction_beats * period
+
+    def _try_switch_family(self, now: float, candidate: BeatState) -> None:
+        if len(self._alternate_history) < 20:
+            return
+        duration = self._alternate_history[-1][0] - self._alternate_history[0][0]
+        if duration < 4.5:
+            return
+        bpms = [item[1] for item in self._alternate_history]
+        median_bpm = statistics.median(bpms)
+        relative_spread = statistics.median(
+            abs(value - median_bpm) for value in bpms
+        ) / max(median_bpm, 1e-6)
+        mean_confidence = statistics.fmean(item[2] for item in self._alternate_history)
+        if relative_spread > 0.025 or mean_confidence < 0.42:
+            return
+        self.bpm = median_bpm
+        self._family_anchor_bpm = median_bpm
+        self.confidence = clamp(mean_confidence, 0.0, 1.0)
+        period = 60.0 / median_bpm
+        beat_phase = (candidate.bar_progress * 4.0) % 1.0
+        self.origin_s = now - beat_phase * period
+        self._last_emitted_grid = math.floor(
+            (now - self.origin_s) / period
+        )
+        self._last_retune_s = now
+        self._alternate_history.clear()
+        self._candidate_history.clear()
+        self._rejected_candidate_bpm = None
+        self._tempo_switch_count += 1
+
+    def _record_pulse(self, now: float, period: float) -> bool:
+        if (
+            self._last_pulse_s is not None
+            and now - self._last_pulse_s < period * 0.72
+        ):
+            return False
+        if self._last_pulse_s is not None:
+            self._last_pulse_interval_s = now - self._last_pulse_s
+        self._last_pulse_s = now
+        self.beat_count += 1
+        return True
 
     def _state(
         self,
@@ -300,7 +422,14 @@ class RetainedBassClock:
         )
         clock_state = "acquiring"
         if self.bpm is not None:
-            clock_state = "held" if bass_age is None or bass_age > 0.80 else "locked"
+            clock_state = (
+                "held"
+                if (
+                    bass_age is None
+                    or (bass_age > 0.80 and not self._bass_signal_active)
+                )
+                else "locked"
+            )
         return {
             "beat_event": beat_event,
             "predicted_beat": predicted,
@@ -313,6 +442,44 @@ class RetainedBassClock:
             "candidate_bpm": candidate_bpm,
             "rejected_candidate_bpm": self._rejected_candidate_bpm,
             "last_bass_age_s": bass_age,
+            "family_anchor_bpm": self._family_anchor_bpm,
+            "alternate_candidate_bpm": (
+                None
+                if not self._alternate_history
+                else statistics.median(
+                    item[1] for item in self._alternate_history
+                )
+            ),
+            "alternate_evidence_s": (
+                0.0
+                if len(self._alternate_history) < 2
+                else self._alternate_history[-1][0]
+                - self._alternate_history[0][0]
+            ),
+            "tempo_switch_count": self._tempo_switch_count,
+            "last_pulse_interval_s": self._last_pulse_interval_s,
+            "phase_error_ms": (
+                None
+                if self._last_phase_error_s is None
+                else self._last_phase_error_s * 1000.0
+            ),
+            "phase_error_rms_ms": (
+                None
+                if not self._phase_errors_s
+                else math.sqrt(
+                    statistics.fmean(
+                        error * error for error in self._phase_errors_s
+                    )
+                )
+                * 1000.0
+            ),
+            "phase_correction_count": self._phase_correction_count,
+            "rejected_phase_error_ms": (
+                None
+                if self._last_rejected_phase_error_s is None
+                else self._last_rejected_phase_error_s * 1000.0
+            ),
+            "phase_rejection_count": self._phase_rejection_count,
         }
 
 
@@ -336,6 +503,7 @@ class TimingLabAnalyzer:
         self._previous_broad_onset = 0.0
         self._last_bass_event_s = float("-inf")
         self._last_broad_event_s = float("-inf")
+        self._bass_transient_times: deque[float] = deque(maxlen=96)
         self._tempo = SpectralTempoTracker(sample_rate / 1024.0)
         self._clock = RetainedBassClock()
 
@@ -391,6 +559,7 @@ class TimingLabAnalyzer:
         )
         if bass_transient:
             self._last_bass_event_s = timestamp_s
+            self._bass_transient_times.append(timestamp_s)
         if broadband_transient:
             self._last_broad_event_s = timestamp_s
         self._bass_history.append(bass_onset)
@@ -398,9 +567,12 @@ class TimingLabAnalyzer:
         self._previous_bass_onset = bass_onset
         self._previous_broad_onset = broad_onset
 
-        candidate = self._tempo.update(
+        raw_candidate = self._tempo.update(
             clamp(bass_onset, 0.0, 1.0) if bass_share >= 0.12 else 0.0,
             timestamp_s,
+        )
+        candidate, harmonic_factor, interval_bpm = self._normalize_candidate(
+            raw_candidate, timestamp_s
         )
         clock = self._clock.update(
             candidate,
@@ -418,7 +590,88 @@ class TimingLabAnalyzer:
             broadband_threshold=broad_threshold,
             bass_transient=bass_transient,
             broadband_transient=broadband_transient,
+            raw_candidate_bpm=(
+                raw_candidate.bpm if raw_candidate.bpm > 0.0 else None
+            ),
+            candidate_harmonic_factor=harmonic_factor,
+            bass_interval_bpm=interval_bpm,
             **clock,
+        )
+
+    def _normalize_candidate(
+        self, candidate: BeatState, now: float
+    ) -> tuple[BeatState, float, float | None]:
+        """Resolve a half/double-time candidate from physical bass intervals."""
+
+        cutoff = now - 8.0
+        while self._bass_transient_times and self._bass_transient_times[0] < cutoff:
+            self._bass_transient_times.popleft()
+        intervals = [
+            right - left
+            for left, right in zip(
+                self._bass_transient_times,
+                list(self._bass_transient_times)[1:],
+            )
+            if 0.28 <= right - left <= 1.25
+        ]
+        if candidate.bpm <= 0.0 or len(intervals) < 6:
+            return candidate, 1.0, None
+        options = [
+            (factor, candidate.bpm * factor)
+            for factor in (0.5, 1.0, 2.0)
+            if 72.0 <= candidate.bpm * factor <= 200.0
+        ]
+
+        def support(option_bpm: float) -> float:
+            period = 60.0 / option_bpm
+            total = 0.0
+            for interval in intervals:
+                direct_error = abs(interval - period) / period
+                skipped_error = abs(interval - 2.0 * period) / (2.0 * period)
+                direct = max(0.0, 1.0 - direct_error / 0.14)
+                skipped = 0.35 * max(0.0, 1.0 - skipped_error / 0.10)
+                total += max(direct, skipped)
+            return total
+
+        scores = [(support(bpm), factor, bpm) for factor, bpm in options]
+        best_score, factor, normalized_bpm = max(
+            scores,
+            key=lambda item: (item[0], -abs(math.log2(item[1]))),
+        )
+        if best_score < max(3.0, len(intervals) * 0.34):
+            return candidate, 1.0, None
+        period = 60.0 / normalized_bpm
+        matching = [
+            interval
+            for interval in intervals
+            if min(
+                abs(interval - period) / period,
+                abs(interval - 2.0 * period) / (2.0 * period),
+            )
+            <= 0.14
+        ]
+        interval_bpm = (
+            None
+            if not matching
+            else 60.0 / statistics.median(
+                interval if interval <= period * 1.4 else interval / 2.0
+                for interval in matching
+            )
+        )
+        if factor == 1.0:
+            return candidate, factor, interval_bpm
+        raw_bar_position = candidate.bar_progress * 4.0
+        normalized_bar_progress = (raw_bar_position * factor) % 4.0 / 4.0
+        return (
+            BeatState(
+                bpm=normalized_bpm,
+                beat=candidate.beat,
+                beat_count=candidate.beat_count,
+                bar_progress=normalized_bar_progress,
+                confidence=candidate.confidence,
+            ),
+            factor,
+            interval_bpm,
         )
 
     @staticmethod

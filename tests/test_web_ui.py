@@ -17,6 +17,7 @@ class OperatorInterfaceContractTests(unittest.TestCase):
         self.assertIn('data-nav="timing"', html)
         self.assertIn('id="timing-lab-start"', html)
         self.assertIn('id="timing-output"', html)
+        self.assertIn('id="timing-reset-clock"', html)
         self.assertIn("FORCED TO DMX 0", html)
         self.assertIn('api("/api/timing-lab"', script)
         self.assertIn('body: { mode: "timing_lab" }', script)

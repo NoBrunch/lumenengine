@@ -521,6 +521,12 @@ class LumenApplication:
         self.rehearsal = RehearsalControls()
         self.timing_lab = TimingLabControls()
         self._timing_lab_runtime: TimingLabRuntime | None = None
+        self._timing_lab_identity_thread: threading.Thread | None = None
+        self._timing_lab_identity_last_poll = 0.0
+        self._timing_lab_track_key: str | None = None
+        self._timing_lab_track_generation = 0
+        self._timing_lab_track_resets = 0
+        self._timing_lab_identity_error: str | None = None
         self._timing_lab_diagnostics: dict[str, Any] = {
             "state": "standby",
             "invariants": TimingLabRuntime.invariants(),
@@ -2651,6 +2657,11 @@ class LumenApplication:
             self._last_trace_timestamp = None
             self._reset_audio_diagnostics()
             if normalized == "timing_lab":
+                self._timing_lab_identity_last_poll = 0.0
+                self._timing_lab_track_key = None
+                self._timing_lab_track_generation = 0
+                self._timing_lab_track_resets = 0
+                self._timing_lab_identity_error = None
                 self._timing_lab_diagnostics = {
                     "state": "starting",
                     "invariants": TimingLabRuntime.invariants(),
@@ -3040,6 +3051,8 @@ class LumenApplication:
         analyzer = TimingLabAnalyzer(
             capture_config.sample_rate, capture_config.channels
         )
+        with self._lock:
+            track_generation = self._timing_lab_track_generation
         expected_source_frame: int | None = None
         capture = AlsaLineIn(capture_config)
         with ContinuouslyDrainedAudio(
@@ -3053,6 +3066,16 @@ class LumenApplication:
                 ):
                     if self._stop.is_set():
                         break
+                    with self._lock:
+                        current_track_generation = (
+                            self._timing_lab_track_generation
+                        )
+                    if current_track_generation != track_generation:
+                        analyzer = TimingLabAnalyzer(
+                            capture_config.sample_rate,
+                            capture_config.channels,
+                        )
+                        track_generation = current_track_generation
                     if (
                         expected_source_frame is not None
                         and captured.source_start_frame
@@ -3098,6 +3121,13 @@ class LumenApplication:
                             * 1000.0
                         ),
                         "capture_queue_depth": buffered_capture.queue_depth,
+                        "track_boundary": {
+                            "identity_source": "spotify_identity_or_operator",
+                            "track_key": self._timing_lab_track_key,
+                            "reset_count": self._timing_lab_track_resets,
+                            "identity_error": self._timing_lab_identity_error,
+                            "metadata_drives_timing": False,
+                        },
                     }
                     self._accept_timing_lab_frame(
                         observation,
@@ -3159,6 +3189,7 @@ class LumenApplication:
             }
         with self._lock:
             self._status_sequence += 1
+        self._schedule_timing_lab_identity_poll()
 
     def _run_audio_loop(
         self,
@@ -4610,7 +4641,25 @@ class LumenApplication:
                 raise RuntimeError(
                     "stop Timing Lab before changing preview/live output"
                 )
+            reset_clock = bool(values.get("reset_clock"))
+            if reset_clock and not running:
+                raise RuntimeError(
+                    "start Timing Lab before resetting its track clock"
+                )
             self.timing_lab = candidate
+            if reset_clock:
+                self._timing_lab_track_generation += 1
+                self._timing_lab_track_resets += 1
+                self._timing_lab_diagnostics = {
+                    **self._timing_lab_diagnostics,
+                    "track_boundary": {
+                        "identity_source": "operator",
+                        "track_key": self._timing_lab_track_key,
+                        "reset_count": self._timing_lab_track_resets,
+                        "identity_error": self._timing_lab_identity_error,
+                        "metadata_drives_timing": False,
+                    },
+                }
             self._add_event(
                 "timing_lab",
                 (
@@ -4620,6 +4669,67 @@ class LumenApplication:
             )
             self._status_sequence += 1
         return self.snapshot()
+
+    def _schedule_timing_lab_identity_poll(self) -> None:
+        """Poll only track identity, never Spotify playback position."""
+
+        now = time.monotonic()
+        with self._lock:
+            thread = self._timing_lab_identity_thread
+            if self.engine_mode != "timing_lab":
+                return
+            if thread is not None and thread.is_alive():
+                return
+            if (
+                now - self._timing_lab_identity_last_poll
+                < SPOTIFY_MEDIA_POLL_INTERVAL_S
+            ):
+                return
+            if not self.spotify_client_id or not DEFAULT_SPOTIFY_TOKEN.exists():
+                return
+            self._timing_lab_identity_last_poll = now
+            thread = threading.Thread(
+                target=self._poll_timing_lab_identity,
+                name="lumen-timing-lab-track-identity",
+                daemon=True,
+            )
+            self._timing_lab_identity_thread = thread
+        thread.start()
+
+    def _poll_timing_lab_identity(self) -> None:
+        try:
+            payload = SpotifyWebAPI(self._spotify_valid_token).playback()
+            identity = media_identity_from_spotify(payload or {})
+            key = (
+                None
+                if identity is None or identity.provider_item_id is None
+                else (
+                    identity.provider_item_id
+                    if identity.provider_item_id.startswith(
+                        f"{identity.provider}:"
+                    )
+                    else f"{identity.provider}:{identity.provider_item_id}"
+                )
+            )
+            if key is None:
+                return
+            with self._lock:
+                if self.engine_mode != "timing_lab":
+                    return
+                previous = self._timing_lab_track_key
+                self._timing_lab_track_key = key
+                self._timing_lab_identity_error = None
+                if previous is not None and key != previous:
+                    self._timing_lab_track_generation += 1
+                    self._timing_lab_track_resets += 1
+                    self._add_event(
+                        "timing_lab",
+                        "New Spotify recording identified; experimental clock reset",
+                    )
+                    self._status_sequence += 1
+        except Exception as error:
+            with self._lock:
+                self._timing_lab_identity_error = str(error)
 
     def patch_strobe_control(self, values: dict[str, Any]) -> dict[str, Any]:
         lane = str(values.get("group", "")).strip().casefold()
